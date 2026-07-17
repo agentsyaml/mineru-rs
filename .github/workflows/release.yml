@@ -1,0 +1,470 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  identity:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Check out the published release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.14.6
+      - name: Install Rust 1.89.0
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Verify immutable release identity and package metadata
+        id: identity
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json
+          version="$(python .github/scripts/verify_release.py identity \
+            --metadata cargo-metadata.json --tag "$RELEASE_TAG" --ref "$EVENT_REF" --sha "$EVENT_SHA" \
+            --draft "$RELEASE_DRAFT" --prerelease "$RELEASE_PRERELEASE")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  crate-package:
+    needs: identity
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.14.6
+      - name: Install Rust 1.89.0
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Package and verify crate
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          cargo package -p mineru --locked
+          python .github/scripts/verify_release.py crate --directory target/package --version "$VERSION" --extract unpacked
+          cargo test --manifest-path "unpacked/mineru-$VERSION/Cargo.toml" --lib --locked
+      - name: Upload crate evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crate-package
+          path: target/package/mineru-${{ needs.identity.outputs.version }}.crate
+          if-no-files-found: error
+
+  python-wheel:
+    needs: identity
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            python: "3.9"
+            python-arch: x64
+            slot: manylinux-x64
+            deployment: ""
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            python: 3.14.6
+            python-arch: arm64
+            slot: manylinux-arm64
+            deployment: ""
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            python: 3.14.6
+            python-arch: x64
+            slot: macos-x64
+            deployment: "10.12"
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            python: 3.14.6
+            python-arch: arm64
+            slot: macos-arm64
+            deployment: "11.0"
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            python: 3.14.6
+            python-arch: x64
+            slot: windows-x64
+            deployment: ""
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment }}
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.python-arch }}
+      - name: Install Rust 1.89.0
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add ${{ matrix.target }}
+      - name: Build locked manylinux wheel
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: "2014"
+          rust-toolchain: 1.89.0
+          args: --release --locked --manifest-path bindings/python/Cargo.toml --out dist
+      - name: Build locked native wheel
+        if: runner.os != 'Linux'
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          rust-toolchain: 1.89.0
+          args: --release --locked --manifest-path bindings/python/Cargo.toml --out dist
+      - name: Verify, install, and smoke wheel
+        run: |
+          python .github/scripts/verify_release.py wheel --directory dist --version "${{ needs.identity.outputs.version }}" --count 1 --platform "${{ matrix.slot }}"
+          python -m pip install pytest==8.4.2
+          python -c "import glob,subprocess,sys; p=glob.glob('dist/*.whl'); assert len(p)==1; subprocess.check_call([sys.executable,'-m','pip','install','--force-reinstall',p[0]])"
+          python -c "import mineru_rs; assert mineru_rs.canonical_stem('a bad/pdf') == 'a_bad_pdf'; assert mineru_rs.validate_pdf_options(0, None, True, True, True)"
+          python -m pytest bindings/python/tests
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-wheel-${{ matrix.slot }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  node-native:
+    needs: identity
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            node-arch: x64
+            suffix: darwin-x64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            node-arch: arm64
+            suffix: darwin-arm64
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            node-arch: x64
+            suffix: linux-x64-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            node-arch: arm64
+            suffix: linux-arm64-gnu
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            node-arch: x64
+            suffix: win32-x64-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            node-arch: arm64
+            suffix: win32-arm64-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python for artifact checks
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.14.6
+      - name: Set up Node 24.18.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          architecture: ${{ matrix.node-arch }}
+      - name: Install npm 12.0.1 and dependencies
+        working-directory: bindings/node
+        run: npm install --global npm@12.0.1 && npm --version && npm ci
+      - name: Install Rust 1.89.0 target
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add ${{ matrix.target }}
+      - name: Build and smoke generated loader
+        working-directory: bindings/node
+        run: npx --no-install napi build --release --platform --target ${{ matrix.target }} -- --locked && npm test
+      - name: Verify checked-in generated loader
+        if: matrix.suffix == 'linux-x64-gnu'
+        working-directory: bindings/node
+        run: git diff --exit-code -- index.js index.d.ts
+      - name: Verify exact native artifact
+        run: python .github/scripts/verify_release.py node-native --directory bindings/node --suffix ${{ matrix.suffix }}
+      - name: Set up minimum Node runtime
+        if: matrix.suffix == 'linux-x64-gnu'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 18.20.8
+          architecture: x64
+      - name: Smoke Linux x64 under Node 18.20.8
+        if: matrix.suffix == 'linux-x64-gnu'
+        working-directory: bindings/node
+        run: node __test__/smoke.test.js
+      - name: Upload exact native artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-native-${{ matrix.suffix }}
+          path: bindings/node/mineru.${{ matrix.suffix }}.node
+          if-no-files-found: error
+
+  node-package:
+    needs: [identity, node-native]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.14.6
+      - name: Set up Node 24.18.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          architecture: x64
+      - name: Install npm 12.0.1 and dependencies
+        working-directory: bindings/node
+        run: npm install --global npm@12.0.1 && npm --version && npm ci
+      - name: Download all six native artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: node-native-*
+          path: bindings/node/artifacts
+          merge-multiple: true
+      - name: Generate and pack seven npm packages
+        working-directory: bindings/node
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          npx --no-install napi create-npm-dirs --npm-dir npm
+          npx --no-install napi artifacts --output-dir artifacts --npm-dir npm
+          node <<'NODE'
+          const fs = require('fs')
+          const suffixes = ['darwin-x64', 'darwin-arm64', 'linux-x64-gnu', 'linux-arm64-gnu', 'win32-x64-msvc', 'win32-arm64-msvc']
+          const version = process.env.VERSION
+          const root = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+          if (root.version !== version) throw new Error(`root version ${root.version} != ${version}`)
+          const optionalDependencies = {}
+          for (const suffix of suffixes) {
+            const manifest = JSON.parse(fs.readFileSync(`npm/${suffix}/package.json`, 'utf8'))
+            const name = `@alexsun-top/mineru-${suffix}`
+            if (manifest.name !== name || manifest.version !== version) {
+              throw new Error(`invalid ${suffix} manifest: ${manifest.name}@${manifest.version}`)
+            }
+            optionalDependencies[name] = version
+          }
+          root.optionalDependencies = optionalDependencies
+          fs.writeFileSync('package.json', `${JSON.stringify(root, null, 2)}\n`)
+          NODE
+          mkdir -p packed
+          for suffix in darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
+            npm pack "./npm/$suffix" --pack-destination packed --ignore-scripts
+          done
+          npm pack . --pack-destination packed --ignore-scripts
+          python ../../.github/scripts/verify_release.py npm --directory packed --version "$VERSION"
+      - name: Upload seven npm tarballs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-packages
+          path: bindings/node/packed/*.tgz
+          if-no-files-found: error
+
+  release-ready:
+    needs: [identity, crate-package, python-wheel, node-package]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.14.6
+      - name: Download crate evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: crate-package
+          path: release-artifacts/crate
+      - name: Download all five wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: python-wheel-*
+          path: release-artifacts/wheels
+          merge-multiple: true
+      - name: Download seven npm packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: node-packages
+          path: release-artifacts/npm
+      - name: Independently verify complete release set
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          python .github/scripts/verify_release.py crate --directory release-artifacts/crate --version "$VERSION"
+          python .github/scripts/verify_release.py wheel --directory release-artifacts/wheels --version "$VERSION" --count 5 --platform all
+          python .github/scripts/verify_release.py npm --directory release-artifacts/npm --version "$VERSION"
+      - name: Seal verified crate evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-crate
+          path: release-artifacts/crate/*.crate
+          if-no-files-found: error
+      - name: Seal verified wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-wheels
+          path: release-artifacts/wheels/*.whl
+          if-no-files-found: error
+      - name: Seal verified npm packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-npm
+          path: release-artifacts/npm/*.tgz
+          if-no-files-found: error
+
+  publish-crate:
+    needs: [identity, release-ready]
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.14.6
+      - name: Install Rust 1.89.0
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Download verified reference crate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-crate
+          path: ${{ runner.temp }}/reference-crate
+      - name: Recreate, compare, test, and dry-run before authentication
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          cargo package -p mineru --locked
+          python .github/scripts/verify_release.py crate --directory target/package --version "$VERSION" \
+            --compare "$RUNNER_TEMP/reference-crate/mineru-$VERSION.crate" --extract "$RUNNER_TEMP/publish-unpacked"
+          cargo test --manifest-path "$RUNNER_TEMP/publish-unpacked/mineru-$VERSION/Cargo.toml" --lib --locked
+          cargo publish -p mineru --locked --dry-run
+      - name: Acquire ephemeral crates.io credential
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish crate from immutable source
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: cargo publish -p mineru --locked
+
+  publish-python:
+    needs: [identity, release-ready]
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download exact verified wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-wheels
+          path: dist
+      - name: Publish five wheels once
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: dist
+
+  publish-node:
+    needs: [identity, release-ready]
+    runs-on: ubuntu-24.04
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node 24.18.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          architecture: x64
+      - name: Install npm 12.0.1
+        run: npm install --global npm@12.0.1 && npm --version
+      - name: Download exact verified npm packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-npm
+          path: packages
+      - name: Publish native packages, then root
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          publish_verified() {
+            package="$1"
+            tarball="$2"
+            local_integrity="$(node -e "const c=require('crypto'),f=require('fs');process.stdout.write('sha512-'+c.createHash('sha512').update(f.readFileSync(process.argv[1])).digest('base64'))" "$tarball")"
+            error_file="$RUNNER_TEMP/npm-view-error"
+            if remote_integrity="$(npm view "$package@$VERSION" dist.integrity 2>"$error_file")"; then
+              if [ "$remote_integrity" != "$local_integrity" ]; then
+                echo "integrity mismatch for $package@$VERSION" >&2
+                return 1
+              fi
+              echo "$package@$VERSION already published with matching integrity"
+            else
+              status="$?"
+              if node -e "const f=require('fs');process.exit(/(^|\\s)E404(\\s|$)/m.test(f.readFileSync(process.argv[1],'utf8'))?0:1)" "$error_file"; then
+                npm publish "$tarball" --access public
+              else
+                node -e "const f=require('fs');process.stderr.write(f.readFileSync(process.argv[1]))" "$error_file"
+                return "$status"
+              fi
+            fi
+          }
+          for suffix in darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
+            publish_verified "@alexsun-top/mineru-$suffix" "packages/alexsun-top-mineru-$suffix-$VERSION.tgz"
+          done
+          publish_verified "@alexsun-top/mineru" "packages/alexsun-top-mineru-$VERSION.tgz"

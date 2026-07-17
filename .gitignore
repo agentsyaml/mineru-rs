@@ -1,0 +1,20 @@
+# Local agent working state
+.slim/
+.slim/deepwork/
+.ignore
+
+# Rust
+target/
+
+# Node.js
+node_modules/
+*.node
+npm/
+artifacts/
+packed/
+
+# Python
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]

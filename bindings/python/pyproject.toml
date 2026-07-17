@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.13,<2"]
+build-backend = "maturin"
+
+[project]
+name = "mineru-rs"
+dynamic = ["version"]
+description = "Native Python helpers for MinerU Rust"
+readme = "../../README.md"
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.9"
+
+[project.urls]
+Repository = "https://github.com/agentsyaml/mineru-rs"
+Issues = "https://github.com/agentsyaml/mineru-rs/issues"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+module-name = "mineru_rs"
+features = ["pyo3/extension-module"]

@@ -1,0 +1,1 @@
+<|box_start|>1000 1000 0 0<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>txt_contd_tgt<|box_start|>1 2 3 4<|box_end|><|ref_start|>table<|ref_end|><|rotate_right|>table<|box_start|>5 6 7 8<|box_end|><|ref_start|>text<|ref_end|><|rotate_down|><|box_start|>1 1 2 2<|box_end|><|ref_start|>unknown<|ref_end|><|box_start|>1 1 2 2<|box_end|><|ref_start|>inline_formula<|ref_end|>

@@ -1,0 +1,16 @@
+[package]
+name = "mineru-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "mineru_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+mineru = { path = "../.." }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }

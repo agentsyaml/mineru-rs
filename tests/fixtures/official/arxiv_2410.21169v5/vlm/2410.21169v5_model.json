@@ -1,0 +1,477 @@
+[
+    [
+        {
+            "type": "page_number",
+            "bbox": [
+                0.178,
+                0.09,
+                0.188,
+                0.099
+            ],
+            "angle": 0,
+            "content": "4"
+        },
+        {
+            "type": "header",
+            "bbox": [
+                0.806,
+                0.088,
+                0.881,
+                0.101
+            ],
+            "angle": 0,
+            "content": "Zhang et al."
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.175,
+                0.122,
+                0.882,
+                0.171
+            ],
+            "angle": 0,
+            "content": "Under this formulation, document parsing aims to recover a structured representation that faithfully preserves the semantic content and layout structure of the original document, enabling downstream applications such as information extraction, document retrieval, and knowledge base construction.",
+            "merge_prev": false
+        },
+        {
+            "type": "title",
+            "bbox": [
+                0.176,
+                0.187,
+                0.445,
+                0.202
+            ],
+            "angle": 0,
+            "content": "2.2 Comparison with Existing Surveys"
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.175,
+                0.209,
+                0.882,
+                0.258
+            ],
+            "angle": 0,
+            "content": "Based on their scope and objectives, existing surveys related to document parsing can generally be categorized into two groups: surveys focusing on individual tasks and surveys covering document parsing systems. Table 1 summarizes representative existing surveys and highlights the differences between them and our survey.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.175,
+                0.269,
+                0.885,
+                0.579
+            ],
+            "angle": 0,
+            "content": "Surveys for Single Tasks. Early research on document analysis did not yet form a unified framework for document parsing. Instead, researchers typically focused on improving the performance of individual subtasks within the document processing pipeline. Consequently, many surveys from this line of work concentrate on a single component of document parsing. Among these tasks, Document Layout Analysis(DLA) has long been regarded as a fundamental preprocessing step for document understanding. For example,  \\( [10] \\)  provides a comprehensive overview of early rule-based and vision-based approaches for DLA. More recently,  \\( [59] \\)  further summarizes modern deep learning-based layout analysis methods, together with representative datasets and emerging challenges associated with increasingly diverse document layouts. A number of surveys focus on recognizing key document elements. For instance, several surveys review progress in text-related tasks, including Optical Character Recognition (OCR), post-OCR processing, and evaluation protocols  \\( [55, 84, 88] \\) . Other surveys investigate the recognition of specialized structured content such as mathematical expressions  \\( [1, 105] \\)  and table detection or table structure recognition  \\( [98, 106] \\) . Beyond text-centric elements, documents also contain rich visual information that conveys essential knowledge. Surveys such as  \\( [31, 49] \\)  review the automatic understanding of charts and graphical visualizations, covering tasks such as chart classification, data extraction, and chart question answering. In addition, chemical structures frequently appear in scientific documents, particularly in chemistry and biomedical literature. The survey by  \\( [81] \\)  summarizes recent techniques and datasets for Optical Chemical Structure Recognition (OCSR). Although these surveys provide valuable insights into specific document elements, they typically target isolated parsing or extraction tasks. As a result, their scope is limited when considering modern end-to-end document parsing systems, where multiple components must be jointly modeled and optimized.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.175,
+                0.589,
+                0.884,
+                0.827
+            ],
+            "angle": 0,
+            "content": "Surveys for Document Parsing Systems. Compared with task-specific surveys, only a limited number of works attempt to provide a more integrated overview of document understanding systems. Representative examples include the surveys by  \\( [115] \\)  and  \\( [4] \\) , which discuss several key stages such as OCR, layout analysis, and downstream information extraction. However, these works often treat document understanding primarily as a combination of layout analysis and OCR, resulting in taxonomies that are insufficient to cover the full document parsing workflow and the diverse set of structured elements present in modern documents. Furthermore, these surveys were conducted prior to the rapid emergence of multimodal foundation models. Consequently, they largely overlook recent advances in VLMs that enable end-to-end document parsing and structured generation from raw document inputs. To address these limitations, this survey makes the following contributions: (i) we propose a clear and comprehensive taxonomy that covers the entire document parsing workflow, including both textual and visual elements; (ii) we systematically review both traditional modular pipelines and recent VLM-based document parsing models, together with a detailed consolidation of benchmark datasets and evaluation protocols; and (iii) we present a structured analysis of the historical evolution of document parsing techniques, highlighting key challenges, emerging research trends, and open problems for future research.",
+            "merge_prev": false
+        },
+        {
+            "type": "footer",
+            "bbox": [
+                0.176,
+                0.831,
+                0.324,
+                0.842
+            ],
+            "angle": 0,
+            "content": "Manuscript submitted to ACM"
+        }
+    ],
+    [
+        {
+            "type": "header",
+            "bbox": [
+                0.116,
+                0.088,
+                0.714,
+                0.102
+            ],
+            "angle": 0,
+            "content": "Document Parsing Unveiled: Techniques, Challenges, and Prospects for Structured Data Extraction"
+        },
+        {
+            "type": "page_number",
+            "bbox": [
+                0.812,
+                0.089,
+                0.821,
+                0.099
+            ],
+            "angle": 0,
+            "content": "5"
+        },
+        {
+            "type": "table_caption",
+            "bbox": [
+                0.114,
+                0.119,
+                0.823,
+                0.158
+            ],
+            "angle": 0,
+            "content": "Table 1. Comparison of representative surveys related to document parsing. The table contrasts prior surveys in terms of task coverage across layout analysis, text, mathematical expressions, tables, and visual elements, and indicates whether each survey discusses VLM-based document parsing."
+        },
+        {
+            "type": "table",
+            "bbox": [
+                0.233,
+                0.171,
+                0.703,
+                0.402
+            ],
+            "angle": 0,
+            "content": "<table><tr><td rowspan=\"2\">Survey</td><td rowspan=\"2\">Year</td><td colspan=\"5\">Single Task Coverage</td><td rowspan=\"2\">VLM for DP</td></tr><tr><td>Layout Analysis</td><td>Text</td><td>Mathematical Expression</td><td>Table</td><td>Visual Elements</td></tr><tr><td colspan=\"8\">Survey for Single Task</td></tr><tr><td>[10]</td><td>2019</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[59]</td><td>2025</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[55]</td><td>2017</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[88]</td><td>2021</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[106]</td><td>2024</td><td>✗</td><td>✗</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td></tr><tr><td>[98]</td><td>2025</td><td>✗</td><td>✗</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td></tr><tr><td>[1]</td><td>2022</td><td>✗</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[31]</td><td>2023</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>Chart</td><td>✗</td></tr><tr><td>[81]</td><td>2022</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>Chemical</td><td>✗</td></tr><tr><td colspan=\"8\">Survey for Document Parsing System</td></tr><tr><td>[115]</td><td>2020</td><td>✓</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[4]</td><td>2022</td><td>✓</td><td>✓</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td></tr><tr><td>Ours</td><td>2026</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>Chart/Chemical</td><td>✓</td></tr></table>"
+        },
+        {
+            "type": "title",
+            "bbox": [
+                0.115,
+                0.406,
+                0.335,
+                0.42
+            ],
+            "angle": 0,
+            "content": "3 Methodology and Taxonomy"
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.114,
+                0.427,
+                0.823,
+                0.493
+            ],
+            "angle": 0,
+            "content": "To provide a rigorous and theoretically grounded overview of document parsing research, this section outlines the literature retrieval and selection protocol and introduces the principles underlying the proposed taxonomy. By combining systematic retrieval with conceptually grounded categorization, we aim to ensure both comprehensive empirical coverage and a coherent organization of the evolving document parsing landscape.",
+            "merge_prev": false
+        },
+        {
+            "type": "title",
+            "bbox": [
+                0.115,
+                0.51,
+                0.345,
+                0.525
+            ],
+            "angle": 0,
+            "content": "3.1 Literature Selection Strategy"
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.114,
+                0.531,
+                0.824,
+                0.564
+            ],
+            "angle": 0,
+            "content": "The literature review follows a structured process inspired by systematic survey methodologies in computing research, including identification, deduplication, title/abstract screening, and full-text eligibility assessment.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.114,
+                0.575,
+                0.824,
+                0.693
+            ],
+            "angle": 0,
+            "content": "3.1.1 Search Scope and Databases. To ensure broad coverage, we conducted searches across multiple academic databases and scholarly search engines. The primary sources include the ACM Digital Library \\( ^{1} \\) and IEEE Xplore \\( ^{2} \\), which index major venues in document analysis and computer vision. Web of Science \\( ^{3} \\) and Scopus \\( ^{4} \\) were used to capture interdisciplinary publications across information retrieval and machine learning. Google Scholar \\( ^{5} \\) complements these databases with broad cross-domain coverage, while arXiv \\( ^{6} \\) provides access to recent advances in multimodal and vision-language modeling. Together, these sources cover research across document analysis, computer vision, natural language processing, and multimodal learning.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.114,
+                0.705,
+                0.824,
+                0.755
+            ],
+            "angle": 0,
+            "content": "3.1.2 Search Keywords and Query Design. Search queries were constructed by combining keywords describing document parsing tasks with those reflecting modern modeling paradigms. To reduce bias toward specific approaches, retrieval was organized into two stages capturing both task-centric and technology-driven perspectives.",
+            "merge_prev": false
+        },
+        {
+            "type": "list",
+            "bbox": [
+                0.114,
+                0.575,
+                0.824,
+                0.755
+            ],
+            "angle": 0,
+            "content": null
+        },
+        {
+            "type": "page_footnote",
+            "bbox": [
+                0.116,
+                0.762,
+                0.213,
+                0.774
+            ],
+            "angle": 0,
+            "content": "\\( ^{1} \\) https://example.test/"
+        },
+        {
+            "type": "page_footnote",
+            "bbox": [
+                0.117,
+                0.774,
+                0.25,
+                0.784
+            ],
+            "angle": 0,
+            "content": "\\( ^{2} \\) https://example.test/"
+        },
+        {
+            "type": "page_footnote",
+            "bbox": [
+                0.117,
+                0.784,
+                0.275,
+                0.795
+            ],
+            "angle": 0,
+            "content": "\\( ^{3} \\) https://example.test/"
+        },
+        {
+            "type": "page_footnote",
+            "bbox": [
+                0.117,
+                0.795,
+                0.245,
+                0.805
+            ],
+            "angle": 0,
+            "content": "\\( ^{4} \\) https://example.test/"
+        },
+        {
+            "type": "page_footnote",
+            "bbox": [
+                0.117,
+                0.805,
+                0.251,
+                0.816
+            ],
+            "angle": 0,
+            "content": "\\( ^{5} \\) https://example.test/"
+        },
+        {
+            "type": "page_footnote",
+            "bbox": [
+                0.117,
+                0.816,
+                0.203,
+                0.827
+            ],
+            "angle": 0,
+            "content": "\\( ^{6} \\) https://example.test/"
+        },
+        {
+            "type": "list",
+            "bbox": [
+                0.116,
+                0.762,
+                0.275,
+                0.827
+            ],
+            "angle": 0,
+            "content": null
+        },
+        {
+            "type": "footer",
+            "bbox": [
+                0.675,
+                0.831,
+                0.822,
+                0.842
+            ],
+            "angle": 0,
+            "content": "Manuscript submitted to ACM"
+        }
+    ],
+    [
+        {
+            "type": "page_number",
+            "bbox": [
+                0.178,
+                0.09,
+                0.188,
+                0.099
+            ],
+            "angle": 0,
+            "content": "6"
+        },
+        {
+            "type": "header",
+            "bbox": [
+                0.806,
+                0.088,
+                0.88,
+                0.101
+            ],
+            "angle": 0,
+            "content": "Zhang et al."
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.174,
+                0.122,
+                0.882,
+                0.188
+            ],
+            "angle": 0,
+            "content": "The first stage focused on core document parsing tasks without restricting methodology, using terms such as “document parsing”, “layout analysis”, “OCR”, “table recognition”, “formula recognition”, “chart parsing”, “OCSR”, and “document structure extraction”. These keywords correspond to the fundamental sub-tasks of document parsing and ensure coverage of classical approaches, including rule-based and early machine learning methods.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.174,
+                0.191,
+                0.885,
+                0.274
+            ],
+            "angle": 0,
+            "content": "The second stage targeted recent advances driven by deep learning and multimodal modeling. Keywords such as “encoder-decoder document analysis”, “vision-language model for document parsing”, and “multimodal document understanding” were used to capture developments associated with Transformer architectures, large-scale pretraining, and the integration of vision and language models. These queries reflect the growing role of unified and generative modeling in document parsing.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.174,
+                0.278,
+                0.884,
+                0.326
+            ],
+            "angle": 0,
+            "content": "Across databases, queries were formulated using Boolean combinations of task and method terms. The search covers publications from approximately 1995 to 2026, capturing both early foundational work and recent deep learning-based advances.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.175,
+                0.339,
+                0.884,
+                0.405
+            ],
+            "angle": 0,
+            "content": "3.1.3 Screening and Eligibility. The retrieved records were filtered through a multi-stage process, as illustrated in Figure 2. The initial search yielded approximately  \\( N \\approx 860 \\)  records, which were reduced to  \\( N \\approx 680 \\)  after removing duplicates. Title and abstract screening excluded irrelevant studies and application-focused work without methodological contributions, leaving approximately  \\( N \\approx 429 \\)  papers.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.174,
+                0.408,
+                0.884,
+                0.492
+            ],
+            "angle": 0,
+            "content": "The remaining papers were assessed through full-text review to ensure methodological relevance and experimental rigor. Studies were included if they proposed or evaluated methods for document parsing or closely related sub-tasks and provided sufficient technical detail and empirical validation. Works lacking experimental evaluation, containing only high-level system descriptions, or focusing solely on application deployment were excluded. After this process, approximately N = 230 papers were retained for detailed analysis.",
+            "merge_prev": false
+        },
+        {
+            "type": "equation",
+            "bbox": [
+                0.254,
+                0.508,
+                0.804,
+                0.524
+            ],
+            "angle": 0,
+            "content": "\\[\n\\boxed {\\text {Identification} (N \\approx 8 6 0) \\to \\text {Screening} (N \\approx 6 8 0) \\to \\text {Eligibility} (N \\approx 4 2 9) \\to \\text {Final Inclusion} (N = 2 3 0)}\n\\]"
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.174,
+                0.54,
+                0.884,
+                0.567
+            ],
+            "angle": 0,
+            "content": "Fig. 2. Systematic literature screening workflow. The figure summarizes the staged reduction from initial retrieval to the final set of papers analyzed in this survey, including duplicate removal, abstract screening, and full-text eligibility assessment.",
+            "merge_prev": false
+        },
+        {
+            "type": "title",
+            "bbox": [
+                0.176,
+                0.602,
+                0.469,
+                0.616
+            ],
+            "angle": 0,
+            "content": "3.2 Principles for Taxonomy Construction"
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.174,
+                0.623,
+                0.884,
+                0.707
+            ],
+            "angle": 0,
+            "content": "Before introducing the taxonomy used in this survey, we first outline the principles guiding the classification of document parsing approaches. Document parsing spans a broad range of tasks, datasets, and modeling paradigms, which makes the design of a coherent taxonomy inherently challenging. An effective framework should therefore emphasize fundamental methodological distinctions while remaining sufficiently general to accommodate diverse problem settings.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.174,
+                0.71,
+                0.882,
+                0.759
+            ],
+            "angle": 0,
+            "content": "A primary consideration is architectural distinguishability. Methods should be grouped according to their underlying system organization rather than superficial implementation differences. In document parsing, architectural design largely determines how visual features, textual content, and structural representations are integrated.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.174,
+                0.762,
+                0.884,
+                0.828
+            ],
+            "angle": 0,
+            "content": "Task generality is another key factor. Document parsing comprises multiple sub-problems, including layout analysis, optical character recognition, table understanding, mathematical expression recognition, and chart interpretation. A meaningful taxonomy should therefore apply across these heterogeneous tasks rather than being tailored to a specific application.",
+            "merge_prev": false
+        },
+        {
+            "type": "text",
+            "bbox": [
+                0.176,
+                0.831,
+                0.322,
+                0.842
+            ],
+            "angle": 0,
+            "content": "Manuscript submitted to ACM",
+            "merge_prev": false
+        }
+    ]
+]

@@ -1,0 +1,20 @@
+[package]
+name = "mineru-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "mineru_node"
+crate-type = ["cdylib"]
+
+[dependencies]
+mineru = { path = "../.." }
+napi = "3.10"
+napi-derive = "3.5"
+
+[build-dependencies]
+napi-build = "2.3"

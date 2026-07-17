@@ -1,0 +1,3029 @@
+{
+    "pdf_info": [
+        {
+            "preproc_blocks": [
+                {
+                    "bbox": [
+                        107,
+                        96,
+                        539,
+                        135
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                96,
+                                539,
+                                135
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        96,
+                                        539,
+                                        135
+                                    ],
+                                    "type": "text",
+                                    "content": "Under this formulation, document parsing aims to recover a structured representation that faithfully preserves the semantic content and layout structure of the original document, enabling downstream applications such as information extraction, document retrieval, and knowledge base construction."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 2,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        148,
+                        272,
+                        159
+                    ],
+                    "type": "title",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                148,
+                                272,
+                                159
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        148,
+                                        272,
+                                        159
+                                    ],
+                                    "type": "text",
+                                    "content": "2.2 Comparison with Existing Surveys"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 3
+                },
+                {
+                    "bbox": [
+                        107,
+                        165,
+                        539,
+                        204
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                165,
+                                539,
+                                204
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        165,
+                                        539,
+                                        204
+                                    ],
+                                    "type": "text",
+                                    "content": "Based on their scope and objectives, existing surveys related to document parsing can generally be categorized into two groups: surveys focusing on individual tasks and surveys covering document parsing systems. Table 1 summarizes representative existing surveys and highlights the differences between them and our survey."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 4,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        213,
+                        541,
+                        458
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                213,
+                                541,
+                                458
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "Surveys for Single Tasks. Early research on document analysis did not yet form a unified framework for document parsing. Instead, researchers typically focused on improving the performance of individual subtasks within the document processing pipeline. Consequently, many surveys from this line of work concentrate on a single component of document parsing. Among these tasks, Document Layout Analysis(DLA) has long been regarded as a fundamental preprocessing step for document understanding. For example,  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[10]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  provides a comprehensive overview of early rule-based and vision-based approaches for DLA. More recently,  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[59]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  further summarizes modern deep learning-based layout analysis methods, together with representative datasets and emerging challenges associated with increasingly diverse document layouts. A number of surveys focus on recognizing key document elements. For instance, several surveys review progress in text-related tasks, including Optical Character Recognition (OCR), post-OCR processing, and evaluation protocols  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[55, 84, 88]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": " . Other surveys investigate the recognition of specialized structured content such as mathematical expressions  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[1, 105]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  and table detection or table structure recognition  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[98, 106]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": " . Beyond text-centric elements, documents also contain rich visual information that conveys essential knowledge. Surveys such as  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[31, 49]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  review the automatic understanding of charts and graphical visualizations, covering tasks such as chart classification, data extraction, and chart question answering. In addition, chemical structures frequently appear in scientific documents, particularly in chemistry and biomedical literature. The survey by  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[81]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  summarizes recent techniques and datasets for Optical Chemical Structure Recognition (OCSR). Although these surveys provide valuable insights into specific document elements, they typically target isolated parsing or extraction tasks. As a result, their scope is limited when considering modern end-to-end document parsing systems, where multiple components must be jointly modeled and optimized."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 5,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        466,
+                        541,
+                        654
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                466,
+                                541,
+                                654
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "text",
+                                    "content": "Surveys for Document Parsing Systems. Compared with task-specific surveys, only a limited number of works attempt to provide a more integrated overview of document understanding systems. Representative examples include the surveys by  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[115]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "text",
+                                    "content": "  and  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[4]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "text",
+                                    "content": " , which discuss several key stages such as OCR, layout analysis, and downstream information extraction. However, these works often treat document understanding primarily as a combination of layout analysis and OCR, resulting in taxonomies that are insufficient to cover the full document parsing workflow and the diverse set of structured elements present in modern documents. Furthermore, these surveys were conducted prior to the rapid emergence of multimodal foundation models. Consequently, they largely overlook recent advances in VLMs that enable end-to-end document parsing and structured generation from raw document inputs. To address these limitations, this survey makes the following contributions: (i) we propose a clear and comprehensive taxonomy that covers the entire document parsing workflow, including both textual and visual elements; (ii) we systematically review both traditional modular pipelines and recent VLM-based document parsing models, together with a detailed consolidation of benchmark datasets and evaluation protocols; and (iii) we present a structured analysis of the historical evolution of document parsing techniques, highlighting key challenges, emerging research trends, and open problems for future research."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 6,
+                    "merge_prev": false
+                }
+            ],
+            "discarded_blocks": [
+                {
+                    "bbox": [
+                        108,
+                        71,
+                        115,
+                        78
+                    ],
+                    "type": "page_number",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                108,
+                                71,
+                                115,
+                                78
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        108,
+                                        71,
+                                        115,
+                                        78
+                                    ],
+                                    "type": "text",
+                                    "content": "4"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 0
+                },
+                {
+                    "bbox": [
+                        493,
+                        69,
+                        539,
+                        79
+                    ],
+                    "type": "header",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                493,
+                                69,
+                                539,
+                                79
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        493,
+                                        69,
+                                        539,
+                                        79
+                                    ],
+                                    "type": "text",
+                                    "content": "Zhang et al."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 1
+                },
+                {
+                    "bbox": [
+                        107,
+                        658,
+                        198,
+                        666
+                    ],
+                    "type": "footer",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                658,
+                                198,
+                                666
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        658,
+                                        198,
+                                        666
+                                    ],
+                                    "type": "text",
+                                    "content": "Manuscript submitted to ACM"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 7
+                }
+            ],
+            "page_size": [
+                612,
+                792
+            ],
+            "page_idx": 0,
+            "para_blocks": [
+                {
+                    "bbox": [
+                        107,
+                        96,
+                        539,
+                        135
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                96,
+                                539,
+                                135
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        96,
+                                        539,
+                                        135
+                                    ],
+                                    "type": "text",
+                                    "content": "Under this formulation, document parsing aims to recover a structured representation that faithfully preserves the semantic content and layout structure of the original document, enabling downstream applications such as information extraction, document retrieval, and knowledge base construction."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 2,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        148,
+                        272,
+                        159
+                    ],
+                    "type": "title",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                148,
+                                272,
+                                159
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        148,
+                                        272,
+                                        159
+                                    ],
+                                    "type": "text",
+                                    "content": "2.2 Comparison with Existing Surveys"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 3
+                },
+                {
+                    "bbox": [
+                        107,
+                        165,
+                        539,
+                        204
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                165,
+                                539,
+                                204
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        165,
+                                        539,
+                                        204
+                                    ],
+                                    "type": "text",
+                                    "content": "Based on their scope and objectives, existing surveys related to document parsing can generally be categorized into two groups: surveys focusing on individual tasks and surveys covering document parsing systems. Table 1 summarizes representative existing surveys and highlights the differences between them and our survey."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 4,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        213,
+                        541,
+                        458
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                213,
+                                541,
+                                458
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "Surveys for Single Tasks. Early research on document analysis did not yet form a unified framework for document parsing. Instead, researchers typically focused on improving the performance of individual subtasks within the document processing pipeline. Consequently, many surveys from this line of work concentrate on a single component of document parsing. Among these tasks, Document Layout Analysis(DLA) has long been regarded as a fundamental preprocessing step for document understanding. For example,  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[10]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  provides a comprehensive overview of early rule-based and vision-based approaches for DLA. More recently,  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[59]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  further summarizes modern deep learning-based layout analysis methods, together with representative datasets and emerging challenges associated with increasingly diverse document layouts. A number of surveys focus on recognizing key document elements. For instance, several surveys review progress in text-related tasks, including Optical Character Recognition (OCR), post-OCR processing, and evaluation protocols  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[55, 84, 88]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": " . Other surveys investigate the recognition of specialized structured content such as mathematical expressions  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[1, 105]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  and table detection or table structure recognition  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[98, 106]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": " . Beyond text-centric elements, documents also contain rich visual information that conveys essential knowledge. Surveys such as  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[31, 49]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  review the automatic understanding of charts and graphical visualizations, covering tasks such as chart classification, data extraction, and chart question answering. In addition, chemical structures frequently appear in scientific documents, particularly in chemistry and biomedical literature. The survey by  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[81]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        213,
+                                        541,
+                                        458
+                                    ],
+                                    "type": "text",
+                                    "content": "  summarizes recent techniques and datasets for Optical Chemical Structure Recognition (OCSR). Although these surveys provide valuable insights into specific document elements, they typically target isolated parsing or extraction tasks. As a result, their scope is limited when considering modern end-to-end document parsing systems, where multiple components must be jointly modeled and optimized."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 5,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        466,
+                        541,
+                        654
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                466,
+                                541,
+                                654
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "text",
+                                    "content": "Surveys for Document Parsing Systems. Compared with task-specific surveys, only a limited number of works attempt to provide a more integrated overview of document understanding systems. Representative examples include the surveys by  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[115]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "text",
+                                    "content": "  and  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "[4]"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        466,
+                                        541,
+                                        654
+                                    ],
+                                    "type": "text",
+                                    "content": " , which discuss several key stages such as OCR, layout analysis, and downstream information extraction. However, these works often treat document understanding primarily as a combination of layout analysis and OCR, resulting in taxonomies that are insufficient to cover the full document parsing workflow and the diverse set of structured elements present in modern documents. Furthermore, these surveys were conducted prior to the rapid emergence of multimodal foundation models. Consequently, they largely overlook recent advances in VLMs that enable end-to-end document parsing and structured generation from raw document inputs. To address these limitations, this survey makes the following contributions: (i) we propose a clear and comprehensive taxonomy that covers the entire document parsing workflow, including both textual and visual elements; (ii) we systematically review both traditional modular pipelines and recent VLM-based document parsing models, together with a detailed consolidation of benchmark datasets and evaluation protocols; and (iii) we present a structured analysis of the historical evolution of document parsing techniques, highlighting key challenges, emerging research trends, and open problems for future research."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 6,
+                    "merge_prev": false
+                }
+            ]
+        },
+        {
+            "preproc_blocks": [
+                {
+                    "type": "table",
+                    "bbox": [
+                        142,
+                        135,
+                        430,
+                        318
+                    ],
+                    "blocks": [
+                        {
+                            "bbox": [
+                                69,
+                                94,
+                                503,
+                                125
+                            ],
+                            "type": "table_caption",
+                            "angle": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        94,
+                                        503,
+                                        125
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                69,
+                                                94,
+                                                503,
+                                                125
+                                            ],
+                                            "type": "text",
+                                            "content": "Table 1. Comparison of representative surveys related to document parsing. The table contrasts prior surveys in terms of task coverage across layout analysis, text, mathematical expressions, tables, and visual elements, and indicates whether each survey discusses VLM-based document parsing."
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 2
+                        },
+                        {
+                            "bbox": [
+                                142,
+                                135,
+                                430,
+                                318
+                            ],
+                            "type": "table_body",
+                            "angle": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        142,
+                                        135,
+                                        430,
+                                        318
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                142,
+                                                135,
+                                                430,
+                                                318
+                                            ],
+                                            "type": "table",
+                                            "html": "<table><tr><td rowspan=\"2\">Survey</td><td rowspan=\"2\">Year</td><td colspan=\"5\">Single Task Coverage</td><td rowspan=\"2\">VLM for DP</td></tr><tr><td>Layout Analysis</td><td>Text</td><td>Mathematical Expression</td><td>Table</td><td>Visual Elements</td></tr><tr><td colspan=\"8\">Survey for Single Task</td></tr><tr><td>[10]</td><td>2019</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[59]</td><td>2025</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[55]</td><td>2017</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[88]</td><td>2021</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[106]</td><td>2024</td><td>✗</td><td>✗</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td></tr><tr><td>[98]</td><td>2025</td><td>✗</td><td>✗</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td></tr><tr><td>[1]</td><td>2022</td><td>✗</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[31]</td><td>2023</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>Chart</td><td>✗</td></tr><tr><td>[81]</td><td>2022</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>Chemical</td><td>✗</td></tr><tr><td colspan=\"8\">Survey for Document Parsing System</td></tr><tr><td>[115]</td><td>2020</td><td>✓</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[4]</td><td>2022</td><td>✓</td><td>✓</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td></tr><tr><td>Ours</td><td>2026</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>Chart/Chemical</td><td>✓</td></tr></table>",
+                                            "image_path": "c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg"
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 3
+                        }
+                    ],
+                    "index": 3
+                },
+                {
+                    "bbox": [
+                        70,
+                        321,
+                        205,
+                        332
+                    ],
+                    "type": "title",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                70,
+                                321,
+                                205,
+                                332
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        70,
+                                        321,
+                                        205,
+                                        332
+                                    ],
+                                    "type": "text",
+                                    "content": "3 Methodology and Taxonomy"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 4
+                },
+                {
+                    "bbox": [
+                        69,
+                        338,
+                        503,
+                        390
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                69,
+                                338,
+                                503,
+                                390
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        338,
+                                        503,
+                                        390
+                                    ],
+                                    "type": "text",
+                                    "content": "To provide a rigorous and theoretically grounded overview of document parsing research, this section outlines the literature retrieval and selection protocol and introduces the principles underlying the proposed taxonomy. By combining systematic retrieval with conceptually grounded categorization, we aim to ensure both comprehensive empirical coverage and a coherent organization of the evolving document parsing landscape."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 5,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        70,
+                        403,
+                        211,
+                        415
+                    ],
+                    "type": "title",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                70,
+                                403,
+                                211,
+                                415
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        70,
+                                        403,
+                                        211,
+                                        415
+                                    ],
+                                    "type": "text",
+                                    "content": "3.1 Literature Selection Strategy"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 6
+                },
+                {
+                    "bbox": [
+                        69,
+                        420,
+                        504,
+                        446
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                69,
+                                420,
+                                504,
+                                446
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        420,
+                                        504,
+                                        446
+                                    ],
+                                    "type": "text",
+                                    "content": "The literature review follows a structured process inspired by systematic survey methodologies in computing research, including identification, deduplication, title/abstract screening, and full-text eligibility assessment."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 7,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        69,
+                        455,
+                        504,
+                        597
+                    ],
+                    "type": "list",
+                    "angle": 0,
+                    "index": 10,
+                    "blocks": [
+                        {
+                            "bbox": [
+                                69,
+                                455,
+                                504,
+                                548
+                            ],
+                            "type": "text",
+                            "angle": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        455,
+                                        504,
+                                        548
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": "3.1.1 Search Scope and Databases. To ensure broad coverage, we conducted searches across multiple academic databases and scholarly search engines. The primary sources include the ACM Digital Library "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{1}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " and IEEE Xplore "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{2}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": ", which index major venues in document analysis and computer vision. Web of Science "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{3}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " and Scopus "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{4}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " were used to capture interdisciplinary publications across information retrieval and machine learning. Google Scholar "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{5}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " complements these databases with broad cross-domain coverage, while arXiv "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{6}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " provides access to recent advances in multimodal and vision-language modeling. Together, these sources cover research across document analysis, computer vision, natural language processing, and multimodal learning."
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 8,
+                            "merge_prev": false
+                        },
+                        {
+                            "bbox": [
+                                69,
+                                558,
+                                504,
+                                597
+                            ],
+                            "type": "text",
+                            "angle": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        558,
+                                        504,
+                                        597
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                69,
+                                                558,
+                                                504,
+                                                597
+                                            ],
+                                            "type": "text",
+                                            "content": "3.1.2 Search Keywords and Query Design. Search queries were constructed by combining keywords describing document parsing tasks with those reflecting modern modeling paradigms. To reduce bias toward specific approaches, retrieval was organized into two stages capturing both task-centric and technology-driven perspectives."
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 9,
+                            "merge_prev": false
+                        }
+                    ],
+                    "sub_type": "text"
+                }
+            ],
+            "discarded_blocks": [
+                {
+                    "bbox": [
+                        70,
+                        69,
+                        436,
+                        80
+                    ],
+                    "type": "header",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                70,
+                                69,
+                                436,
+                                80
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        70,
+                                        69,
+                                        436,
+                                        80
+                                    ],
+                                    "type": "text",
+                                    "content": "Document Parsing Unveiled: Techniques, Challenges, and Prospects for Structured Data Extraction"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 0
+                },
+                {
+                    "bbox": [
+                        496,
+                        70,
+                        502,
+                        78
+                    ],
+                    "type": "page_number",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                496,
+                                70,
+                                502,
+                                78
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        496,
+                                        70,
+                                        502,
+                                        78
+                                    ],
+                                    "type": "text",
+                                    "content": "5"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 1
+                },
+                {
+                    "bbox": [
+                        70,
+                        603,
+                        130,
+                        613
+                    ],
+                    "type": "page_footnote",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                70,
+                                603,
+                                130,
+                                613
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        70,
+                                        603,
+                                        130,
+                                        613
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "^{1}"
+                                },
+                                {
+                                    "bbox": [
+                                        70,
+                                        603,
+                                        130,
+                                        613
+                                    ],
+                                    "type": "text",
+                                    "content": " https://example.test/"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 11
+                },
+                {
+                    "bbox": [
+                        71,
+                        613,
+                        153,
+                        620
+                    ],
+                    "type": "page_footnote",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                71,
+                                613,
+                                153,
+                                620
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        71,
+                                        613,
+                                        153,
+                                        620
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "^{2}"
+                                },
+                                {
+                                    "bbox": [
+                                        71,
+                                        613,
+                                        153,
+                                        620
+                                    ],
+                                    "type": "text",
+                                    "content": " https://example.test/"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 12
+                },
+                {
+                    "bbox": [
+                        71,
+                        620,
+                        168,
+                        629
+                    ],
+                    "type": "page_footnote",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                71,
+                                620,
+                                168,
+                                629
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        71,
+                                        620,
+                                        168,
+                                        629
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "^{3}"
+                                },
+                                {
+                                    "bbox": [
+                                        71,
+                                        620,
+                                        168,
+                                        629
+                                    ],
+                                    "type": "text",
+                                    "content": " https://example.test/"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 13
+                },
+                {
+                    "bbox": [
+                        71,
+                        629,
+                        149,
+                        637
+                    ],
+                    "type": "page_footnote",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                71,
+                                629,
+                                149,
+                                637
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        71,
+                                        629,
+                                        149,
+                                        637
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "^{4}"
+                                },
+                                {
+                                    "bbox": [
+                                        71,
+                                        629,
+                                        149,
+                                        637
+                                    ],
+                                    "type": "text",
+                                    "content": " https://example.test/"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 14
+                },
+                {
+                    "bbox": [
+                        71,
+                        637,
+                        153,
+                        646
+                    ],
+                    "type": "page_footnote",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                71,
+                                637,
+                                153,
+                                646
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        71,
+                                        637,
+                                        153,
+                                        646
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "^{5}"
+                                },
+                                {
+                                    "bbox": [
+                                        71,
+                                        637,
+                                        153,
+                                        646
+                                    ],
+                                    "type": "text",
+                                    "content": " https://example.test/"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 15
+                },
+                {
+                    "bbox": [
+                        71,
+                        646,
+                        124,
+                        654
+                    ],
+                    "type": "page_footnote",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                71,
+                                646,
+                                124,
+                                654
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        71,
+                                        646,
+                                        124,
+                                        654
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "^{6}"
+                                },
+                                {
+                                    "bbox": [
+                                        71,
+                                        646,
+                                        124,
+                                        654
+                                    ],
+                                    "type": "text",
+                                    "content": " https://example.test/"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 16
+                },
+                {
+                    "bbox": [
+                        413,
+                        658,
+                        503,
+                        666
+                    ],
+                    "type": "footer",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                413,
+                                658,
+                                503,
+                                666
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        413,
+                                        658,
+                                        503,
+                                        666
+                                    ],
+                                    "type": "text",
+                                    "content": "Manuscript submitted to ACM"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 18
+                }
+            ],
+            "page_size": [
+                612,
+                792
+            ],
+            "page_idx": 1,
+            "para_blocks": [
+                {
+                    "type": "table",
+                    "bbox": [
+                        142,
+                        135,
+                        430,
+                        318
+                    ],
+                    "blocks": [
+                        {
+                            "bbox": [
+                                69,
+                                94,
+                                503,
+                                125
+                            ],
+                            "type": "table_caption",
+                            "angle": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        94,
+                                        503,
+                                        125
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                69,
+                                                94,
+                                                503,
+                                                125
+                                            ],
+                                            "type": "text",
+                                            "content": "Table 1. Comparison of representative surveys related to document parsing. The table contrasts prior surveys in terms of task coverage across layout analysis, text, mathematical expressions, tables, and visual elements, and indicates whether each survey discusses VLM-based document parsing."
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 2
+                        },
+                        {
+                            "bbox": [
+                                142,
+                                135,
+                                430,
+                                318
+                            ],
+                            "type": "table_body",
+                            "angle": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        142,
+                                        135,
+                                        430,
+                                        318
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                142,
+                                                135,
+                                                430,
+                                                318
+                                            ],
+                                            "type": "table",
+                                            "html": "<table><tr><td rowspan=\"2\">Survey</td><td rowspan=\"2\">Year</td><td colspan=\"5\">Single Task Coverage</td><td rowspan=\"2\">VLM for DP</td></tr><tr><td>Layout Analysis</td><td>Text</td><td>Mathematical Expression</td><td>Table</td><td>Visual Elements</td></tr><tr><td colspan=\"8\">Survey for Single Task</td></tr><tr><td>[10]</td><td>2019</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[59]</td><td>2025</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[55]</td><td>2017</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[88]</td><td>2021</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[106]</td><td>2024</td><td>✗</td><td>✗</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td></tr><tr><td>[98]</td><td>2025</td><td>✗</td><td>✗</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td></tr><tr><td>[1]</td><td>2022</td><td>✗</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[31]</td><td>2023</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>Chart</td><td>✗</td></tr><tr><td>[81]</td><td>2022</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>Chemical</td><td>✗</td></tr><tr><td colspan=\"8\">Survey for Document Parsing System</td></tr><tr><td>[115]</td><td>2020</td><td>✓</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr><tr><td>[4]</td><td>2022</td><td>✓</td><td>✓</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td></tr><tr><td>Ours</td><td>2026</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>Chart/Chemical</td><td>✓</td></tr></table>",
+                                            "image_path": "c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg"
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 3
+                        }
+                    ],
+                    "index": 3
+                },
+                {
+                    "bbox": [
+                        70,
+                        321,
+                        205,
+                        332
+                    ],
+                    "type": "title",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                70,
+                                321,
+                                205,
+                                332
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        70,
+                                        321,
+                                        205,
+                                        332
+                                    ],
+                                    "type": "text",
+                                    "content": "3 Methodology and Taxonomy"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 4
+                },
+                {
+                    "bbox": [
+                        69,
+                        338,
+                        503,
+                        390
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                69,
+                                338,
+                                503,
+                                390
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        338,
+                                        503,
+                                        390
+                                    ],
+                                    "type": "text",
+                                    "content": "To provide a rigorous and theoretically grounded overview of document parsing research, this section outlines the literature retrieval and selection protocol and introduces the principles underlying the proposed taxonomy. By combining systematic retrieval with conceptually grounded categorization, we aim to ensure both comprehensive empirical coverage and a coherent organization of the evolving document parsing landscape."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 5,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        70,
+                        403,
+                        211,
+                        415
+                    ],
+                    "type": "title",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                70,
+                                403,
+                                211,
+                                415
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        70,
+                                        403,
+                                        211,
+                                        415
+                                    ],
+                                    "type": "text",
+                                    "content": "3.1 Literature Selection Strategy"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 6
+                },
+                {
+                    "bbox": [
+                        69,
+                        420,
+                        504,
+                        446
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                69,
+                                420,
+                                504,
+                                446
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        420,
+                                        504,
+                                        446
+                                    ],
+                                    "type": "text",
+                                    "content": "The literature review follows a structured process inspired by systematic survey methodologies in computing research, including identification, deduplication, title/abstract screening, and full-text eligibility assessment."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 7,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        69,
+                        455,
+                        504,
+                        597
+                    ],
+                    "type": "list",
+                    "angle": 0,
+                    "index": 10,
+                    "blocks": [
+                        {
+                            "bbox": [
+                                69,
+                                455,
+                                504,
+                                548
+                            ],
+                            "type": "text",
+                            "angle": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        455,
+                                        504,
+                                        548
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": "3.1.1 Search Scope and Databases. To ensure broad coverage, we conducted searches across multiple academic databases and scholarly search engines. The primary sources include the ACM Digital Library "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{1}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " and IEEE Xplore "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{2}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": ", which index major venues in document analysis and computer vision. Web of Science "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{3}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " and Scopus "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{4}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " were used to capture interdisciplinary publications across information retrieval and machine learning. Google Scholar "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{5}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " complements these databases with broad cross-domain coverage, while arXiv "
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "inline_equation",
+                                            "content": "^{6}"
+                                        },
+                                        {
+                                            "bbox": [
+                                                69,
+                                                455,
+                                                504,
+                                                548
+                                            ],
+                                            "type": "text",
+                                            "content": " provides access to recent advances in multimodal and vision-language modeling. Together, these sources cover research across document analysis, computer vision, natural language processing, and multimodal learning."
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 8,
+                            "merge_prev": false
+                        },
+                        {
+                            "bbox": [
+                                69,
+                                558,
+                                504,
+                                597
+                            ],
+                            "type": "text",
+                            "angle": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        558,
+                                        504,
+                                        597
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                69,
+                                                558,
+                                                504,
+                                                597
+                                            ],
+                                            "type": "text",
+                                            "content": "3.1.2 Search Keywords and Query Design. Search queries were constructed by combining keywords describing document parsing tasks with those reflecting modern modeling paradigms. To reduce bias toward specific approaches, retrieval was organized into two stages capturing both task-centric and technology-driven perspectives."
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 9,
+                            "merge_prev": false
+                        }
+                    ],
+                    "sub_type": "text"
+                }
+            ]
+        },
+        {
+            "preproc_blocks": [
+                {
+                    "bbox": [
+                        106,
+                        96,
+                        539,
+                        148
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                96,
+                                539,
+                                148
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        96,
+                                        539,
+                                        148
+                                    ],
+                                    "type": "text",
+                                    "content": "The first stage focused on core document parsing tasks without restricting methodology, using terms such as “document parsing”, “layout analysis”, “OCR”, “table recognition”, “formula recognition”, “chart parsing”, “OCSR”, and “document structure extraction”. These keywords correspond to the fundamental sub-tasks of document parsing and ensure coverage of classical approaches, including rule-based and early machine learning methods."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 2,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        151,
+                        541,
+                        217
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                151,
+                                541,
+                                217
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        151,
+                                        541,
+                                        217
+                                    ],
+                                    "type": "text",
+                                    "content": "The second stage targeted recent advances driven by deep learning and multimodal modeling. Keywords such as “encoder-decoder document analysis”, “vision-language model for document parsing”, and “multimodal document understanding” were used to capture developments associated with Transformer architectures, large-scale pretraining, and the integration of vision and language models. These queries reflect the growing role of unified and generative modeling in document parsing."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 3,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        220,
+                        541,
+                        258
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                220,
+                                541,
+                                258
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        220,
+                                        541,
+                                        258
+                                    ],
+                                    "type": "text",
+                                    "content": "Across databases, queries were formulated using Boolean combinations of task and method terms. The search covers publications from approximately 1995 to 2026, capturing both early foundational work and recent deep learning-based advances."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 4,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        268,
+                        541,
+                        320
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                268,
+                                541,
+                                320
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "text",
+                                    "content": "3.1.3 Screening and Eligibility. The retrieved records were filtered through a multi-stage process, as illustrated in Figure 2. The initial search yielded approximately  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "N \\approx 860"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "text",
+                                    "content": "  records, which were reduced to  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "N \\approx 680"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "text",
+                                    "content": "  after removing duplicates. Title and abstract screening excluded irrelevant studies and application-focused work without methodological contributions, leaving approximately  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "N \\approx 429"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "text",
+                                    "content": "  papers."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 5,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        323,
+                        541,
+                        389
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                323,
+                                541,
+                                389
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        323,
+                                        541,
+                                        389
+                                    ],
+                                    "type": "text",
+                                    "content": "The remaining papers were assessed through full-text review to ensure methodological relevance and experimental rigor. Studies were included if they proposed or evaluated methods for document parsing or closely related sub-tasks and provided sufficient technical detail and empirical validation. Works lacking experimental evaluation, containing only high-level system descriptions, or focusing solely on application deployment were excluded. After this process, approximately N = 230 papers were retained for detailed analysis."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 6,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        155,
+                        402,
+                        492,
+                        415
+                    ],
+                    "type": "interline_equation",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                155,
+                                402,
+                                492,
+                                415
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        155,
+                                        402,
+                                        492,
+                                        415
+                                    ],
+                                    "type": "interline_equation",
+                                    "content": "\\boxed {\\text {Identification} (N \\approx 8 6 0) \\to \\text {Screening} (N \\approx 6 8 0) \\to \\text {Eligibility} (N \\approx 4 2 9) \\to \\text {Final Inclusion} (N = 2 3 0)}",
+                                    "image_path": "cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 7
+                },
+                {
+                    "bbox": [
+                        106,
+                        427,
+                        541,
+                        449
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                427,
+                                541,
+                                449
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        427,
+                                        541,
+                                        449
+                                    ],
+                                    "type": "text",
+                                    "content": "Fig. 2. Systematic literature screening workflow. The figure summarizes the staged reduction from initial retrieval to the final set of papers analyzed in this survey, including duplicate removal, abstract screening, and full-text eligibility assessment."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 8,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        476,
+                        287,
+                        487
+                    ],
+                    "type": "title",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                476,
+                                287,
+                                487
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        476,
+                                        287,
+                                        487
+                                    ],
+                                    "type": "text",
+                                    "content": "3.2 Principles for Taxonomy Construction"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 9
+                },
+                {
+                    "bbox": [
+                        106,
+                        493,
+                        541,
+                        559
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                493,
+                                541,
+                                559
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        493,
+                                        541,
+                                        559
+                                    ],
+                                    "type": "text",
+                                    "content": "Before introducing the taxonomy used in this survey, we first outline the principles guiding the classification of document parsing approaches. Document parsing spans a broad range of tasks, datasets, and modeling paradigms, which makes the design of a coherent taxonomy inherently challenging. An effective framework should therefore emphasize fundamental methodological distinctions while remaining sufficiently general to accommodate diverse problem settings."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 10,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        562,
+                        539,
+                        601
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                562,
+                                539,
+                                601
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        562,
+                                        539,
+                                        601
+                                    ],
+                                    "type": "text",
+                                    "content": "A primary consideration is architectural distinguishability. Methods should be grouped according to their underlying system organization rather than superficial implementation differences. In document parsing, architectural design largely determines how visual features, textual content, and structural representations are integrated."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 11,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        603,
+                        541,
+                        655
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                603,
+                                541,
+                                655
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        603,
+                                        541,
+                                        655
+                                    ],
+                                    "type": "text",
+                                    "content": "Task generality is another key factor. Document parsing comprises multiple sub-problems, including layout analysis, optical character recognition, table understanding, mathematical expression recognition, and chart interpretation. A meaningful taxonomy should therefore apply across these heterogeneous tasks rather than being tailored to a specific application."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 12,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        658,
+                        197,
+                        666
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                658,
+                                197,
+                                666
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        658,
+                                        197,
+                                        666
+                                    ],
+                                    "type": "text",
+                                    "content": "Manuscript submitted to ACM"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 13,
+                    "merge_prev": false
+                }
+            ],
+            "discarded_blocks": [
+                {
+                    "bbox": [
+                        108,
+                        71,
+                        115,
+                        78
+                    ],
+                    "type": "page_number",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                108,
+                                71,
+                                115,
+                                78
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        108,
+                                        71,
+                                        115,
+                                        78
+                                    ],
+                                    "type": "text",
+                                    "content": "6"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 0
+                },
+                {
+                    "bbox": [
+                        493,
+                        69,
+                        538,
+                        79
+                    ],
+                    "type": "header",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                493,
+                                69,
+                                538,
+                                79
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        493,
+                                        69,
+                                        538,
+                                        79
+                                    ],
+                                    "type": "text",
+                                    "content": "Zhang et al."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 1
+                }
+            ],
+            "page_size": [
+                612,
+                792
+            ],
+            "page_idx": 2,
+            "para_blocks": [
+                {
+                    "bbox": [
+                        106,
+                        96,
+                        539,
+                        148
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                96,
+                                539,
+                                148
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        96,
+                                        539,
+                                        148
+                                    ],
+                                    "type": "text",
+                                    "content": "The first stage focused on core document parsing tasks without restricting methodology, using terms such as “document parsing”, “layout analysis”, “OCR”, “table recognition”, “formula recognition”, “chart parsing”, “OCSR”, and “document structure extraction”. These keywords correspond to the fundamental sub-tasks of document parsing and ensure coverage of classical approaches, including rule-based and early machine learning methods."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 2,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        151,
+                        541,
+                        217
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                151,
+                                541,
+                                217
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        151,
+                                        541,
+                                        217
+                                    ],
+                                    "type": "text",
+                                    "content": "The second stage targeted recent advances driven by deep learning and multimodal modeling. Keywords such as “encoder-decoder document analysis”, “vision-language model for document parsing”, and “multimodal document understanding” were used to capture developments associated with Transformer architectures, large-scale pretraining, and the integration of vision and language models. These queries reflect the growing role of unified and generative modeling in document parsing."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 3,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        220,
+                        541,
+                        258
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                220,
+                                541,
+                                258
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        220,
+                                        541,
+                                        258
+                                    ],
+                                    "type": "text",
+                                    "content": "Across databases, queries were formulated using Boolean combinations of task and method terms. The search covers publications from approximately 1995 to 2026, capturing both early foundational work and recent deep learning-based advances."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 4,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        268,
+                        541,
+                        320
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                268,
+                                541,
+                                320
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "text",
+                                    "content": "3.1.3 Screening and Eligibility. The retrieved records were filtered through a multi-stage process, as illustrated in Figure 2. The initial search yielded approximately  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "N \\approx 860"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "text",
+                                    "content": "  records, which were reduced to  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "N \\approx 680"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "text",
+                                    "content": "  after removing duplicates. Title and abstract screening excluded irrelevant studies and application-focused work without methodological contributions, leaving approximately  "
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "inline_equation",
+                                    "content": "N \\approx 429"
+                                },
+                                {
+                                    "bbox": [
+                                        107,
+                                        268,
+                                        541,
+                                        320
+                                    ],
+                                    "type": "text",
+                                    "content": "  papers."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 5,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        323,
+                        541,
+                        389
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                323,
+                                541,
+                                389
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        323,
+                                        541,
+                                        389
+                                    ],
+                                    "type": "text",
+                                    "content": "The remaining papers were assessed through full-text review to ensure methodological relevance and experimental rigor. Studies were included if they proposed or evaluated methods for document parsing or closely related sub-tasks and provided sufficient technical detail and empirical validation. Works lacking experimental evaluation, containing only high-level system descriptions, or focusing solely on application deployment were excluded. After this process, approximately N = 230 papers were retained for detailed analysis."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 6,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        155,
+                        402,
+                        492,
+                        415
+                    ],
+                    "type": "interline_equation",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                155,
+                                402,
+                                492,
+                                415
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        155,
+                                        402,
+                                        492,
+                                        415
+                                    ],
+                                    "type": "interline_equation",
+                                    "content": "\\boxed {\\text {Identification} (N \\approx 8 6 0) \\to \\text {Screening} (N \\approx 6 8 0) \\to \\text {Eligibility} (N \\approx 4 2 9) \\to \\text {Final Inclusion} (N = 2 3 0)}",
+                                    "image_path": "cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 7
+                },
+                {
+                    "bbox": [
+                        106,
+                        427,
+                        541,
+                        449
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                427,
+                                541,
+                                449
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        427,
+                                        541,
+                                        449
+                                    ],
+                                    "type": "text",
+                                    "content": "Fig. 2. Systematic literature screening workflow. The figure summarizes the staged reduction from initial retrieval to the final set of papers analyzed in this survey, including duplicate removal, abstract screening, and full-text eligibility assessment."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 8,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        476,
+                        287,
+                        487
+                    ],
+                    "type": "title",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                476,
+                                287,
+                                487
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        476,
+                                        287,
+                                        487
+                                    ],
+                                    "type": "text",
+                                    "content": "3.2 Principles for Taxonomy Construction"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 9
+                },
+                {
+                    "bbox": [
+                        106,
+                        493,
+                        541,
+                        559
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                493,
+                                541,
+                                559
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        493,
+                                        541,
+                                        559
+                                    ],
+                                    "type": "text",
+                                    "content": "Before introducing the taxonomy used in this survey, we first outline the principles guiding the classification of document parsing approaches. Document parsing spans a broad range of tasks, datasets, and modeling paradigms, which makes the design of a coherent taxonomy inherently challenging. An effective framework should therefore emphasize fundamental methodological distinctions while remaining sufficiently general to accommodate diverse problem settings."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 10,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        562,
+                        539,
+                        601
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                562,
+                                539,
+                                601
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        562,
+                                        539,
+                                        601
+                                    ],
+                                    "type": "text",
+                                    "content": "A primary consideration is architectural distinguishability. Methods should be grouped according to their underlying system organization rather than superficial implementation differences. In document parsing, architectural design largely determines how visual features, textual content, and structural representations are integrated."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 11,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        106,
+                        603,
+                        541,
+                        655
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                106,
+                                603,
+                                541,
+                                655
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        106,
+                                        603,
+                                        541,
+                                        655
+                                    ],
+                                    "type": "text",
+                                    "content": "Task generality is another key factor. Document parsing comprises multiple sub-problems, including layout analysis, optical character recognition, table understanding, mathematical expression recognition, and chart interpretation. A meaningful taxonomy should therefore apply across these heterogeneous tasks rather than being tailored to a specific application."
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 12,
+                    "merge_prev": false
+                },
+                {
+                    "bbox": [
+                        107,
+                        658,
+                        197,
+                        666
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                107,
+                                658,
+                                197,
+                                666
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        107,
+                                        658,
+                                        197,
+                                        666
+                                    ],
+                                    "type": "text",
+                                    "content": "Manuscript submitted to ACM"
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 13,
+                    "merge_prev": false
+                }
+            ]
+        }
+    ],
+    "_backend": "vlm",
+    "_version_name": "3.4.4"
+}

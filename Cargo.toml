@@ -1,0 +1,101 @@
+[package]
+name = "mineru"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Rust client, CLI, and API server for OpenAI-compatible MinerU document parsing"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/mineru"
+keywords = ["mineru", "document", "pdf", "vlm", "ocr"]
+categories = ["command-line-utilities", "api-bindings"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/**",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "docs/usage.md",
+    "docs/compatibility.md",
+    "tests/fixtures/**",
+]
+
+[[bin]]
+name = "mineru-vlm"
+path = "src/bin/mineru-vlm.rs"
+
+[[bin]]
+name = "mineru"
+path = "src/bin/mineru.rs"
+
+[[bin]]
+name = "mineru-vlm-api"
+path = "src/bin/mineru-vlm-api.rs"
+
+# Primary API server binary; `mineru-api.rs` is a thin `include!` alias of
+# `mineru-vlm-api.rs` so the same server source ships under both names.
+[[bin]]
+name = "mineru-api"
+path = "src/bin/mineru-api.rs"
+
+[[bin]]
+name = "mineru-office-convert"
+path = "src/bin/mineru-office-convert.rs"
+
+[features]
+default = []
+internal-mineru-api-client = ["dep:caseless", "dep:magika", "dep:ort"]
+
+[dependencies]
+base64 = "0.22"
+axum = { version = "0.8", features = ["multipart"] }
+bytes = { version = "1", features = ["serde"] }
+cap-std = "3"
+cap-primitives = "3"
+cap-fs-ext = "3"
+clap = { version = "4", features = ["derive"] }
+futures-core = "0.3"
+futures-util = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp", "tiff"] }
+httpdate = "1"
+md5 = "0.7"
+hayro = "=0.5.0"
+hayro-jpeg2000 = { version = "=0.2.0", default-features = false }
+html-escape = "0.2"
+lopdf = { version = "=0.42.0", default-features = false }
+office2pdf = "=0.6.1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tempfile = "3"
+time = { version = "=0.3.53", features = ["formatting"] }
+tiff = "=0.11.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "net", "process", "io-util", "signal", "io-std"] }
+url = { version = "2", features = ["serde"] }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+caseless = { version = "=0.2.2", optional = true }
+quick-xml = { version = "=0.41.0", default-features = false, features = ["encoding"] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+magika = { version = "=1.0.1", optional = true }
+ort = { version = "=2.0.0-rc.11", default-features = false, optional = true, features = ["std", "ndarray", "tracing", "download-binaries", "tls-native", "copy-dylibs"] }
+
+[dev-dependencies]
+
+# ponytail: workspace only hosts isolated native binding subcrates; root package
+# default features/dependencies stay empty and unchanged.
+[workspace]
+members = [".", "bindings/python", "bindings/node"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/agentsyaml/mineru-rs"
