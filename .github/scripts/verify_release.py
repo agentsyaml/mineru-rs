@@ -295,6 +295,10 @@ def zip_files(path: Path) -> dict[str, bytes]:
         return files
 
 
+def expected_wheel_tags(platform: str) -> set[str]:
+    return {f"cp39-abi3-{part}" for part in platform.split(".")}
+
+
 def validate_wheel(path: Path, version: str) -> str:
     match = re.fullmatch(rf"mineru_rs-{re.escape(version)}-cp39-abi3-(.+)\.whl", path.name)
     if not match:
@@ -312,7 +316,7 @@ def validate_wheel(path: Path, version: str) -> str:
         fail(f"wheel METADATA identity differs: {path.name}")
     wheel = email.parser.BytesParser().parsebytes(files[wheel_names[0]])
     tags = wheel.get_all("Tag", [])
-    if set(tags) != {f"cp39-abi3-{platform}"}:
+    if set(tags) != expected_wheel_tags(platform):
         fail(f"wheel tags are not exclusively cp39-abi3: {tags}")
     if not any("mineru_rs" in PurePosixPath(name).name and name.endswith((".so", ".pyd")) for name in files):
         fail(f"wheel has no mineru_rs native module: {path.name}")
@@ -404,6 +408,9 @@ def check_node_native(args: argparse.Namespace) -> None:
 def self_test(_: argparse.Namespace) -> None:
     assert TAG_RE.fullmatch("v0.1.0") and not TAG_RE.fullmatch("v01.1.0")
     assert repository_url({"url": "git+https://github.com/agentsyaml/mineru-rs.git"}) == REPOSITORY
+    assert expected_wheel_tags("manylinux_2_17_aarch64.manylinux2014_aarch64") == {
+        "cp39-abi3-manylinux_2_17_aarch64", "cp39-abi3-manylinux2014_aarch64",
+    }
     with tempfile.TemporaryDirectory() as tmp:
         package = Path(tmp) / "package"
         package.mkdir()
