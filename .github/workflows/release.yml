@@ -61,7 +61,7 @@ jobs:
         run: |
           cargo package -p mineru --locked
           python .github/scripts/verify_release.py crate --directory target/package --version "$VERSION" --extract unpacked
-          cargo test --manifest-path "unpacked/mineru-$VERSION/Cargo.toml" --lib --locked
+          cargo test --manifest-path "unpacked/mineru-$VERSION/Cargo.toml" --lib --locked -- --test-threads=1
       - name: Upload crate evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -380,7 +380,7 @@ jobs:
           cargo package -p mineru --locked
           python .github/scripts/verify_release.py crate --directory target/package --version "$VERSION" \
             --compare "$RUNNER_TEMP/reference-crate/mineru-$VERSION.crate" --extract "$RUNNER_TEMP/publish-unpacked"
-          cargo test --manifest-path "$RUNNER_TEMP/publish-unpacked/mineru-$VERSION/Cargo.toml" --lib --locked
+          cargo test --manifest-path "$RUNNER_TEMP/publish-unpacked/mineru-$VERSION/Cargo.toml" --lib --locked -- --test-threads=1
           cargo publish -p mineru --locked --dry-run
       - name: Acquire ephemeral crates.io credential
         id: crates-auth
