@@ -2582,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "mineru"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "mineru-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mineru",
  "napi",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "mineru-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mineru",
  "pyo3",
