@@ -20,7 +20,7 @@ pub(crate) fn build(mut pages: Vec<PageResult>) -> Document {
         }
         for index in 0..page.blocks.len() {
             if is_note(page.blocks[index].kind.as_str())
-                && let Some(target) = nearest_asset(&page.blocks, index)
+                && let Some(target) = nearest_compatible_asset(&page.blocks, index)
             {
                 page.blocks[index]
                     .metadata
@@ -88,20 +88,28 @@ fn is_note(kind: &str) -> bool {
     )
 }
 
-fn nearest_asset(blocks: &[crate::ContentBlock], index: usize) -> Option<usize> {
-    (0..blocks.len()).min_by_key(|&candidate| {
-        let kind = blocks[candidate].kind.as_str();
-        let is_target = matches!(
-            kind,
-            crate::BlockKind::IMAGE
-                | crate::BlockKind::IMAGE_BLOCK
-                | crate::BlockKind::TABLE
-                | crate::BlockKind::CHART
-                | crate::BlockKind::CODE
-                | crate::BlockKind::ALGORITHM
-        );
-        (!is_target, index.abs_diff(candidate), candidate > index)
-    })
+fn nearest_compatible_asset(blocks: &[crate::ContentBlock], index: usize) -> Option<usize> {
+    let note_kind = blocks[index].kind.as_str();
+    (0..blocks.len())
+        .filter(|&candidate| compatible_note_target(note_kind, blocks[candidate].kind.as_str()))
+        .min_by_key(|&candidate| (index.abs_diff(candidate), candidate > index))
+}
+
+fn compatible_note_target(note_kind: &str, target_kind: &str) -> bool {
+    match note_kind {
+        crate::BlockKind::IMAGE_CAPTION | crate::BlockKind::IMAGE_FOOTNOTE => matches!(
+            target_kind,
+            crate::BlockKind::IMAGE | crate::BlockKind::IMAGE_BLOCK | crate::BlockKind::CHART
+        ),
+        crate::BlockKind::TABLE_CAPTION | crate::BlockKind::TABLE_FOOTNOTE => {
+            target_kind == crate::BlockKind::TABLE
+        }
+        crate::BlockKind::CODE_CAPTION => matches!(
+            target_kind,
+            crate::BlockKind::CODE | crate::BlockKind::ALGORITHM
+        ),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -159,6 +167,65 @@ mod tests {
         assert!(document.middle_json["pdf_info"][0]["para_blocks"][1]["asset_path"].is_string());
         assert!(document.middle_json.to_string().contains("cell_merge"));
         assert!(!document.middle_json.to_string().contains("asset_md5"));
+    }
+
+    #[test]
+    fn note_skips_closer_incompatible_target() {
+        let document = build(vec![PageResult {
+            page_index: 0,
+            page_size: [1.0, 1.0],
+            blocks: vec![
+                block(BlockKind::IMAGE, ""),
+                block(BlockKind::TABLE, "table"),
+                block(BlockKind::IMAGE_CAPTION, "image caption"),
+            ],
+        }]);
+
+        assert_eq!(document.pages[0].blocks[2].metadata["attached_to"], 0);
+        assert_eq!(
+            document.pages[0].blocks[0].metadata["caption"],
+            "image caption"
+        );
+        assert!(!document.pages[0].blocks[1].metadata.contains_key("caption"));
+    }
+
+    #[test]
+    fn incompatible_and_page_footnotes_remain_unattached() {
+        let document = build(vec![
+            PageResult {
+                page_index: 0,
+                page_size: [1.0, 1.0],
+                blocks: vec![
+                    block(BlockKind::TABLE, "table"),
+                    block(BlockKind::IMAGE_CAPTION, "orphan caption"),
+                ],
+            },
+            PageResult {
+                page_index: 1,
+                page_size: [1.0, 1.0],
+                blocks: vec![
+                    block(BlockKind::IMAGE, ""),
+                    block(BlockKind::PAGE_FOOTNOTE, "page footnote"),
+                ],
+            },
+        ]);
+
+        assert!(
+            !document.pages[0].blocks[1]
+                .metadata
+                .contains_key("attached_to")
+        );
+        assert!(!document.pages[0].blocks[0].metadata.contains_key("caption"));
+        assert!(
+            !document.pages[1].blocks[1]
+                .metadata
+                .contains_key("attached_to")
+        );
+        assert!(
+            !document.pages[1].blocks[0]
+                .metadata
+                .contains_key("footnote")
+        );
     }
 
     #[test]

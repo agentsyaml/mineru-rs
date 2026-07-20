@@ -2,11 +2,9 @@ use crate::{error::sanitize_vlm_error_bytes, *};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
-use image::ImageReader;
 use reqwest::{Client, StatusCode, header::CONTENT_TYPE, redirect::Policy};
 use serde_json::{Value, json};
 use std::{
-    io::Cursor,
     net::{IpAddr, SocketAddr},
     sync::{
         Arc,
@@ -14,7 +12,7 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
-use tokio::{io::AsyncReadExt, net::lookup_host, sync::Semaphore};
+use tokio::{net::lookup_host, sync::Semaphore};
 use url::Url;
 
 /// Shared, monotonic byte allowance for one official document window.
@@ -375,12 +373,30 @@ impl VlmHttpClient {
     }
     fn url(&self, suffix: &str) -> VlmResult<Url> {
         let mut u = self.base.clone();
-        let prefix = if u.path().ends_with('/') && u.path() != "/" {
-            u.path().trim_end_matches('/')
-        } else {
-            ""
-        };
-        u.set_path(&format!("{prefix}/v1/{suffix}"));
+        let append_v1 = u
+            .path_segments()
+            .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+            != Some("v1");
+        let trailing_empty_segments = u
+            .path_segments()
+            .map(|segments| {
+                segments
+                    .rev()
+                    .take_while(|segment| segment.is_empty())
+                    .count()
+            })
+            .unwrap_or(0);
+        let mut segments = u
+            .path_segments_mut()
+            .map_err(|_| VlmError::InvalidConfig("server_url must be a base URL".into()))?;
+        for _ in 0..trailing_empty_segments {
+            segments.pop_if_empty();
+        }
+        if append_v1 {
+            segments.push("v1");
+        }
+        segments.extend(suffix.split('/').filter(|segment| !segment.is_empty()));
+        drop(segments);
         Ok(u)
     }
     fn headers(&self, mut r: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -485,52 +501,67 @@ impl VlmHttpClient {
                 images.push(image);
             }
         }
-        Ok(build_body(
-            &self.config,
-            &self.model,
-            prompt,
-            sampling,
-            priority,
-            streaming,
-            images,
-        ))
+        let config = self.config.clone();
+        let model = self.model.clone();
+        json_worker(None, "chat", move || {
+            Ok(build_body(
+                &config, &model, prompt, sampling, priority, streaming, images,
+            ))
+        })
+        .await
     }
     async fn image(&self, input: VlmImageInput) -> VlmResult<Option<(Vec<u8>, String)>> {
-        let (bytes, hint) = match input {
-            VlmImageInput::None => return Ok(None),
-            VlmImageInput::Path(p) => {
-                (read_image_file(p, self.config.max_image_bytes).await?, None)
+        match input {
+            VlmImageInput::RemoteUrl(url) => {
+                let bytes = self.remote(url).await?;
+                crate::vlm_image::admit_bytes(bytes, None, self.config.clone())
+                    .await
+                    .map(Some)
             }
-            VlmImageInput::Bytes { data, media_type } => {
-                if data.len() > self.config.max_image_bytes {
-                    return Err(limit(
-                        "image bytes",
-                        self.config.max_image_bytes,
-                        data.len(),
-                    ));
-                }
-                (data.to_vec(), media_type)
-            }
-            VlmImageInput::Base64 { data, media_type } => {
-                base64_fits(&data, self.config.max_image_bytes)?;
-                (
-                    STANDARD
-                        .decode(data)
-                        .map_err(|_| VlmError::InvalidImageInput("invalid base64".into()))?,
-                    media_type,
-                )
-            }
-            VlmImageInput::DataUrl(s) => data_url(&s, self.config.max_image_bytes)?,
-            VlmImageInput::RemoteUrl(u) => (self.remote(u).await?, None),
-        };
-        if bytes.len() > self.config.max_image_bytes {
-            return Err(limit(
-                "image bytes",
-                self.config.max_image_bytes,
-                bytes.len(),
-            ));
+            input => crate::vlm_image::admit_local(input, self.config.clone()).await,
         }
-        inspect_image(bytes, hint, &self.config).map(Some)
+    }
+
+    pub(crate) async fn decode_local_image(
+        &self,
+        input: VlmImageInput,
+    ) -> VlmResult<Option<image::DynamicImage>> {
+        crate::vlm_image::decode_local(input, self.config.clone()).await
+    }
+    pub(crate) async fn admit_local_image(
+        &self,
+        input: VlmImageInput,
+    ) -> VlmResult<Option<VlmImageInput>> {
+        Ok(crate::vlm_image::admit_local(input, self.config.clone())
+            .await?
+            .map(|(data, media_type)| VlmImageInput::Bytes {
+                data: data.into(),
+                media_type: Some(media_type),
+            }))
+    }
+    pub(crate) async fn decode_admitted_image(
+        &self,
+        input: VlmImageInput,
+    ) -> VlmResult<Option<image::DynamicImage>> {
+        match input {
+            VlmImageInput::None => Ok(None),
+            VlmImageInput::Bytes { data, .. } => tokio::task::spawn_blocking(move || {
+                image::load_from_memory(&data)
+                    .map(Some)
+                    .map_err(|_| VlmError::InvalidImageInput("invalid image".into()))
+            })
+            .await
+            .map_err(|_| VlmError::Transport {
+                operation: "image",
+                message: "image worker failed".into(),
+            })?,
+            _ => Err(VlmError::InvalidImageInput(
+                "internal image was not admitted".into(),
+            )),
+        }
+    }
+    pub(crate) fn max_decoded_pixels(&self) -> u64 {
+        self.config.max_decoded_pixels
     }
     async fn remote(&self, mut url: Url) -> VlmResult<Vec<u8>> {
         if !self.config.allow_remote_images {
@@ -908,29 +939,19 @@ fn official_body(config: Arc<VlmHttpConfig>, model: String, r: VlmRequest) -> Vl
     }
     let mut images = Vec::new();
     for image in inputs {
-        let (bytes, hint) = match image {
-            VlmImageInput::Bytes { data, media_type } => (data.to_vec(), media_type),
-            VlmImageInput::Base64 { data, media_type } => {
-                base64_fits(&data, config.max_image_bytes)?;
-                (
-                    STANDARD
-                        .decode(data)
-                        .map_err(|_| VlmError::InvalidImageInput("invalid base64".into()))?,
-                    media_type,
-                )
-            }
-            VlmImageInput::DataUrl(data) => data_url(&data, config.max_image_bytes)?,
+        match image {
             VlmImageInput::None => continue,
-            _ => {
+            VlmImageInput::Path(_) | VlmImageInput::RemoteUrl(_) => {
                 return Err(VlmError::InvalidImageInput(
                     "official request requires a local image".into(),
                 ));
             }
-        };
-        if bytes.len() > config.max_image_bytes {
-            return Err(limit("image bytes", config.max_image_bytes, bytes.len()));
+            image => {
+                if let Some(image) = crate::vlm_image::admit_local_blocking(image, &config)? {
+                    images.push(image);
+                }
+            }
         }
-        images.push(inspect_image(bytes, hint, &config)?);
     }
     Ok(build_body(
         &config, &model, prompt, sampling, priority, false, images,
@@ -978,40 +999,6 @@ async fn json_worker<T: Send + 'static>(
     })?
 }
 
-fn inspect_image(
-    bytes: Vec<u8>,
-    hint: Option<String>,
-    config: &VlmHttpConfig,
-) -> VlmResult<(Vec<u8>, String)> {
-    let reader = ImageReader::new(Cursor::new(&bytes))
-        .with_guessed_format()
-        .map_err(|_| VlmError::InvalidImageInput("unsupported image".into()))?;
-    let format = reader
-        .format()
-        .ok_or_else(|| VlmError::InvalidImageInput("unsupported image".into()))?;
-    let media =
-        mime(format).ok_or_else(|| VlmError::InvalidImageInput("unsupported image".into()))?;
-    if hint
-        .as_deref()
-        .is_some_and(|value| !value.eq_ignore_ascii_case(media))
-    {
-        return Err(VlmError::InvalidImageInput(
-            "image media type mismatch".into(),
-        ));
-    }
-    let (width, height) = reader
-        .into_dimensions()
-        .map_err(|_| VlmError::InvalidImageInput("invalid image".into()))?;
-    let pixels = width as u64 * height as u64;
-    if pixels > config.max_decoded_pixels {
-        return Err(VlmError::LimitExceeded {
-            resource: "image pixels",
-            limit: config.max_decoded_pixels,
-            actual: pixels,
-        });
-    }
-    Ok((bytes, media.into()))
-}
 fn protocol(op: &'static str, msg: &str) -> VlmError {
     VlmError::Protocol {
         operation: op,
@@ -1024,77 +1011,6 @@ fn limit(resource: &'static str, limit: usize, actual: usize) -> VlmError {
         limit: limit as u64,
         actual: actual as u64,
     }
-}
-fn mime(f: image::ImageFormat) -> Option<&'static str> {
-    match f {
-        image::ImageFormat::Jpeg => Some("image/jpeg"),
-        image::ImageFormat::Png => Some("image/png"),
-        image::ImageFormat::Gif => Some("image/gif"),
-        image::ImageFormat::Bmp => Some("image/bmp"),
-        image::ImageFormat::WebP => Some("image/webp"),
-        image::ImageFormat::Tiff => Some("image/tiff"),
-        _ => None,
-    }
-}
-fn base64_fits(data: &str, cap: usize) -> VlmResult<()> {
-    let estimate = (data
-        .len()
-        .checked_add(3)
-        .ok_or_else(|| limit("image bytes", cap, usize::MAX))?
-        / 4)
-    .checked_mul(3)
-    .ok_or_else(|| limit("image bytes", cap, usize::MAX))?;
-    if estimate > cap {
-        return Err(limit("image bytes", cap, estimate));
-    }
-    Ok(())
-}
-async fn read_image_file(path: std::path::PathBuf, cap: usize) -> VlmResult<Vec<u8>> {
-    let metadata = tokio::fs::metadata(&path).await.map_err(|_| VlmError::Io {
-        operation: "image",
-        message: "read failed".into(),
-    })?;
-    if metadata.len() > cap as u64 {
-        return Err(VlmError::LimitExceeded {
-            resource: "image bytes",
-            limit: cap as u64,
-            actual: metadata.len(),
-        });
-    }
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| VlmError::Io {
-            operation: "image",
-            message: "read failed".into(),
-        })?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(cap as u64 + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| VlmError::Io {
-            operation: "image",
-            message: "read failed".into(),
-        })?;
-    if bytes.len() > cap {
-        return Err(limit("image bytes", cap, bytes.len()));
-    }
-    Ok(bytes)
-}
-fn data_url(s: &str, cap: usize) -> VlmResult<(Vec<u8>, Option<String>)> {
-    let (m, d) = s
-        .strip_prefix("data:")
-        .and_then(|x| x.split_once(','))
-        .ok_or_else(|| VlmError::InvalidImageInput("invalid data URL".into()))?;
-    let h = m
-        .strip_suffix(";base64")
-        .ok_or_else(|| VlmError::InvalidImageInput("data URL must be base64".into()))?;
-    base64_fits(d, cap)?;
-    Ok((
-        STANDARD
-            .decode(d)
-            .map_err(|_| VlmError::InvalidImageInput("invalid data URL".into()))?,
-        Some(h.into()),
-    ))
 }
 async fn remote_addrs(u: &Url, allow_private: bool) -> VlmResult<Vec<SocketAddr>> {
     if !matches!(u.scheme(), "http" | "https") || !u.username().is_empty() || u.password().is_some()
@@ -1210,8 +1126,9 @@ async fn read_limited(
     }
     let mut out = Vec::new();
     while let Some(c) = r.chunk().await.map_err(|e| transport("response", &e))? {
-        if out.len() + c.len() > cap {
-            return Err(limit(resource, cap, out.len() + c.len()));
+        let actual = out.len().saturating_add(c.len());
+        if actual > cap {
+            return Err(limit(resource, cap, actual));
         }
         out.extend_from_slice(&c)
     }
@@ -1329,12 +1246,81 @@ fn sse_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_body, global, json_worker, model_candidates};
-    use crate::{SamplingParams, VlmError, VlmHttpConfig};
+    use super::{VlmHttpClient, build_body, global, json_worker, model_candidates};
+    use crate::{SamplingParams, VlmError, VlmHttpConfig, VlmImageInput, vlm_image::admit_local};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use image::{DynamicImage, ImageFormat};
+    use reqwest::Client;
     use std::{
+        io::Cursor,
         net::{IpAddr, Ipv4Addr},
+        sync::Arc,
         time::Duration,
     };
+    use url::Url;
+
+    #[test]
+    fn vlm_urls_preserve_base_paths_and_normalize_v1() {
+        for (base, expected) in [
+            ("https://example.com", "https://example.com/v1/models"),
+            ("https://example.com/", "https://example.com/v1/models"),
+            (
+                "https://example.com/proxy",
+                "https://example.com/proxy/v1/models",
+            ),
+            (
+                "https://example.com/proxy/",
+                "https://example.com/proxy/v1/models",
+            ),
+            (
+                "https://example.com/proxy//",
+                "https://example.com/proxy/v1/models",
+            ),
+            (
+                "https://example.com/proxy////",
+                "https://example.com/proxy/v1/models",
+            ),
+            ("https://example.com/v1", "https://example.com/v1/models"),
+            ("https://example.com/v1/", "https://example.com/v1/models"),
+            ("https://example.com/v1//", "https://example.com/v1/models"),
+            (
+                "https://example.com/proxy/v1",
+                "https://example.com/proxy/v1/models",
+            ),
+            (
+                "https://example.com/proxy/v1/",
+                "https://example.com/proxy/v1/models",
+            ),
+            (
+                "https://example.com/v10",
+                "https://example.com/v10/v1/models",
+            ),
+        ] {
+            let client = VlmHttpClient {
+                config: Arc::new(VlmHttpConfig::default()),
+                http: Client::new(),
+                base: Url::parse(base).unwrap(),
+                model: String::new(),
+            };
+            assert_eq!(client.url("models").unwrap().as_str(), expected, "{base}");
+        }
+    }
+
+    #[test]
+    fn vlm_urls_preserve_encoded_prefix_authority_and_query() {
+        let client = VlmHttpClient {
+            config: Arc::new(VlmHttpConfig::default()),
+            http: Client::new(),
+            base: Url::parse("https://user:pass@example.com:8443/proxy%2Ftenant?token=a%2Fb")
+                .unwrap(),
+            model: String::new(),
+        };
+
+        assert_eq!(
+            client.url("chat/completions").unwrap().as_str(),
+            "https://user:pass@example.com:8443/proxy%2Ftenant/v1/chat/completions?token=a%2Fb"
+        );
+    }
 
     #[test]
     fn remote_classifier_rejects_special_ranges() {
@@ -1420,6 +1406,115 @@ mod tests {
             Err(VlmError::Timeout {
                 operation: "official PDF"
             })
+        ));
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        DynamicImage::new_rgb8(width, height)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[tokio::test]
+    async fn local_image_admission_rejects_oversized_path_and_encoded_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized.png");
+        std::fs::write(&path, [0_u8; 5]).unwrap();
+        let config = Arc::new(VlmHttpConfig {
+            max_image_bytes: 4,
+            ..Default::default()
+        });
+        assert!(matches!(
+            admit_local(VlmImageInput::Path(path), config.clone()).await,
+            Err(VlmError::LimitExceeded {
+                resource: "image bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            admit_local(
+                VlmImageInput::Base64 {
+                    data: "A".repeat(9),
+                    media_type: None,
+                },
+                config,
+            )
+            .await,
+            Err(VlmError::LimitExceeded {
+                resource: "image bytes",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_image_admission_enforces_pixels_and_keeps_valid_bytes() {
+        let bytes = png(2, 3);
+        let config = Arc::new(VlmHttpConfig {
+            max_image_bytes: bytes.len(),
+            max_decoded_pixels: 5,
+            ..Default::default()
+        });
+        assert!(matches!(
+            admit_local(
+                VlmImageInput::DataUrl(format!(
+                    "data:image/png;base64,{}",
+                    STANDARD.encode(&bytes)
+                )),
+                config,
+            )
+            .await,
+            Err(VlmError::LimitExceeded {
+                resource: "image pixels",
+                limit: 5,
+                actual: 6,
+            })
+        ));
+
+        let admitted = admit_local(
+            VlmImageInput::Bytes {
+                data: bytes.clone().into(),
+                media_type: Some("image/png".into()),
+            },
+            Arc::new(VlmHttpConfig {
+                max_image_bytes: bytes.len(),
+                max_decoded_pixels: 6,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(admitted, (bytes, "image/png".into()));
+    }
+
+    #[tokio::test]
+    async fn data_url_rejects_media_mismatch_and_huge_header() {
+        let bytes = png(1, 1);
+        let config = Arc::new(VlmHttpConfig::default());
+        assert!(matches!(
+            admit_local(
+                VlmImageInput::DataUrl(format!(
+                    "data:image/jpeg;base64,{}",
+                    STANDARD.encode(&bytes)
+                )),
+                config.clone(),
+            )
+            .await,
+            Err(VlmError::InvalidImageInput(message)) if message == "image media type mismatch"
+        ));
+        assert!(matches!(
+            admit_local(
+                VlmImageInput::DataUrl(format!(
+                    "data:image/png{};base64,AA==",
+                    "x".repeat(1_000_000)
+                )),
+                config,
+            )
+            .await,
+            Err(VlmError::InvalidImageInput(message)) if message == "unsupported image media type"
         ));
     }
 }

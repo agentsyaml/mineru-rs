@@ -126,18 +126,28 @@ pub(crate) fn plan_tasks(
         let target = bins
             .iter()
             .enumerate()
-            .filter(|(_, b)| b.total_pages + doc.effective_pages <= window)
+            .filter(|(_, b)| {
+                b.total_pages
+                    .checked_add(doc.effective_pages)
+                    .is_some_and(|total| total <= window)
+            })
             .min_by_key(|(i, b)| (b.total_pages, *i))
             .map(|(i, _)| i);
-        if let Some(i) = target {
-            bins[i].total_pages += doc.effective_pages;
-            bins[i].documents.push(doc);
-        } else {
-            bins.push(PlannedTask {
+        match target.and_then(|i| {
+            bins[i]
+                .total_pages
+                .checked_add(doc.effective_pages)
+                .map(|total| (i, total))
+        }) {
+            Some((i, total)) => {
+                bins[i].total_pages = total;
+                bins[i].documents.push(doc);
+            }
+            None => bins.push(PlannedTask {
                 index: 0,
                 total_pages: doc.effective_pages,
                 documents: vec![doc],
-            });
+            }),
         }
     }
     for (index, task) in bins.iter_mut().enumerate() {
@@ -245,5 +255,16 @@ mod tests {
         assert!(plan_tasks(Backend::Pipeline, &[d(0, 0)], 64).is_err());
         assert_eq!(effective_concurrency(3, 2, 9), Ok(2));
         assert!(effective_concurrency(1, 1, 0).is_err());
+    }
+    #[test]
+    fn pipeline_planning_overflow_starts_a_new_bin() {
+        let plan = plan_tasks(Backend::Pipeline, &[d(0, usize::MAX), d(1, 1)], usize::MAX).unwrap();
+
+        assert_eq!(
+            plan.iter()
+                .map(|task| (task.index, task.total_pages))
+                .collect::<Vec<_>>(),
+            vec![(1, usize::MAX), (2, 1)]
+        );
     }
 }

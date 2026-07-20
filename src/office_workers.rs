@@ -14,6 +14,7 @@ use tokio::{
 #[derive(Default)]
 struct TestProbe {
     waited: AtomicUsize,
+    detached: AtomicUsize,
     stdin: AtomicUsize,
     stdout: AtomicUsize,
     stderr: AtomicUsize,
@@ -22,6 +23,8 @@ struct TestProbe {
 const INPUT_CAP: usize = 32 * 1024 * 1024;
 const OUTPUT_CAP: usize = 64 * 1024 * 1024;
 const STDERR_CAP: usize = 4096;
+// Only the direct child is reaped. After this grace, cleanup continues detached so drain stays bounded.
+const CHILD_REAP_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, thiserror::Error)]
 #[doc(hidden)]
@@ -291,8 +294,19 @@ mod tests {
                 eprintln!("entered");
                 std::thread::sleep(Duration::from_secs(30));
             }
+            "pipe_failure" | "reap_timeout" | "reap_wait_error" => {
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            "child_exit_pipe_hang" | "normal_completion_delayed_pipe" => {
+                let _ = std::io::stdout().write_all(&tiny_pdf());
+                std::process::exit(0);
+            }
             "crash" => {
                 eprintln!("bad\x00diagnostic {}", "x".repeat(STDERR_CAP * 2));
+                std::process::exit(7);
+            }
+            "child_failure_stderr_hang" => {
+                eprintln!("bad diagnostic held by reader");
                 std::process::exit(7);
             }
             "largeout" => {
@@ -376,15 +390,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn child_exit_does_not_complete_hung_pipe() {
+        let w = workers();
+        let start = tokio::time::Instant::now();
+        let error = w
+            .convert("child_exit_pipe_hang", vec![], Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn pipe_failure_has_bounded_cleanup() {
+        let w = workers();
+        let start = tokio::time::Instant::now();
+        let error = w
+            .convert("pipe_failure", vec![], Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("pipe failure"));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn inner_wait_error_detaches_without_replacing_pipe_failure() {
+        let w = workers();
+        let error = w
+            .convert("reap_wait_error", vec![], Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("pipe failure"));
+        tokio::time::timeout(Duration::from_secs(1), w.drain())
+            .await
+            .expect("drain must not own the best-effort reaper");
+        assert_eq!(w.probe.detached.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn normal_completion_waits_for_every_pipe() {
+        let w = workers();
+        let start = tokio::time::Instant::now();
+        w.convert(
+            "normal_completion_delayed_pipe",
+            vec![],
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(100));
+        assert_eq!(w.probe.stdin.load(Ordering::Relaxed), 1);
+        assert_eq!(w.probe.stdout.load(Ordering::Relaxed), 1);
+        assert_eq!(w.probe.stderr.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn deadline_and_cancellation_cannot_block_drain_on_reap() {
+        let w = workers();
+        assert!(
+            w.convert("reap_timeout", vec![], Duration::from_millis(50))
+                .await
+                .is_err()
+        );
+
+        let task = tokio::spawn({
+            let w = w.clone();
+            async move {
+                w.convert("reap_timeout", vec![], Duration::from_secs(5))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        task.abort();
+        tokio::time::timeout(Duration::from_secs(1), w.drain())
+            .await
+            .expect("drain must not wait for detached reapers");
+    }
+
+    #[tokio::test]
     async fn crash_and_stderr_overflow_have_bounded_diagnostics() {
         let error = convert(&workers(), "crash").await.unwrap_err().to_string();
+        assert!(error.contains("bad") && error.contains("diagnostic"));
         assert!(error.len() <= STDERR_CAP + 64 && !error.contains('\0'));
+        assert!(!error.contains("secret"));
         assert!(
             convert(&workers(), "errlarge")
                 .await
                 .unwrap()
                 .starts_with(b"%PDF-")
         );
+    }
+    #[tokio::test]
+    async fn nonzero_status_never_waits_unbounded_for_stderr() {
+        let w = workers();
+        let start = tokio::time::Instant::now();
+        let error = convert(&w, "child_failure_stderr_hang").await.unwrap_err();
+        assert!(error.to_string().contains("child failed"));
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
     #[tokio::test]
     async fn invalid_multibyte_stderr_is_bounded_and_safe() {
@@ -530,36 +632,65 @@ async fn owner(
             drop(stdin);
             drop(stdout);
             drop(stderr);
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            let _reap = kill_and_reap(child, false, ReapMode::Normal).await;
+            #[cfg(test)]
+            match _reap {
+                ReapOutcome::Reaped => {
+                    probe.waited.fetch_add(1, Ordering::Relaxed);
+                }
+                ReapOutcome::Detached => {
+                    probe.detached.fetch_add(1, Ordering::Relaxed);
+                }
+                ReapOutcome::AlreadyReaped => {}
+            }
             return Err(OfficeConvertError::Failed("pipe unavailable".into()));
         }
     };
     let mut write: Option<JoinHandle<Result<(), ()>>> = Some(tokio::spawn(async move {
-        stdin.write_all(&input).await.map_err(|_| ())
+        stdin.write_all(&input).await.map_err(|_| ())?;
+        stdin.shutdown().await.map_err(|_| ())
     }));
     let mut out = Some(tokio::spawn(async move {
-        read_stdout_cap(&mut stdout, OUTPUT_CAP).await
+        #[cfg(test)]
+        if matches!(format, "pipe_failure" | "reap_wait_error") {
+            return Err(ReadCapError::Io);
+        }
+        let result = read_stdout_cap(&mut stdout, OUTPUT_CAP).await;
+        #[cfg(test)]
+        match format {
+            "child_exit_pipe_hang" => std::future::pending().await,
+            "normal_completion_delayed_pipe" => {
+                tokio::time::sleep(Duration::from_millis(100)).await
+            }
+            _ => {}
+        }
+        result
     }));
     let mut err = Some(tokio::spawn(async move {
-        read_stderr_cap(&mut stderr, STDERR_CAP).await
+        let result = read_stderr_cap(&mut stderr, STDERR_CAP).await;
+        #[cfg(test)]
+        if format == "child_failure_stderr_hang" {
+            std::future::pending().await
+        }
+        result
     }));
     let mut status = None;
-    let mut child_waited = false;
-    let mut wait_failed = false;
+    let mut child_reaped = false;
     let mut output = None;
     let mut diagnostic = None;
     let mut failure = None;
+    let mut child_failed = false;
 
     loop {
         tokio::select! {
-            result = child.wait() => {
-                child_waited = true;
+            result = child.wait(), if status.is_none() => {
                 #[cfg(test)] probe.waited.fetch_add(1, Ordering::Relaxed);
                 match result {
-                    Ok(value) => status = Some(value),
+                    Ok(value) => {
+                        child_reaped = true;
+                        status = Some(value);
+                    }
                     Err(_) => {
-                        wait_failed = true;
                         failure = Some("child failed");
                     }
                 }
@@ -591,56 +722,87 @@ async fn owner(
             _ = cancel.changed() => failure = Some("cancelled"),
             _ = tokio::time::sleep_until(deadline) => failure = Some("timed out"),
         }
-        if status.is_some() || failure.is_some() {
+        if status.as_ref().is_some_and(|value| !value.success()) {
+            child_failed = true;
+            failure = Some("child failed");
+        }
+        if failure.is_some()
+            || (status.is_some() && write.is_none() && out.is_none() && err.is_none())
+        {
             break;
         }
     }
 
-    if status.is_none() || !status.is_some_and(|value| value.success()) {
-        if let Some(writer) = &write {
-            writer.abort();
+    if child_failed {
+        if let Some(task) = write.take() {
+            task.abort();
+            #[cfg(test)]
+            probe.stdin.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(task) = out.take() {
+            task.abort();
+            #[cfg(test)]
+            probe.stdout.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(reader) = err.as_mut() {
+            let diagnostic_deadline = deadline.min(tokio::time::Instant::now() + CHILD_REAP_GRACE);
+            tokio::select! {
+                result = reader => {
+                    err = None;
+                    #[cfg(test)] probe.stderr.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(Ok(value)) = result {
+                        diagnostic = Some(value.bytes);
+                    }
+                },
+                _ = cancel.changed() => {},
+                _ = tokio::time::sleep_until(diagnostic_deadline) => {},
+            }
         }
     }
-    if !child_waited || wait_failed {
-        let _ = child.start_kill();
-        status = child.wait().await.ok();
-        #[cfg(test)]
-        probe.waited.fetch_add(1, Ordering::Relaxed);
-    }
-    if let Some(writer) = write {
-        #[cfg(test)]
-        probe.stdin.fetch_add(1, Ordering::Relaxed);
-        if !matches!(writer.await, Ok(Ok(()))) && failure.is_none() {
-            failure = Some("pipe failure");
-        }
-    }
-    if let Some(reader) = out {
-        #[cfg(test)]
-        probe.stdout.fetch_add(1, Ordering::Relaxed);
-        match reader.await {
-            Ok(Ok(value)) => output = Some(value),
-            Ok(Err(ReadCapError::TooLarge)) => {
-                failure.get_or_insert("output too large");
-            }
-            _ => {
-                failure.get_or_insert("pipe failure");
-            }
-        };
-    }
-    if let Some(reader) = err {
-        #[cfg(test)]
-        probe.stderr.fetch_add(1, Ordering::Relaxed);
-        match reader.await {
-            Ok(Ok(value)) => diagnostic = Some(value.bytes),
-            _ => {
-                failure.get_or_insert("pipe failure");
-            }
-        };
-    }
+
     if let Some(message) = failure {
-        return Err(OfficeConvertError::Failed(message.into()));
+        if let Some(task) = write.take() {
+            task.abort();
+            #[cfg(test)]
+            probe.stdin.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(task) = out.take() {
+            task.abort();
+            #[cfg(test)]
+            probe.stdout.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(task) = err.take() {
+            task.abort();
+            #[cfg(test)]
+            probe.stderr.fetch_add(1, Ordering::Relaxed);
+        }
+        #[cfg(test)]
+        let reap_mode = match format {
+            "reap_timeout" => ReapMode::Timeout,
+            "reap_wait_error" => ReapMode::WaitError,
+            _ => ReapMode::Normal,
+        };
+        #[cfg(not(test))]
+        let reap_mode = ReapMode::Normal;
+        let _reap = kill_and_reap(child, child_reaped, reap_mode).await;
+        #[cfg(test)]
+        match _reap {
+            ReapOutcome::Reaped => {
+                probe.waited.fetch_add(1, Ordering::Relaxed);
+            }
+            ReapOutcome::Detached => {
+                probe.detached.fetch_add(1, Ordering::Relaxed);
+            }
+            ReapOutcome::AlreadyReaped => {}
+        }
+        return Err(OfficeConvertError::Failed(if child_failed {
+            sanitize(diagnostic.as_deref().unwrap_or_default())
+        } else {
+            message.into()
+        }));
     }
-    if !status.is_some_and(|value| value.success()) {
+
+    if !status.as_ref().is_some_and(|value| value.success()) {
         return Err(OfficeConvertError::Failed(sanitize(
             diagnostic.as_deref().unwrap_or_default(),
         )));
@@ -670,6 +832,53 @@ async fn owner(
         .filter(|bytes| !bytes.is_empty())
         .map(|bytes| crate::sanitize_event_text(&String::from_utf8_lossy(bytes), STDERR_CAP));
     Ok((output, warning))
+}
+
+#[derive(Clone, Copy)]
+enum ReapMode {
+    Normal,
+    #[cfg(test)]
+    Timeout,
+    #[cfg(test)]
+    WaitError,
+}
+enum ReapOutcome {
+    AlreadyReaped,
+    Reaped,
+    Detached,
+}
+async fn kill_and_reap(
+    mut child: tokio::process::Child,
+    already_reaped: bool,
+    mode: ReapMode,
+) -> ReapOutcome {
+    // Tokio only controls the direct child; descendants that inherit pipes are not process-tree managed.
+    let _ = child.start_kill();
+    if already_reaped {
+        return ReapOutcome::AlreadyReaped;
+    }
+    let reaped = tokio::time::timeout(CHILD_REAP_GRACE, async {
+        #[cfg(test)]
+        match mode {
+            ReapMode::Timeout => return std::future::pending().await,
+            ReapMode::WaitError => return Err(std::io::Error::other("test wait error")),
+            ReapMode::Normal => {}
+        }
+        #[cfg(not(test))]
+        let _ = mode;
+        child.wait().await
+    })
+    .await;
+    match reaped {
+        Ok(Ok(_)) => ReapOutcome::Reaped,
+        Ok(Err(_)) | Err(_) => {
+            tokio::spawn(async move {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            });
+            ReapOutcome::Detached
+        }
+    }
 }
 enum ReadCapError {
     TooLarge,

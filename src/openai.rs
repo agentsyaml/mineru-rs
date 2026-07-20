@@ -1,4 +1,7 @@
-use crate::{ClientConfig, Error, ErrorContext, ModelInfo, Result, profile::Sampling};
+use crate::{
+    ClientConfig, Error, ErrorContext, ModelInfo, Result, error::sanitize_vlm_error_bytes,
+    profile::Sampling,
+};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -93,7 +96,7 @@ impl OpenAi {
                     {
                         return Err(Error::Http {
                             status: status.as_u16(),
-                            body: truncate(&body),
+                            body: sanitize_error(&body),
                         });
                     }
                 }
@@ -161,13 +164,7 @@ impl OpenAi {
                     if status.is_success() {
                         let value: Value = serde_json::from_slice(&body)?;
                         if let Some(error) = value.get("error") {
-                            return Err(protocol(
-                                "chat completions",
-                                &format!(
-                                    "server error: {}",
-                                    error["message"].as_str().unwrap_or("unknown")
-                                ),
-                            ));
+                            return Err(protocol("chat completions", &server_error_message(error)));
                         }
                         let choice = value["choices"]
                             .as_array()
@@ -197,7 +194,7 @@ impl OpenAi {
                     {
                         return Err(Error::Http {
                             status: status.as_u16(),
-                            body: truncate(&body),
+                            body: sanitize_error(&body),
                         });
                     }
                 }
@@ -227,14 +224,47 @@ fn protocol(operation: &'static str, message: &str) -> Error {
         message: message.into(),
     }
 }
-fn truncate(body: &[u8]) -> String {
-    String::from_utf8_lossy(&body[..body.len().min(4096)]).into_owned()
+const ERROR_BODY_CAP: usize = 4096;
+const TRUNCATED_SUFFIX: &str = " [truncated]";
+
+fn sanitize_error(body: &[u8]) -> String {
+    sanitize_error_with_cap(body, ERROR_BODY_CAP)
+}
+
+fn sanitize_error_with_cap(body: &[u8], cap: usize) -> String {
+    bound_diagnostic(sanitize_vlm_error_bytes(body, cap), cap)
+}
+
+fn bound_diagnostic(mut text: String, cap: usize) -> String {
+    if text.len() <= cap {
+        return text;
+    }
+    let mut end = cap - TRUNCATED_SUFFIX.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str(TRUNCATED_SUFFIX);
+    text
+}
+
+fn server_error_message(error: &Value) -> String {
+    const PREFIX: &str = "server error: ";
+    let message = sanitize_error_with_cap(
+        error["message"].as_str().unwrap_or("unknown").as_bytes(),
+        ERROR_BODY_CAP - PREFIX.len(),
+    );
+    format!("{PREFIX}{message}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::OpenAi;
-    use crate::ClientConfig;
+    use super::{
+        ERROR_BODY_CAP, OpenAi, TRUNCATED_SUFFIX, bound_diagnostic, protocol, sanitize_error,
+        server_error_message,
+    };
+    use crate::{ClientConfig, Error};
+    use serde_json::json;
 
     #[test]
     fn resolves_conventional_openai_endpoints() {
@@ -268,5 +298,50 @@ mod tests {
                 completions
             );
         }
+    }
+
+    #[test]
+    fn sanitizes_http_error_body_with_cap() {
+        let raw = "Bearer s é ".repeat(ERROR_BODY_CAP);
+        let error = Error::Http {
+            status: 401,
+            body: sanitize_error(raw.as_bytes()),
+        };
+        let Error::Http { body, .. } = error else {
+            unreachable!()
+        };
+
+        assert!(!body.contains("Bearer s"), "leaked secret: {body}");
+        assert!(body.contains("Bearer [REDACTED]"));
+        assert_eq!(body.len(), ERROR_BODY_CAP);
+        assert!(body.ends_with(TRUNCATED_SUFFIX));
+
+        let unicode = bound_diagnostic(
+            format!(
+                "{}é{}",
+                "x".repeat(ERROR_BODY_CAP - TRUNCATED_SUFFIX.len() - 1),
+                "y".repeat(TRUNCATED_SUFFIX.len() * 2)
+            ),
+            ERROR_BODY_CAP,
+        );
+        assert_eq!(unicode.len(), ERROR_BODY_CAP - 1);
+        assert!(!unicode.contains('\u{fffd}'));
+        assert!(unicode.ends_with(TRUNCATED_SUFFIX));
+    }
+
+    #[test]
+    fn sanitizes_successful_json_error_message_with_cap() {
+        let error = json!({
+            "message": "data:x,s ".repeat(ERROR_BODY_CAP)
+        });
+        let error = protocol("chat completions", &server_error_message(&error));
+        let Error::Protocol { message, .. } = error else {
+            unreachable!()
+        };
+
+        assert!(!message.contains("data:x,s"), "leaked data URL: {message}");
+        assert!(message.contains("[REDACTED_DATA_URL]"));
+        assert_eq!(message.len(), ERROR_BODY_CAP);
+        assert!(message.ends_with(TRUNCATED_SUFFIX));
     }
 }

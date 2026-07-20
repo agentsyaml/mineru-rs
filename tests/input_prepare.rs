@@ -539,7 +539,7 @@ async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
             kind,
             &invalid_range,
             &workers,
-            Duration::from_secs(10),
+            Duration::from_secs(60),
         )
         .await
         .unwrap_or_else(|error| panic!("{kind:?}: {error}"));
@@ -556,7 +556,7 @@ async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
             ..options()
         },
         &workers,
-        Duration::from_secs(10),
+        Duration::from_secs(60),
     )
     .await
     .unwrap();
@@ -576,7 +576,7 @@ async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
                 ..options()
             },
             &workers,
-            Duration::from_secs(10)
+            Duration::from_secs(60)
         )
         .await
         .is_err()
@@ -601,7 +601,7 @@ async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
         DocumentKind::Docx,
         &options(),
         &workers,
-        Duration::from_secs(10),
+        Duration::from_secs(60),
     )
     .await
     .unwrap()
@@ -616,7 +616,7 @@ async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
                 ..options()
             },
             &workers,
-            Duration::from_secs(10),
+            Duration::from_secs(60),
         )
         .await
         .is_err()

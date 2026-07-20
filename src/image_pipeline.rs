@@ -8,6 +8,15 @@ pub(crate) fn page_png(image: &RgbImage) -> Result<String> {
     let normalized = image::imageops::resize(image, 1036, 1036, FilterType::CatmullRom);
     data_url(&normalized)
 }
+
+pub(crate) fn min_edge_dimensions(width: u32, height: u32, target: u32) -> (u32, u32) {
+    let scale = target as f32 / width.min(height).max(1) as f32;
+    (
+        (width as f32 * scale).ceil() as u32,
+        (height as f32 * scale).ceil() as u32,
+    )
+}
+
 pub(crate) fn crop(
     image: &RgbImage,
     bbox: NormalizedBbox,
@@ -28,13 +37,8 @@ pub(crate) fn crop(
     out = rotate(out, rotation);
     let edge = out.width().min(out.height());
     if edge < 28 {
-        let scale = 28.0 / edge.max(1) as f32;
-        out = image::imageops::resize(
-            &out,
-            (out.width() as f32 * scale).ceil() as u32,
-            (out.height() as f32 * scale).ceil() as u32,
-            FilterType::Lanczos3,
-        );
+        let (width, height) = min_edge_dimensions(out.width(), out.height(), 28);
+        out = image::imageops::resize(&out, width, height, FilterType::Lanczos3);
     }
     if out.width().max(out.height()) as f32 / out.width().min(out.height()).max(1) as f32 > 50.0 {
         let side = out.width().max(out.height());
@@ -164,6 +168,19 @@ fn token(index: usize) -> String {
     format!("[{}]", String::from_utf8_lossy(&out))
 }
 
+fn scale_coordinate(value: u32, target: u32, source: u32, round_up: bool) -> u32 {
+    let divisor = u64::from(source.max(1));
+    let product = u64::from(value)
+        .checked_mul(u64::from(target))
+        .unwrap_or(u64::MAX);
+    let scaled = if round_up {
+        product.saturating_add(divisor - 1) / divisor
+    } else {
+        product / divisor
+    };
+    u32::try_from(scaled.min(u64::from(target))).unwrap_or(target)
+}
+
 pub(crate) fn mask_and_encode_table_image(
     page: &RgbImage,
     table: &ContentBlock,
@@ -211,10 +228,10 @@ pub(crate) fn mask_and_encode_table_image(
             Some(Rotation::Deg90 | Rotation::Deg270) => raw_table.width(),
             _ => raw_table.height(),
         };
-        x0 = x0 * masked.width() / rotated_w.max(1);
-        x1 = (x1 * masked.width() + rotated_w - 1) / rotated_w.max(1);
-        y0 = y0 * masked.height() / rotated_h.max(1);
-        y1 = (y1 * masked.height() + rotated_h - 1) / rotated_h.max(1);
+        x0 = scale_coordinate(x0, masked.width(), rotated_w, false);
+        x1 = scale_coordinate(x1, masked.width(), rotated_w, true);
+        y0 = scale_coordinate(y0, masked.height(), rotated_h, false);
+        y1 = scale_coordinate(y1, masked.height(), rotated_h, true);
         if x1 <= x0 || y1 <= y0 {
             continue;
         }
@@ -294,6 +311,16 @@ fn paint_token(image: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, text: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_coordinate_scaling_is_overflow_safe_and_compatible() {
+        assert_eq!(scale_coordinate(69_999, 70_000, 70_000, false), 69_999);
+        assert_eq!(scale_coordinate(69_999, 70_000, 70_000, true), 69_999);
+        assert_eq!(scale_coordinate(1_399, 1_400, 1_400, true), 1_399);
+        assert_eq!(scale_coordinate(1, 10, 3, false), 3);
+        assert_eq!(scale_coordinate(1, 10, 3, true), 4);
+        assert_eq!(scale_coordinate(u32::MAX, u32::MAX, 1, true), u32::MAX);
+    }
 
     fn block(kind: &str, bbox: NormalizedBbox, angle: Option<Rotation>) -> ContentBlock {
         ContentBlock {

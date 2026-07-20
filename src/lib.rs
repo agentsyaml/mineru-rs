@@ -27,6 +27,7 @@ mod types;
 mod vlm_client;
 mod vlm_config;
 mod vlm_http;
+mod vlm_image;
 mod vlm_postprocess;
 mod vlm_types;
 

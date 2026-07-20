@@ -153,39 +153,42 @@ impl MineruApiClient {
         let deadline = tokio::time::Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| "task result deadline is invalid".to_string())?;
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                return Err("task result deadline expired".into());
-            }
-            let value = match self.poll_attempt(status_url).await {
-                Ok(value) => value,
-                Err(e) if e == "response acquisition timed out" => {
-                    self.sleep().await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
-            let status = value
-                .get("status")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("invalid task status payload: {}", safe_json(&value)))?;
-            let snapshot = StatusSnapshot {
-                status: status.into(),
-                queued_ahead: value.get("queued_ahead").and_then(Value::as_i64),
-            };
-            match status {
-                "pending" | "processing" => {
-                    if let Some(callback) = callback.as_mut() {
-                        callback(snapshot);
-                    }
-                    self.sleep().await;
-                }
-                "completed" => return Ok(()),
-                _ => {
-                    return Err(format!("task failed: {}", safe_json(&value)));
-                }
-            }
+        if timeout.is_zero() {
+            return Err("task result deadline expired".into());
         }
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                let value = match self.poll_attempt(status_url).await {
+                    Ok(value) => value,
+                    Err(e) if e == "response acquisition timed out" => {
+                        self.sleep().await;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                let status = value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("invalid task status payload: {}", safe_json(&value)))?;
+                let snapshot = StatusSnapshot {
+                    status: status.into(),
+                    queued_ahead: value.get("queued_ahead").and_then(Value::as_i64),
+                };
+                match status {
+                    "pending" | "processing" => {
+                        if let Some(callback) = callback.as_mut() {
+                            // Synchronous callback work cannot be preempted if it runs past the deadline.
+                            callback(snapshot);
+                        }
+                        self.sleep().await;
+                    }
+                    "completed" => return Ok(()),
+                    _ => return Err(format!("task failed: {}", safe_json(&value))),
+                }
+            }
+        })
+        .await
+        .map_err(|_| "task result deadline expired".to_string())?
     }
 
     pub(crate) async fn download_result_zip(
@@ -666,6 +669,115 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn poll_deadline_bounds_semaphore_acquisition() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = calls.clone();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(0));
+        let base = server(Router::new().route(
+            "/status",
+            get(move || {
+                let state = state.clone();
+                let semaphore = semaphore.clone();
+                async move {
+                    state.fetch_add(1, Ordering::SeqCst);
+                    let _permit = semaphore.acquire().await.unwrap();
+                    Json(json!({"status":"completed"}))
+                }
+            }),
+        ))
+        .await;
+        let client = MineruApiClient::with_timing(
+            &base,
+            Timing {
+                acquisition: Duration::from_secs(60),
+                send: Duration::from_secs(1),
+                interval: Duration::from_secs(1),
+            },
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.poll(
+                &format!("{base}/status"),
+                RemoteEnv {
+                    max_concurrent_requests: 1,
+                    result_timeout_seconds: 0.05,
+                    download_timeout_seconds: 1.,
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("poll exceeded its result deadline");
+        assert_eq!(result, Err("task result deadline expired".into()));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn poll_deadline_bounds_retry_sleep() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = calls.clone();
+        let base = server(Router::new().route(
+            "/status",
+            get(move || {
+                state.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"status":"pending"})) }
+            }),
+        ))
+        .await;
+        let client = MineruApiClient::with_timing(
+            &base,
+            Timing {
+                acquisition: Duration::from_secs(1),
+                send: Duration::from_secs(1),
+                interval: Duration::from_secs(60),
+            },
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.poll(
+                &format!("{base}/status"),
+                RemoteEnv {
+                    max_concurrent_requests: 1,
+                    result_timeout_seconds: 0.05,
+                    download_timeout_seconds: 1.,
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("retry sleep exceeded the result deadline");
+        assert_eq!(result, Err("task result deadline expired".into()));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn poll_success_before_deadline_is_unchanged() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = calls.clone();
+        let base = server(Router::new().route(
+            "/status",
+            get(move || {
+                state.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"status":"completed"})) }
+            }),
+        ))
+        .await;
+        assert_eq!(
+            MineruApiClient::new(&base)
+                .unwrap()
+                .poll(
+                    &format!("{base}/status"),
+                    RemoteEnv {
+                        max_concurrent_requests: 1,
+                        result_timeout_seconds: 1.,
+                        download_timeout_seconds: 1.,
+                    },
+                    None,
+                )
+                .await,
+            Ok(())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
     async fn health_follows_twenty_redirects_but_not_twenty_one() {
         // reqwest's limited(20) permits 20 redirect responses total, including /health -> /redirect/19.
         let base = server(
@@ -828,6 +940,21 @@ mod tests {
                 .await,
             Err("task result deadline is invalid".into())
         );
+        for seconds in [0., f64::MIN_POSITIVE] {
+            assert_eq!(
+                client
+                    .poll(
+                        &format!("{base}/status"),
+                        RemoteEnv {
+                            result_timeout_seconds: seconds,
+                            ..env
+                        },
+                        None,
+                    )
+                    .await,
+                Err("task result deadline expired".into())
+            );
+        }
     }
     #[tokio::test]
     async fn poll_retries_acquisition_timeout_then_reports_pending_and_completes() {
@@ -883,7 +1010,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn poll_connection_deadline_and_sleep_timing_are_actual() {
+    async fn poll_connection_errors_and_deadline_expiration_are_preserved() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let refused = format!("http://{}/status", listener.local_addr().unwrap());
         drop(listener);
@@ -931,7 +1058,6 @@ mod tests {
                     interval: Duration::from_millis(20),
                 },
             );
-            let started = tokio::time::Instant::now();
             assert_eq!(
                 client
                     .poll(
@@ -946,7 +1072,6 @@ mod tests {
                     .await,
                 Err("task result deadline expired".into())
             );
-            assert!(started.elapsed() >= Duration::from_millis(18));
         }
     }
     #[tokio::test]

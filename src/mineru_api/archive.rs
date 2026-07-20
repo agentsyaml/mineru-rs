@@ -76,6 +76,15 @@ impl DownloadedZip {
 
     /// Extracts a result archive into an existing output root without following links.
     pub(super) fn extract(&self, destination: &Path, limits: ArchiveLimits) -> Result<(), String> {
+        self.extract_impl(destination, limits, CommitFault::default())
+    }
+
+    fn extract_impl(
+        &self,
+        destination: &Path,
+        limits: ArchiveLimits,
+        fault: CommitFault,
+    ) -> Result<(), String> {
         let limits = limits.validate()?;
         let compressed = self
             .0
@@ -169,64 +178,360 @@ impl DownloadedZip {
 
         validate_contents(self, &entries, limits, compressed)?;
         let root = output_root(destination)?;
-        for (path, directory, _, _) in &entries {
-            preflight_destination(&root, path, *directory)?;
-        }
+        let transaction = ExtractionTransaction::new(&root, &entries)?;
         let mut total = 0u64;
         let mut buffer = [0u8; 64 * 1024];
-        for (index, (path, directory, expected, _)) in entries.iter().enumerate() {
-            if *directory {
-                ensure_directory(&root, path)?;
-                continue;
-            }
-            let (parent, leaf) = split_parent(&root, path)?;
-            write_temp_file(
-                &parent,
-                leaf,
-                |output| {
-                    let mut input = zip.by_index(index).map_err(|_| "invalid result archive")?;
-                    let mut actual = 0u64;
-                    loop {
-                        let read = input
-                            .read(&mut buffer)
-                            .map_err(|_| "invalid result archive")?;
-                        if read == 0 {
-                            break;
+        let result = (|| {
+            for (index, (path, directory, expected, _)) in entries.iter().enumerate() {
+                if *directory {
+                    ensure_directory(&transaction.stage, path)?;
+                    continue;
+                }
+                let (parent, leaf) = split_parent(&transaction.stage, path)?;
+                write_temp_file(
+                    &parent,
+                    leaf,
+                    |output| {
+                        let mut input =
+                            zip.by_index(index).map_err(|_| "invalid result archive")?;
+                        let mut actual = 0u64;
+                        loop {
+                            let read = input
+                                .read(&mut buffer)
+                                .map_err(|_| "invalid result archive")?;
+                            if read == 0 {
+                                break;
+                            }
+                            let bytes = u64::try_from(read)
+                                .map_err(|_| "result archive exceeds expanded size limit")?;
+                            actual = actual
+                                .checked_add(bytes)
+                                .filter(|v| *v <= limits.max_entry_bytes)
+                                .ok_or_else(|| {
+                                    "result archive entry exceeds expanded size limit".to_string()
+                                })?;
+                            total = total
+                                .checked_add(bytes)
+                                .filter(|v| *v <= limits.max_expanded_bytes)
+                                .ok_or_else(|| {
+                                    "result archive exceeds expanded size limit".to_string()
+                                })?;
+                            if ratio_exceeded(total, compressed, limits.max_ratio)? {
+                                return Err("result archive exceeds expansion ratio limit".into());
+                            }
+                            output
+                                .write_all(&buffer[..read])
+                                .map_err(|_| "unable to write extracted file")?;
                         }
-                        let bytes = u64::try_from(read)
-                            .map_err(|_| "result archive exceeds expanded size limit")?;
-                        actual = actual
-                            .checked_add(bytes)
-                            .filter(|v| *v <= limits.max_entry_bytes)
-                            .ok_or_else(|| {
-                                "result archive entry exceeds expanded size limit".to_string()
-                            })?;
-                        total = total
-                            .checked_add(bytes)
-                            .filter(|v| *v <= limits.max_expanded_bytes)
-                            .ok_or_else(|| {
-                                "result archive exceeds expanded size limit".to_string()
-                            })?;
-                        if ratio_exceeded(total, compressed, limits.max_ratio)? {
-                            return Err("result archive exceeds expansion ratio limit".into());
+                        if actual != *expected {
+                            return Err("result archive entry size does not match metadata".into());
                         }
                         output
-                            .write_all(&buffer[..read])
+                            .flush()
                             .map_err(|_| "unable to write extracted file")?;
-                    }
-                    if actual != *expected {
-                        return Err("result archive entry size does not match metadata".into());
-                    }
-                    output
-                        .flush()
-                        .map_err(|_| "unable to write extracted file")?;
-                    Ok(())
-                },
-                publish_file,
-            )?;
+                        Ok(())
+                    },
+                    publish_file,
+                )?;
+            }
+            for (path, directory, _, _) in &entries {
+                preflight_destination(&root, path, *directory)?;
+            }
+            commit_staged_overlay(
+                &root,
+                &transaction.stage,
+                &transaction.backup,
+                &entries,
+                fault,
+            )
+        })();
+        if !result
+            .as_ref()
+            .is_err_and(|message| message.contains("partial publication"))
+        {
+            transaction.cleanup();
+        }
+        result
+    }
+
+    #[cfg(test)]
+    fn extract_with_commit_fault(
+        &self,
+        destination: &Path,
+        limits: ArchiveLimits,
+        fail_after: usize,
+        fail_restore_a: bool,
+    ) -> Result<(), String> {
+        self.extract_impl(
+            destination,
+            limits,
+            CommitFault {
+                fail_after: Some(fail_after),
+                fail_restore_a,
+            },
+        )
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct CommitFault {
+    #[cfg(test)]
+    fail_after: Option<usize>,
+    #[cfg(test)]
+    fail_restore_a: bool,
+}
+
+struct ExtractionTransaction {
+    root: Dir,
+    name: std::ffi::OsString,
+    stage: Dir,
+    backup: Dir,
+}
+
+impl ExtractionTransaction {
+    fn new(root: &Dir, entries: &[(PathBuf, bool, u64, u64)]) -> Result<Self, String> {
+        let cleanup_root = root.try_clone().map_err(|_| "unable to open output root")?;
+        let reserved: HashSet<_> = entries
+            .iter()
+            .filter_map(|(path, _, _, _)| path.components().next())
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
+                _ => None,
+            })
+            .collect();
+        for _ in 0..reserved.len().saturating_add(32) {
+            let name = std::ffi::OsString::from(format!(
+                ".mineru-archive-{}-{}",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            if reserved.contains(&name.to_string_lossy().to_lowercase()) {
+                continue;
+            }
+            #[cfg(unix)]
+            let create_result = {
+                use cap_std::fs::DirBuilderExt;
+                let mut builder = cap_std::fs::DirBuilder::new();
+                builder.mode(0o700);
+                root.create_dir_with(&name, &builder)
+            };
+            #[cfg(not(unix))]
+            let create_result = root.create_dir(&name);
+            match create_result {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err("unable to safely create extraction transaction".into()),
+            }
+            let transaction = match root.open_dir_nofollow(&name) {
+                Ok(transaction) => transaction,
+                Err(_) => {
+                    let _ = root.remove_dir(&name);
+                    return Err("unable to safely create extraction transaction".into());
+                }
+            };
+            let directories = (|| {
+                transaction
+                    .create_dir("stage")
+                    .map_err(|_| "unable to safely create extraction transaction")?;
+                transaction
+                    .create_dir("backup")
+                    .map_err(|_| "unable to safely create extraction transaction")?;
+                let stage = transaction
+                    .open_dir_nofollow("stage")
+                    .map_err(|_| "unable to safely create extraction transaction")?;
+                let backup = transaction
+                    .open_dir_nofollow("backup")
+                    .map_err(|_| "unable to safely create extraction transaction")?;
+                Ok::<_, String>((stage, backup))
+            })();
+            drop(transaction);
+            return match directories {
+                Ok((stage, backup)) => Ok(Self {
+                    root: cleanup_root,
+                    name,
+                    stage,
+                    backup,
+                }),
+                Err(error) => {
+                    let _ = root.remove_dir_all(&name);
+                    Err(error)
+                }
+            };
+        }
+        Err("unable to safely create extraction transaction".into())
+    }
+
+    fn cleanup(self) {
+        let Self {
+            root,
+            name,
+            stage,
+            backup,
+        } = self;
+        drop(stage);
+        drop(backup);
+        let _ = root.remove_dir_all(name);
+    }
+}
+
+struct CommitState<'a> {
+    root: &'a Dir,
+    backup: &'a Dir,
+    installed: Vec<PathBuf>,
+    backed_up: Vec<PathBuf>,
+    created_dirs: Vec<PathBuf>,
+    publications: usize,
+    fault: CommitFault,
+}
+
+impl CommitState<'_> {
+    fn published(&mut self) -> Result<(), String> {
+        self.publications += 1;
+        #[cfg(test)]
+        if self.fault.fail_after == Some(self.publications) {
+            return Err("unable to publish extracted file".into());
         }
         Ok(())
     }
+
+    fn ensure_directory(&mut self, path: &Path) -> Result<Dir, String> {
+        let mut dir = self
+            .root
+            .try_clone()
+            .map_err(|_| "unable to open output root")?;
+        let mut current = PathBuf::new();
+        for part in path.components() {
+            let Component::Normal(name) = part else {
+                return Err("result archive has an unsafe path".into());
+            };
+            current.push(name);
+            match dir.symlink_metadata(name) {
+                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+                Ok(_) => return Err("output path contains a symlink or non-directory".into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    dir.create_dir(name)
+                        .map_err(|_| "unable to create output directory")?;
+                    self.created_dirs.push(current.clone());
+                    self.published()?;
+                }
+                Err(_) => return Err("unable to inspect output path".into()),
+            }
+            dir = dir
+                .open_dir_nofollow(name)
+                .map_err(|_| "output path contains a symlink or non-directory")?;
+        }
+        Ok(dir)
+    }
+
+    fn install(&mut self, stage: &Dir, path: &Path) -> Result<(), String> {
+        let leaf = path
+            .file_name()
+            .ok_or_else(|| "result archive has an unsafe path".to_string())?;
+        let parent_path = path.parent().unwrap_or(Path::new(""));
+        let destination_parent = self.ensure_directory(parent_path)?;
+        let staged_parent = ensure_directory(stage, parent_path)?;
+        match destination_parent.symlink_metadata(leaf) {
+            Ok(meta) if meta.is_dir() || (!meta.is_file() && !meta.file_type().is_symlink()) => {
+                return Err("output path contains a directory or special file".into());
+            }
+            Ok(_) => {
+                let backup_parent = ensure_directory(self.backup, parent_path)
+                    .map_err(|_| "unable to prepare publication rollback")?;
+                destination_parent
+                    .rename(leaf, &backup_parent, leaf)
+                    .map_err(|_| "unable to prepare publication rollback")?;
+                self.backed_up.push(path.to_path_buf());
+                self.published()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("unable to inspect output path".into()),
+        }
+        staged_parent
+            .rename(leaf, &destination_parent, leaf)
+            .map_err(|_| "unable to publish extracted file")?;
+        self.installed.push(path.to_path_buf());
+        self.published()
+    }
+
+    fn rollback(&mut self) -> bool {
+        let mut succeeded = true;
+        for path in self.installed.iter().rev() {
+            succeeded &= remove_relative_file(self.root, path).is_ok();
+        }
+        for path in self.backed_up.iter().rev() {
+            #[cfg(test)]
+            let restore = if self.fault.fail_restore_a && path == Path::new("a") {
+                Err(())
+            } else {
+                restore_relative_file(self.backup, self.root, path)
+            };
+            #[cfg(not(test))]
+            let restore = restore_relative_file(self.backup, self.root, path);
+            succeeded &= restore.is_ok();
+        }
+        for path in self.created_dirs.iter().rev() {
+            succeeded &= remove_relative_directory(self.root, path).is_ok();
+        }
+        succeeded
+    }
+}
+
+fn commit_staged_overlay(
+    root: &Dir,
+    stage: &Dir,
+    backup: &Dir,
+    entries: &[(PathBuf, bool, u64, u64)],
+    fault: CommitFault,
+) -> Result<(), String> {
+    let mut state = CommitState {
+        root,
+        backup,
+        installed: Vec::new(),
+        backed_up: Vec::new(),
+        created_dirs: Vec::new(),
+        publications: 0,
+        fault,
+    };
+    let result = (|| {
+        for (path, directory, _, _) in entries {
+            if *directory {
+                state.ensure_directory(path)?;
+            } else {
+                state.install(stage, path)?;
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if state.rollback() => Err(error),
+        Err(_) => Err("partial publication: unable to fully roll back result archive".into()),
+    }
+}
+
+fn remove_relative_file(root: &Dir, path: &Path) -> Result<(), ()> {
+    let (parts, leaf) = relative_parts(path).map_err(|_| ())?;
+    existing_parent(root, &parts)
+        .map_err(|_| ())?
+        .remove_file(leaf)
+        .map_err(|_| ())
+}
+
+fn restore_relative_file(backup: &Dir, root: &Dir, path: &Path) -> Result<(), ()> {
+    let (parts, leaf) = relative_parts(path).map_err(|_| ())?;
+    let backup_parent = existing_parent(backup, &parts).map_err(|_| ())?;
+    let destination_parent = existing_parent(root, &parts).map_err(|_| ())?;
+    backup_parent
+        .rename(leaf, &destination_parent, leaf)
+        .map_err(|_| ())
+}
+
+fn remove_relative_directory(root: &Dir, path: &Path) -> Result<(), ()> {
+    let (parts, leaf) = relative_parts(path).map_err(|_| ())?;
+    existing_parent(root, &parts)
+        .map_err(|_| ())?
+        .remove_dir(leaf)
+        .map_err(|_| ())
 }
 
 fn ratio_exceeded(expanded: u64, compressed: u64, max_ratio: u64) -> Result<bool, String> {
@@ -773,6 +1078,18 @@ mod tests {
         );
     }
 
+    fn transaction_artifacts(path: &Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(path)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name();
+                name.to_string_lossy()
+                    .starts_with(".mineru-archive-")
+                    .then_some(name)
+            })
+            .collect()
+    }
+
     fn patch_u32(bytes: &mut [u8], signature: &[u8; 4], offset: usize, value: u32) {
         let position = bytes
             .windows(4)
@@ -819,6 +1136,100 @@ mod tests {
         assert_eq!(
             std::fs::read(output.path().join("new.txt")).unwrap(),
             b"deflated"
+        );
+        assert!(transaction_artifacts(output.path()).is_empty());
+    }
+
+    #[test]
+    fn ordered_archives_overlay_duplicate_files_and_merge_directories() {
+        let output = tempfile::tempdir().unwrap();
+        archive(&[
+            ("merged/a", b"first", CompressionMethod::Stored),
+            ("merged/keep", b"keep", CompressionMethod::Stored),
+        ])
+        .extract(output.path(), limits())
+        .unwrap();
+        archive(&[
+            ("merged/a", b"second", CompressionMethod::Stored),
+            ("merged/b", b"new", CompressionMethod::Stored),
+        ])
+        .extract(output.path(), limits())
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(output.path().join("merged/a")).unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            std::fs::read(output.path().join("merged/b")).unwrap(),
+            b"new"
+        );
+        assert_eq!(
+            std::fs::read(output.path().join("merged/keep")).unwrap(),
+            b"keep"
+        );
+        assert!(transaction_artifacts(output.path()).is_empty());
+    }
+
+    #[test]
+    fn commit_failure_rolls_back_the_complete_overlay() {
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(output.path().join("a"), b"old").unwrap();
+        std::fs::write(output.path().join("keep"), b"unrelated").unwrap();
+        let candidate = archive(&[
+            ("nested/deeper/c", b"nested", CompressionMethod::Stored),
+            ("a", b"new", CompressionMethod::Stored),
+            ("b", b"new", CompressionMethod::Stored),
+        ]);
+
+        // Publications 1-3 create nested/deeper and install c; 4-5 back up/install a;
+        // publication 6 installs b and then injects the commit failure.
+        assert_eq!(
+            candidate
+                .extract_with_commit_fault(output.path(), limits(), 6, false)
+                .unwrap_err(),
+            "unable to publish extracted file"
+        );
+        assert_eq!(std::fs::read(output.path().join("a")).unwrap(), b"old");
+        assert!(!output.path().join("b").exists());
+        assert_eq!(
+            std::fs::read(output.path().join("keep")).unwrap(),
+            b"unrelated"
+        );
+        assert!(!output.path().join("nested").exists());
+        assert!(transaction_artifacts(output.path()).is_empty());
+    }
+
+    #[test]
+    fn rollback_failure_reports_partial_publication() {
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(output.path().join("a"), b"old").unwrap();
+        std::fs::write(output.path().join("keep"), b"unrelated").unwrap();
+        let error = archive(&[
+            ("nested/deeper/c", b"nested", CompressionMethod::Stored),
+            ("a", b"new", CompressionMethod::Stored),
+            ("b", b"new", CompressionMethod::Stored),
+        ])
+        // The same six publications complete; rollback removes b, a, and c, then the
+        // injected restore-a failure occurs before best-effort directory cleanup.
+        .extract_with_commit_fault(output.path(), limits(), 6, true)
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "partial publication: unable to fully roll back result archive"
+        );
+        assert!(!output.path().join("a").exists());
+        assert!(!output.path().join("b").exists());
+        assert!(!output.path().join("nested").exists());
+        assert_eq!(
+            std::fs::read(output.path().join("keep")).unwrap(),
+            b"unrelated"
+        );
+        let artifacts = transaction_artifacts(output.path());
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(
+            std::fs::read(output.path().join(&artifacts[0]).join("backup/a")).unwrap(),
+            b"old"
         );
     }
 
@@ -1250,6 +1661,25 @@ mod tests {
                 .extract(tempfile::tempdir().unwrap().path(), exact)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn archive_limit_failure_publishes_nothing() {
+        let output = sentinel_output();
+        let candidate = archive(&[
+            ("sentinel", b"new", CompressionMethod::Stored),
+            ("new", b"too large", CompressionMethod::Stored),
+        ]);
+        let mut limited = limits();
+        limited.max_expanded_bytes = 3;
+
+        assert!(candidate.extract(output.path(), limited).is_err());
+        assert_eq!(
+            std::fs::read(output.path().join("sentinel")).unwrap(),
+            b"old"
+        );
+        assert!(!output.path().join("new").exists());
+        assert!(transaction_artifacts(output.path()).is_empty());
     }
 
     #[test]

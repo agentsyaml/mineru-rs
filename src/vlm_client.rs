@@ -139,7 +139,21 @@ fn is_paratext(kind: &str) -> bool {
             | BlockKind::UNKNOWN
     )
 }
-fn semantic_crop(image: &RgbImage, bbox: NormalizedBbox, angle: Option<Rotation>) -> RgbImage {
+fn image_pixel_limit(width: u32, height: u32, limit: u64) -> VlmResult<()> {
+    let actual = u64::from(width)
+        .checked_mul(u64::from(height))
+        .unwrap_or(u64::MAX);
+    if actual > limit {
+        return Err(VlmError::LimitExceeded {
+            resource: "image pixels",
+            limit,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn crop_rect(image: &RgbImage, bbox: NormalizedBbox) -> (u32, u32, u32, u32) {
     let x = (bbox.left * image.width() as f32)
         .floor()
         .clamp(0., image.width().saturating_sub(1) as f32) as u32;
@@ -152,13 +166,24 @@ fn semantic_crop(image: &RgbImage, bbox: NormalizedBbox, angle: Option<Rotation>
     let bottom = (bbox.bottom * image.height() as f32)
         .ceil()
         .clamp((y + 1) as f32, image.height() as f32) as u32;
-    let out = image::imageops::crop_imm(image, x, y, right - x, bottom - y).to_image();
-    match angle {
+    (x, y, right - x, bottom - y)
+}
+
+fn semantic_crop(
+    image: &RgbImage,
+    bbox: NormalizedBbox,
+    angle: Option<Rotation>,
+    max_pixels: u64,
+) -> VlmResult<RgbImage> {
+    let (x, y, width, height) = crop_rect(image, bbox);
+    image_pixel_limit(width, height, max_pixels)?;
+    let out = image::imageops::crop_imm(image, x, y, width, height).to_image();
+    Ok(match angle {
         Some(Rotation::Deg90) => image::imageops::rotate270(&out),
         Some(Rotation::Deg180) => image::imageops::rotate180(&out),
         Some(Rotation::Deg270) => image::imageops::rotate90(&out),
         _ => out,
-    }
+    })
 }
 fn priority_for(
     n: usize,
@@ -199,6 +224,14 @@ impl MinerUVlmPreprocessor {
             .cloned()
     }
     pub fn resize_by_need(&self, image: DynamicImage) -> VlmResult<DynamicImage> {
+        self.resize_by_need_capped(image, u64::MAX)
+    }
+    fn resize_by_need_capped(
+        &self,
+        image: DynamicImage,
+        max_pixels: u64,
+    ) -> VlmResult<DynamicImage> {
+        image_pixel_limit(image.width(), image.height(), max_pixels)?;
         let mut out = image.to_rgb8();
         let w = out.width();
         let h = out.height();
@@ -209,6 +242,7 @@ impl MinerUVlmPreprocessor {
             } else {
                 (h.div_ceil(ratio), h)
             };
+            image_pixel_limit(new_w, new_h, max_pixels)?;
             let mut padded = RgbImage::from_pixel(new_w, new_h, image::Rgb([255; 3]));
             image::imageops::overlay(
                 &mut padded,
@@ -220,17 +254,26 @@ impl MinerUVlmPreprocessor {
         }
         let edge = out.width().min(out.height()).max(1);
         if edge < self.config.min_image_edge {
-            let scale = self.config.min_image_edge as f32 / edge as f32;
-            out = image::imageops::resize(
-                &out,
-                (out.width() as f32 * scale).ceil() as u32,
-                (out.height() as f32 * scale).ceil() as u32,
-                FilterType::CatmullRom,
+            let (new_width, new_height) = image_pipeline::min_edge_dimensions(
+                out.width(),
+                out.height(),
+                self.config.min_image_edge,
             );
+            image_pixel_limit(new_width, new_height, max_pixels)?;
+            out = image::imageops::resize(&out, new_width, new_height, FilterType::CatmullRom);
         }
         Ok(DynamicImage::ImageRgb8(out))
     }
-    fn prepare_rgb_for_layout(&self, image: &RgbImage) -> VlmResult<VlmPreparedLayout> {
+    fn prepare_rgb_for_layout_capped(
+        &self,
+        image: &RgbImage,
+        max_pixels: u64,
+    ) -> VlmResult<VlmPreparedLayout> {
+        image_pixel_limit(
+            self.config.layout_image_size.0,
+            self.config.layout_image_size.1,
+            max_pixels,
+        )?;
         let resized = image::imageops::resize(
             image,
             self.config.layout_image_size.0,
@@ -251,7 +294,15 @@ impl MinerUVlmPreprocessor {
         })
     }
     pub fn prepare_for_layout(&self, image: DynamicImage) -> VlmResult<VlmPreparedLayout> {
-        self.prepare_rgb_for_layout(&image.to_rgb8())
+        self.prepare_for_layout_capped(image, u64::MAX)
+    }
+    fn prepare_for_layout_capped(
+        &self,
+        image: DynamicImage,
+        max_pixels: u64,
+    ) -> VlmResult<VlmPreparedLayout> {
+        image_pixel_limit(image.width(), image.height(), max_pixels)?;
+        self.prepare_rgb_for_layout_capped(&image.to_rgb8(), max_pixels)
     }
     pub fn parse_layout_output(&self, output: &str) -> VlmResult<Vec<VlmLayoutBlock>> {
         self.parse_layout_output_capped(output, usize::MAX)
@@ -307,8 +358,27 @@ impl MinerUVlmPreprocessor {
         image_analysis: Option<bool>,
         max_semantic_requests: usize,
     ) -> VlmResult<VlmPreparedExtraction> {
+        self.prepare_for_extract_limited(
+            image,
+            blocks,
+            prompts,
+            image_analysis,
+            max_semantic_requests,
+            u64::MAX,
+        )
+    }
+    fn prepare_for_extract_limited(
+        &self,
+        image: &DynamicImage,
+        blocks: &mut [VlmLayoutBlock],
+        prompts: &[String],
+        image_analysis: Option<bool>,
+        max_semantic_requests: usize,
+        max_pixels: u64,
+    ) -> VlmResult<VlmPreparedExtraction> {
         let candidates =
             self.semantic_candidates(blocks, prompts, image_analysis, max_semantic_requests)?;
+        image_pixel_limit(image.width(), image.height(), max_pixels)?;
         let page = image.to_rgb8();
         let mut out = VlmPreparedExtraction {
             images: vec![],
@@ -318,7 +388,7 @@ impl MinerUVlmPreprocessor {
         };
         for candidate in candidates {
             let (image, prompt, sampling, block_index) =
-                self.encode_semantic_candidate(&page, blocks, &candidate)?;
+                self.encode_semantic_candidate_capped(&page, blocks, &candidate, max_pixels)?;
             out.images.push(image);
             out.prompts.push(prompt);
             out.sampling.push(sampling);
@@ -433,24 +503,59 @@ impl MinerUVlmPreprocessor {
         }
         Ok(candidates)
     }
-    fn encode_semantic_candidate(
+    fn check_table_candidate_allocations(
+        &self,
+        page: &RgbImage,
+        candidate: &SemanticCandidate,
+        max_pixels: u64,
+    ) -> VlmResult<()> {
+        let (_, _, raw_width, raw_height) = crop_rect(page, candidate.block.bbox);
+        image_pixel_limit(raw_width, raw_height, max_pixels)?;
+        let (mut width, mut height) = match candidate.block.angle {
+            Some(Rotation::Deg90 | Rotation::Deg270) => (raw_height, raw_width),
+            _ => (raw_width, raw_height),
+        };
+        let edge = width.min(height).max(1);
+        if edge < 28 {
+            (width, height) = image_pipeline::min_edge_dimensions(width, height, 28);
+            image_pixel_limit(width, height, max_pixels)?;
+        }
+        if width.max(height) as f32 / width.min(height).max(1) as f32 > 50.0 {
+            let side = width.max(height);
+            image_pixel_limit(side, side, max_pixels)?;
+        }
+        for absorbed in &candidate.absorbed {
+            let (_, _, width, height) = crop_rect(page, absorbed.bbox);
+            image_pixel_limit(width, height, max_pixels)?;
+        }
+        Ok(())
+    }
+    fn encode_semantic_candidate_capped(
         &self,
         page: &RgbImage,
         blocks: &mut [VlmLayoutBlock],
         candidate: &SemanticCandidate,
+        max_pixels: u64,
     ) -> VlmResult<(VlmEncodedImage, String, Option<SamplingParams>, usize)> {
+        image_pixel_limit(page.width(), page.height(), max_pixels)?;
         let kind = candidate.block.kind.as_str();
         let (crop, tokens) = if kind == BlockKind::TABLE {
+            self.check_table_candidate_allocations(page, candidate, max_pixels)?;
             image_pipeline::mask_and_encode_table_image(page, &candidate.block, &candidate.absorbed)
                 .map_err(|e| protocol("extract image", e.to_string()))?
         } else {
             (
-                semantic_crop(page, candidate.block.bbox, candidate.block.angle),
+                semantic_crop(
+                    page,
+                    candidate.block.bbox,
+                    candidate.block.angle,
+                    max_pixels,
+                )?,
                 Map::new(),
             )
         };
         let crop = self
-            .resize_by_need(DynamicImage::ImageRgb8(crop))?
+            .resize_by_need_capped(DynamicImage::ImageRgb8(crop), max_pixels)?
             .to_rgb8();
         if !tokens.is_empty() {
             blocks[candidate.original_index].metadata.insert(
@@ -642,7 +747,13 @@ impl MinerUVlmPreprocessor {
         &self,
         image: DynamicImage,
     ) -> VlmResult<VlmPreparedLayout> {
-        self.prepare_for_layout(image)
+        let preprocessor = self.clone();
+        tokio::task::spawn_blocking(move || preprocessor.prepare_for_layout(image))
+            .await
+            .map_err(|_| VlmError::Transport {
+                operation: "image",
+                message: "image worker failed".into(),
+            })?
     }
     pub async fn aio_parse_layout_output(&self, output: String) -> VlmResult<Vec<VlmLayoutBlock>> {
         self.parse_layout_output(&output)
@@ -654,8 +765,17 @@ impl MinerUVlmPreprocessor {
         prompts: Vec<String>,
         image_analysis: Option<bool>,
     ) -> VlmResult<(Vec<VlmLayoutBlock>, VlmPreparedExtraction)> {
-        let prepared = self.prepare_for_extract(&image, &mut blocks, &prompts, image_analysis)?;
-        Ok((blocks, prepared))
+        let preprocessor = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let prepared =
+                preprocessor.prepare_for_extract(&image, &mut blocks, &prompts, image_analysis)?;
+            Ok((blocks, prepared))
+        })
+        .await
+        .map_err(|_| VlmError::Transport {
+            operation: "image",
+            message: "image worker failed".into(),
+        })?
     }
     pub async fn aio_post_process(
         &self,
@@ -780,8 +900,9 @@ impl MinerUVlmClient {
     ) -> VlmResult<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)> {
         let preprocessor = self.preprocessor.clone();
         let layout_image = Arc::clone(&image);
+        let max_pixels = self.http.max_decoded_pixels();
         let prepared_layout = Self::official_blocking(deadline, move || {
-            preprocessor.prepare_rgb_for_layout(&layout_image)
+            preprocessor.prepare_rgb_for_layout_capped(&layout_image, max_pixels)
         })
         .await?;
         let layout_bytes = prepared_layout.image.data.len();
@@ -858,6 +979,7 @@ impl MinerUVlmClient {
             let current_blocks = blocks;
             let current_encoded_bytes = encoded_bytes;
             let encoded_budget = encoded_budget.clone();
+            let max_pixels = self.http.max_decoded_pixels();
             let (next_blocks, prepared, next_encoded_bytes) =
                 Self::official_blocking(deadline, move || {
                     let mut blocks = current_blocks;
@@ -871,7 +993,12 @@ impl MinerUVlmClient {
                     };
                     for candidate in candidates {
                         let (image, prompt, sampling, block_index) = preprocessor
-                            .encode_semantic_candidate(&page, &mut blocks, &candidate)?;
+                            .encode_semantic_candidate_capped(
+                                &page,
+                                &mut blocks,
+                                &candidate,
+                                max_pixels,
+                            )?;
                         let bytes = image.data.len();
                         if bytes > max_encoded_request_bytes {
                             return Err(VlmError::LimitExceeded {
@@ -1027,30 +1154,43 @@ impl MinerUVlmClient {
     fn default_batch_semaphore(&self) -> VlmSemaphore {
         Some(self.layout_semaphore.clone())
     }
-    async fn decoded(image: &VlmImageInput) -> VlmResult<Option<DynamicImage>> {
-        let bytes = match image {
-            VlmImageInput::None | VlmImageInput::RemoteUrl(_) => return Ok(None),
-            VlmImageInput::Path(path) => tokio::fs::read(path).await.map_err(|_| VlmError::Io {
+    async fn image_blocking<T: Send + 'static>(
+        job: impl FnOnce() -> VlmResult<T> + Send + 'static,
+    ) -> VlmResult<T> {
+        tokio::task::spawn_blocking(job)
+            .await
+            .map_err(|_| VlmError::Transport {
                 operation: "image",
-                message: "read failed".into(),
-            })?,
-            VlmImageInput::Bytes { data, .. } => data.to_vec(),
-            VlmImageInput::Base64 { data, .. } => STANDARD
-                .decode(data)
-                .map_err(|_| VlmError::InvalidImageInput("invalid base64".into()))?,
-            VlmImageInput::DataUrl(data) => STANDARD
-                .decode(
-                    data.split_once(',')
-                        .ok_or_else(|| VlmError::InvalidImageInput("invalid data URL".into()))?
-                        .1,
-                )
-                .map_err(|_| VlmError::InvalidImageInput("invalid data URL".into()))?,
-        };
-        image::load_from_memory(&bytes)
-            .map(Some)
-            .map_err(|_| VlmError::InvalidImageInput("unsupported image".into()))
+                message: "image worker failed".into(),
+            })?
+    }
+    async fn admit_semantic_image(&self, image: VlmImageInput) -> VlmResult<VlmImageInput> {
+        if matches!(image, VlmImageInput::RemoteUrl(_)) {
+            return Err(VlmError::InvalidImageInput(
+                "semantic operations require a local image".into(),
+            ));
+        }
+        Ok(self
+            .http
+            .admit_local_image(image)
+            .await?
+            .unwrap_or(VlmImageInput::None))
     }
     async fn layout_raw(
+        &self,
+        image: VlmImageInput,
+        priority: VlmPriority,
+        scored: Option<bool>,
+        semaphore: VlmSemaphore,
+    ) -> VlmResult<VlmExtractResult> {
+        if scored == Some(true) {
+            return Err(SCORED_UNSUPPORTED);
+        }
+        let image = self.admit_semantic_image(image).await?;
+        self.layout_admitted_raw(image, priority, scored, semaphore)
+            .await
+    }
+    async fn layout_admitted_raw(
         &self,
         image: VlmImageInput,
         priority: VlmPriority,
@@ -1061,19 +1201,19 @@ impl MinerUVlmClient {
         if scored == Some(true) {
             return Err(SCORED_UNSUPPORTED);
         }
-        if matches!(image, VlmImageInput::RemoteUrl(_)) {
-            return Err(VlmError::InvalidImageInput(
-                "semantic operations require a local image".into(),
-            ));
-        }
-        let image = if let Some(image) = Self::decoded(&image).await? {
-            let prepared = self.preprocessor.prepare_for_layout(image)?;
+        let image = if let Some(image) = self.http.decode_admitted_image(image).await? {
+            let preprocessor = self.preprocessor.clone();
+            let max_pixels = self.http.max_decoded_pixels();
+            let prepared = Self::image_blocking(move || {
+                preprocessor.prepare_for_layout_capped(image, max_pixels)
+            })
+            .await?;
             VlmImageInput::Bytes {
                 data: prepared.image.data,
                 media_type: Some(prepared.image.media_type),
             }
         } else {
-            image
+            VlmImageInput::None
         };
         let request = self.request(
             image,
@@ -1100,6 +1240,32 @@ impl MinerUVlmClient {
     async fn extract(
         &self,
         image: VlmImageInput,
+        blocks: Vec<VlmLayoutBlock>,
+        priority: VlmPriority,
+        not_extract_list: &[String],
+        image_analysis: Option<bool>,
+        scored: Option<bool>,
+        semaphore: VlmSemaphore,
+    ) -> VlmResult<VlmExtractResult> {
+        if scored == Some(true) {
+            return Err(SCORED_UNSUPPORTED);
+        }
+        let image = self.admit_semantic_image(image).await?;
+        self.extract_admitted(
+            image,
+            blocks,
+            priority,
+            not_extract_list,
+            image_analysis,
+            scored,
+            semaphore,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn extract_admitted(
+        &self,
+        image: VlmImageInput,
         mut blocks: Vec<VlmLayoutBlock>,
         priority: VlmPriority,
         not_extract_list: &[String],
@@ -1111,18 +1277,23 @@ impl MinerUVlmClient {
         if scored == Some(true) {
             return Err(SCORED_UNSUPPORTED);
         }
-        if matches!(image, VlmImageInput::RemoteUrl(_)) {
-            return Err(VlmError::InvalidImageInput(
-                "semantic operations require a local image".into(),
-            ));
-        }
-        if let Some(decoded) = Self::decoded(&image).await? {
-            let prepared = self.preprocessor.prepare_for_extract(
-                &decoded,
-                &mut blocks,
-                not_extract_list,
-                image_analysis,
-            )?;
+        if let Some(decoded) = self.http.decode_admitted_image(image).await? {
+            let preprocessor = self.preprocessor.clone();
+            let prompts = not_extract_list.to_vec();
+            let max_pixels = self.http.max_decoded_pixels();
+            let (next_blocks, prepared) = Self::image_blocking(move || {
+                let prepared = preprocessor.prepare_for_extract_limited(
+                    &decoded,
+                    &mut blocks,
+                    &prompts,
+                    image_analysis,
+                    usize::MAX,
+                    max_pixels,
+                )?;
+                Ok((blocks, prepared))
+            })
+            .await?;
+            blocks = next_blocks;
             let requests = prepared
                 .images
                 .into_iter()
@@ -1229,7 +1400,7 @@ impl MinerUVlmClient {
                 "semantic operations require a local image".into(),
             ));
         }
-        let image = Self::decoded(&i).await?.ok_or_else(|| {
+        let image = self.http.decode_local_image(i).await?.ok_or_else(|| {
             VlmError::InvalidImageInput("semantic operations require an image".into())
         })?;
         let mut blocks = vec![VlmLayoutBlock {
@@ -1240,9 +1411,21 @@ impl MinerUVlmClient {
             merge_prev: None,
             metadata: Map::new(),
         }];
-        let prepared = self
-            .preprocessor
-            .prepare_for_extract(&image, &mut blocks, &[], None)?;
+        let preprocessor = self.preprocessor.clone();
+        let max_pixels = self.http.max_decoded_pixels();
+        let (next_blocks, prepared) = Self::image_blocking(move || {
+            let prepared = preprocessor.prepare_for_extract_limited(
+                &image,
+                &mut blocks,
+                &[],
+                None,
+                usize::MAX,
+                max_pixels,
+            )?;
+            Ok((blocks, prepared))
+        })
+        .await?;
+        blocks = next_blocks;
         let Some((encoded, prompt, sampling, index)) = prepared
             .images
             .into_iter()
@@ -1367,12 +1550,13 @@ impl MinerUVlmClient {
         if scored == Some(true) {
             return Err(SCORED_UNSUPPORTED);
         }
+        let i = self.admit_semantic_image(i).await?;
         let semaphore = self.default_batch_semaphore();
         let layout = self
-            .layout_raw(i.clone(), p, scored, semaphore.clone())
+            .layout_admitted_raw(i.clone(), p, scored, semaphore.clone())
             .await?;
         let mut out = self
-            .extract(i, layout.blocks, p, &q, image_analysis, scored, semaphore)
+            .extract_admitted(i, layout.blocks, p, &q, image_analysis, scored, semaphore)
             .await?;
         out.layout_completion = layout.layout_completion;
         Ok(out)
@@ -1389,10 +1573,13 @@ impl MinerUVlmClient {
         if scored == Some(true) {
             return Err(SCORED_UNSUPPORTED);
         }
+        let i = self.admit_semantic_image(i).await?;
         let sem = sem.or_else(|| self.default_batch_semaphore());
-        let layout = self.layout_raw(i.clone(), p, scored, sem.clone()).await?;
+        let layout = self
+            .layout_admitted_raw(i.clone(), p, scored, sem.clone())
+            .await?;
         let mut out = self
-            .extract(i, layout.blocks, p, &q, image_analysis, scored, sem)
+            .extract_admitted(i, layout.blocks, p, &q, image_analysis, scored, sem)
             .await?;
         out.layout_completion = layout.layout_completion;
         Ok(out)
@@ -1473,21 +1660,36 @@ impl MinerUVlmClient {
         }
         let sem = sem.or_else(|| self.default_batch_semaphore());
         let priorities = priority_for(i.len(), p, self.preprocessor.config.incremental_priority)?;
-        let layouts = self
-            .aio_batch_layout_detect(
-                i.clone(),
-                VlmBatchPriority::PerItem(priorities.clone()),
-                sem.clone(),
-                scored,
-            )
-            .await?;
+        let mut admitted = Vec::with_capacity(i.len());
+        for image in i {
+            admitted.push(self.admit_semantic_image(image).await?);
+        }
+        let layouts = try_join_all(
+            admitted
+                .iter()
+                .cloned()
+                .zip(priorities.iter().copied())
+                .map(|(image, priority)| {
+                    self.layout_admitted_raw(image, priority, scored, sem.clone())
+                }),
+        )
+        .await?;
         let completions: Vec<_> = layouts
             .iter()
             .map(|layout| layout.layout_completion.clone())
             .collect();
         let pages = layouts.into_iter().map(|layout| layout.blocks).collect();
         let mut extracted = self
-            .batch_extract_flat(i, pages, priorities, &q, image_analysis, scored, sem)
+            .batch_extract_flat_inner(
+                admitted,
+                pages,
+                priorities,
+                &q,
+                image_analysis,
+                scored,
+                sem,
+                true,
+            )
             .await?;
         for (result, completion) in extracted.iter_mut().zip(completions) {
             result.layout_completion = completion;
@@ -1542,12 +1744,39 @@ impl MinerUVlmClient {
     async fn batch_extract_flat(
         &self,
         images: Vec<VlmImageInput>,
+        pages: Vec<Vec<VlmLayoutBlock>>,
+        priorities: Vec<VlmPriority>,
+        prompts: &[String],
+        image_analysis: Option<bool>,
+        scored: Option<bool>,
+        semaphore: VlmSemaphore,
+    ) -> VlmResult<Vec<VlmExtractResult>> {
+        if scored == Some(true) {
+            return Err(SCORED_UNSUPPORTED);
+        }
+        self.batch_extract_flat_inner(
+            images,
+            pages,
+            priorities,
+            prompts,
+            image_analysis,
+            scored,
+            semaphore,
+            false,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn batch_extract_flat_inner(
+        &self,
+        images: Vec<VlmImageInput>,
         mut pages: Vec<Vec<VlmLayoutBlock>>,
         priorities: Vec<VlmPriority>,
         prompts: &[String],
         image_analysis: Option<bool>,
         scored: Option<bool>,
         semaphore: VlmSemaphore,
+        admitted: bool,
     ) -> VlmResult<Vec<VlmExtractResult>> {
         if scored == Some(true) {
             return Err(SCORED_UNSUPPORTED);
@@ -1560,17 +1789,36 @@ impl MinerUVlmClient {
             .zip(priorities)
             .enumerate()
         {
-            if matches!(image, VlmImageInput::RemoteUrl(_)) {
-                return Err(VlmError::InvalidImageInput(
-                    "semantic operations require a local image".into(),
-                ));
-            }
-            let image = Self::decoded(&image).await?.ok_or_else(|| {
-                VlmError::InvalidImageInput("semantic operations require an image".into())
-            })?;
-            let prepared =
-                self.preprocessor
-                    .prepare_for_extract(&image, blocks, prompts, image_analysis)?;
+            let image = if admitted {
+                image
+            } else {
+                self.admit_semantic_image(image).await?
+            };
+            let image = self
+                .http
+                .decode_admitted_image(image)
+                .await?
+                .ok_or_else(|| {
+                    VlmError::InvalidImageInput("semantic operations require an image".into())
+                })?;
+            let preprocessor = self.preprocessor.clone();
+            let page_blocks = std::mem::take(blocks);
+            let prompts = prompts.to_vec();
+            let max_pixels = self.http.max_decoded_pixels();
+            let (next_blocks, prepared) = Self::image_blocking(move || {
+                let mut blocks = page_blocks;
+                let prepared = preprocessor.prepare_for_extract_limited(
+                    &image,
+                    &mut blocks,
+                    &prompts,
+                    image_analysis,
+                    usize::MAX,
+                    max_pixels,
+                )?;
+                Ok((blocks, prepared))
+            })
+            .await?;
+            *blocks = next_blocks;
             for (((image, prompt), sampling), block_index) in prepared
                 .images
                 .into_iter()
@@ -1714,25 +1962,26 @@ mod tests {
     }
 
     async fn mock_client(state: MockState) -> MinerUVlmClient {
+        mock_client_with(state, VlmHttpConfig::default(), MinerUVlmConfig::default()).await
+    }
+
+    async fn mock_client_with(
+        state: MockState,
+        mut http: VlmHttpConfig,
+        config: MinerUVlmConfig,
+    ) -> MinerUVlmClient {
         let app = Router::new()
             .route("/v1/chat/completions", post(mock_chat))
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        MinerUVlmClient::connect(
-            VlmHttpConfig {
-                server_url: Some(format!("http://{address}").parse().unwrap()),
-                model_name: Some("mock".into()),
-                skip_model_name_checking: true,
-                max_retries: 0,
-                max_concurrency: 2,
-                ..Default::default()
-            },
-            MinerUVlmConfig::default(),
-        )
-        .await
-        .unwrap()
+        http.server_url = Some(format!("http://{address}").parse().unwrap());
+        http.model_name = Some("mock".into());
+        http.skip_model_name_checking = true;
+        http.max_retries = 0;
+        http.max_concurrency = 2;
+        MinerUVlmClient::connect(http, config).await.unwrap()
     }
 
     async fn mock_chat(
@@ -1772,6 +2021,48 @@ mod tests {
             "recognized".into()
         };
         Json(json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]}))
+    }
+
+    #[derive(Clone)]
+    struct DeletePaths(Arc<Vec<std::path::PathBuf>>);
+
+    async fn delete_paths_chat(
+        State(state): State<DeletePaths>,
+        Json(request): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        let layout = request.to_string().contains("Layout Detection");
+        if layout {
+            for path in state.0.iter() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        let content = if layout {
+            "<|box_start|>0 0 1000 1000<|box_end|><|ref_start|>text<|ref_end|>"
+        } else {
+            "recognized"
+        };
+        Json(json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]}))
+    }
+
+    async fn delete_paths_client(paths: Vec<std::path::PathBuf>) -> MinerUVlmClient {
+        let app = Router::new()
+            .route("/v1/chat/completions", post(delete_paths_chat))
+            .with_state(DeletePaths(Arc::new(paths)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                ..Default::default()
+            },
+            MinerUVlmConfig::default(),
+        )
+        .await
+        .unwrap()
     }
 
     #[derive(Clone)]
@@ -1821,20 +2112,25 @@ mod tests {
                 state.first_two.wait().await;
                 released.await;
             }
-            let data_url = request["messages"][1]["content"][0]["image_url"]["url"]
-                .as_str()
-                .unwrap();
-            let bytes = STANDARD
-                .decode(data_url.rsplit(',').next().unwrap())
-                .unwrap();
-            let page = image::load_from_memory(&bytes)
-                .unwrap()
-                .to_rgb8()
-                .get_pixel(0, 0)[0] as usize;
+            let (left, right) = if let Some(priority) =
+                request.get("priority").and_then(serde_json::Value::as_i64)
+            {
+                (priority, priority + 1)
+            } else {
+                let data_url = request["messages"][1]["content"][0]["image_url"]["url"]
+                    .as_str()
+                    .unwrap();
+                let bytes = STANDARD
+                    .decode(data_url.rsplit(',').next().unwrap())
+                    .unwrap();
+                let page = image::load_from_memory(&bytes)
+                    .unwrap()
+                    .to_rgb8()
+                    .get_pixel(0, 0)[0] as i64;
+                ((page + 1) * 100, (page + 1) * 100 + 50)
+            };
             format!(
-                "<|box_start|>{} 0 {} 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>",
-                (page + 1) * 100,
-                (page + 1) * 100 + 50
+                "<|box_start|>{left} 0 {right} 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>"
             )
         } else {
             "  raw semantic  ".into()
@@ -1910,14 +2206,33 @@ mod tests {
     }
 
     fn image_input() -> VlmImageInput {
+        sized_image_input(32, 32)
+    }
+
+    fn sized_image_input(width: u32, height: u32) -> VlmImageInput {
         let mut bytes = vec![];
-        DynamicImage::new_rgb8(32, 32)
+        DynamicImage::new_rgb8(width, height)
             .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
         VlmImageInput::Bytes {
             data: bytes.into(),
             media_type: Some("image/png".into()),
         }
+    }
+
+    #[tokio::test]
+    async fn semantic_remote_url_is_rejected_before_request() {
+        let state = mock_state();
+        let client = mock_client(state.clone()).await;
+        let result = client
+            .layout_detect(
+                VlmImageInput::RemoteUrl("https://example.com/image.png".parse().unwrap()),
+                None,
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(VlmError::InvalidImageInput(_))));
+        assert_eq!(state.requests.load(Ordering::SeqCst), 0);
     }
 
     fn block(kind: &str) -> VlmLayoutBlock {
@@ -1998,6 +2313,93 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.len(), 4);
         assert_eq!(parsed[1].block_type, BlockKind::TABLE);
+    }
+
+    #[test]
+    fn capped_preprocessing_rejects_derived_allocations() {
+        let pre = MinerUVlmPreprocessor {
+            config: MinerUVlmConfig::default(),
+        };
+        let resized = pre.resize_by_need(DynamicImage::new_rgb8(13, 13)).unwrap();
+        assert_eq!((resized.width(), resized.height()), (29, 29));
+        assert!(matches!(
+            pre.resize_by_need_capped(DynamicImage::new_rgb8(13, 13), 800),
+            Err(VlmError::LimitExceeded {
+                resource: "image pixels",
+                limit: 800,
+                actual: 841,
+            })
+        ));
+        let mut blocks = vec![block(BlockKind::TABLE)];
+        let candidate = SemanticCandidate {
+            original_index: 0,
+            block: from_vlm(blocks[0].clone()),
+            absorbed: vec![],
+        };
+        assert!(matches!(
+            pre.encode_semantic_candidate_capped(
+                &RgbImage::new(13, 13),
+                &mut blocks,
+                &candidate,
+                800,
+            ),
+            Err(VlmError::LimitExceeded {
+                resource: "image pixels",
+                limit: 800,
+                actual: 841,
+            })
+        ));
+        assert!(matches!(
+            pre.resize_by_need_capped(DynamicImage::new_rgb8(10_000, 1), 10_000),
+            Err(VlmError::LimitExceeded {
+                resource: "image pixels",
+                limit: 10_000,
+                actual: 2_000_000,
+            })
+        ));
+
+        let pre = MinerUVlmPreprocessor {
+            config: MinerUVlmConfig {
+                layout_image_size: (u32::MAX, u32::MAX),
+                ..Default::default()
+            },
+        };
+        assert!(matches!(
+            pre.prepare_for_layout_capped(DynamicImage::new_rgb8(1, 1), 100),
+            Err(VlmError::LimitExceeded {
+                resource: "image pixels",
+                limit: 100,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn semantic_layout_route_enforces_preprocessing_pixel_cap_before_request() {
+        let state = mock_state();
+        let client = mock_client_with(
+            state.clone(),
+            VlmHttpConfig {
+                max_decoded_pixels: 100,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                layout_image_size: (11, 10),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(matches!(
+            client
+                .layout_detect(sized_image_input(1, 1), None, None)
+                .await,
+            Err(VlmError::LimitExceeded {
+                resource: "image pixels",
+                limit: 100,
+                actual: 110,
+            })
+        ));
+        assert_eq!(state.requests.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2088,8 +2490,8 @@ mod tests {
         image.put_pixel(0, 2, image::Rgb([3, 0, 0]));
         image.put_pixel(1, 2, image::Rgb([4, 0, 0]));
         let bbox = NormalizedBbox::new(0., 0., 1., 1.).unwrap();
-        let ccw = semantic_crop(&image, bbox, Some(Rotation::Deg90));
-        let cw = semantic_crop(&image, bbox, Some(Rotation::Deg270));
+        let ccw = semantic_crop(&image, bbox, Some(Rotation::Deg90), u64::MAX).unwrap();
+        let cw = semantic_crop(&image, bbox, Some(Rotation::Deg270), u64::MAX).unwrap();
         assert_eq!((ccw.width(), ccw.height()), (3, 2));
         assert_eq!(ccw.get_pixel(0, 1), &image::Rgb([1, 0, 0]));
         assert_eq!(ccw.get_pixel(2, 1), &image::Rgb([3, 0, 0]));
@@ -2321,21 +2723,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_two_step_uses_configured_semaphore_and_keeps_order() {
-        let state = mock_state();
-        let client = mock_client(state.clone()).await;
+    async fn two_step_and_stepping_batch_admit_paths_before_reuse() {
+        fn write_png(path: &std::path::Path) {
+            let VlmImageInput::Bytes { data, .. } = sized_image_input(2, 2) else {
+                unreachable!()
+            };
+            std::fs::write(path, data).unwrap();
+        }
+
+        let single_dir = tempfile::tempdir().unwrap();
+        let single = single_dir.path().join("single.png");
+        write_png(&single);
+        let client = delete_paths_client(vec![single.clone()]).await;
         let output = client
-            .concurrent_two_step_extract(
-                vec![image_input(), image_input(), image_input()],
-                VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
+            .two_step_extract(
+                VlmImageInput::Path(single.clone()),
+                None,
                 vec![],
                 None,
                 None,
             )
             .await
             .unwrap();
-        assert_eq!(state.layout_peak.load(Ordering::SeqCst), 2);
-        assert!(state.peak.load(Ordering::SeqCst) <= 2);
+        assert!(!single.exists());
+        assert_eq!(output.blocks[0].content.as_deref(), Some("recognized"));
+
+        let batch_dir = tempfile::tempdir().unwrap();
+        let paths = [
+            batch_dir.path().join("first.png"),
+            batch_dir.path().join("second.png"),
+        ];
+        for path in &paths {
+            write_png(path);
+        }
+        let client = delete_paths_client(paths.to_vec()).await;
+        let output = client
+            .stepping_two_step_extract(
+                paths.iter().cloned().map(VlmImageInput::Path).collect(),
+                VlmBatchPriority::All(None),
+                vec![],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert_eq!(output.len(), 2);
+        assert!(
+            output
+                .iter()
+                .all(|page| page.blocks[0].content.as_deref() == Some("recognized"))
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_two_step_uses_configured_semaphore_and_keeps_order() {
+        let state = window_state();
+        let client = window_client(state.clone()).await;
+        let task = tokio::spawn(async move {
+            client
+                .concurrent_two_step_extract(
+                    vec![image_input(), image_input(), image_input()],
+                    VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
+                    vec![],
+                    None,
+                    None,
+                )
+                .await
+        });
+        timeout(Duration::from_secs(5), state.first_two.wait())
+            .await
+            .unwrap();
+        assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(state.layouts.load(Ordering::SeqCst), 2);
+        state.release.notify_waiters();
+        let output = timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.peak.load(Ordering::SeqCst), 2);
         assert_eq!(
             output
                 .iter()
@@ -2375,12 +2842,12 @@ mod tests {
             .aio_batch_layout_detect(
                 vec![image_input(), image_input(), image_input()],
                 VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
-                Some(Arc::new(tokio::sync::Semaphore::new(2))),
+                Some(Arc::new(tokio::sync::Semaphore::new(1))),
                 None,
             )
             .await
             .unwrap();
-        assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(state.peak.load(Ordering::SeqCst), 1);
         assert_eq!(
             output
                 .iter()
@@ -2392,17 +2859,27 @@ mod tests {
 
     #[tokio::test]
     async fn axum_batch_layout_uses_configured_shared_semaphore() {
-        let state = mock_state();
-        let client = mock_client(state.clone()).await;
-        let output = client
-            .batch_layout_detect(
-                vec![image_input(), image_input(), image_input()],
-                VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
-                None,
-            )
+        let state = window_state();
+        let client = window_client(state.clone()).await;
+        let task = tokio::spawn(async move {
+            client
+                .batch_layout_detect(
+                    vec![image_input(), image_input(), image_input()],
+                    VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
+                    None,
+                )
+                .await
+        });
+        timeout(Duration::from_secs(5), state.first_two.wait())
             .await
             .unwrap();
         assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+        state.release.notify_waiters();
+        let output = timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         assert_eq!(
             output
                 .iter()
@@ -2539,6 +3016,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_extract_with_layout_keeps_item_and_priority_order() {
+        let state = mock_state();
+        let client = mock_client(state.clone()).await;
+        let output = client
+            .batch_extract_with_layout(
+                vec![image_input(), image_input()],
+                vec![vec![block(BlockKind::TEXT)], vec![block(BlockKind::TEXT)]],
+                VlmBatchPriority::PerItem(vec![Some(20), Some(10)]),
+                vec![],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            output[0].blocks[0].content.as_deref(),
+            Some("recognized-20")
+        );
+        assert_eq!(
+            output[1].blocks[0].content.as_deref(),
+            Some("recognized-10")
+        );
+    }
+
+    #[tokio::test]
     async fn axum_scored_batches_reject_before_validation_or_chat() {
         let state = mock_state();
         let client = mock_client(state.clone()).await;
@@ -2657,8 +3160,13 @@ mod tests {
             .unwrap();
         assert_eq!(candidates.len(), 1);
         assert!(!blocks[0].metadata.contains_key("_table_image_token_map"));
-        pre.encode_semantic_candidate(&RgbImage::new(32, 32), &mut blocks, &candidates[0])
-            .unwrap();
+        pre.encode_semantic_candidate_capped(
+            &RgbImage::new(32, 32),
+            &mut blocks,
+            &candidates[0],
+            u64::MAX,
+        )
+        .unwrap();
         assert!(blocks[0].metadata.contains_key("_table_image_token_map"));
     }
 
@@ -2785,7 +3293,7 @@ mod tests {
         let image = Arc::new(RgbImage::from_pixel(8, 8, image::Rgb([7, 0, 0])));
         let layout_bytes = client
             .preprocessor
-            .prepare_rgb_for_layout(&image)
+            .prepare_rgb_for_layout_capped(&image, u64::MAX)
             .unwrap()
             .image
             .data

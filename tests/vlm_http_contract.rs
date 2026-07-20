@@ -246,9 +246,9 @@ async fn routes_are_source_faithful_and_server_urls_are_safe() {
     for (base, expected) in [
         (root.clone(), "/v1/chat/completions"),
         (format!("{root}/"), "/v1/chat/completions"),
-        (format!("{root}/proxy"), "/v1/chat/completions"),
+        (format!("{root}/proxy"), "/proxy/v1/chat/completions"),
         (format!("{root}/proxy/"), "/proxy/v1/chat/completions"),
-        (format!("{root}/v1/"), "/v1/v1/chat/completions"),
+        (format!("{root}/v1/"), "/v1/chat/completions"),
     ] {
         assert_eq!(
             client(base)
