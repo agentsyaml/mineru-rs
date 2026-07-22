@@ -1,6 +1,7 @@
 //! Shared API for the MinerU VLM client.
 
 mod client;
+pub mod command;
 mod config;
 mod document_postprocess;
 mod error;
@@ -35,6 +36,7 @@ mod vlm_types;
 pub mod vlm_api;
 
 pub use client::MinerUClient;
+pub use command::{RunContext, RunError, RunOptions, RunReport, run, run_with_context};
 pub use config::{BearerToken, ClientConfig, Limits, Timeouts};
 pub use error::{Error, ErrorContext, Result, VlmError, VlmResult};
 #[doc(hidden)]

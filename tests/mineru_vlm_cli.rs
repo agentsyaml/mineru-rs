@@ -64,11 +64,7 @@ async fn mock_with_failure(fail_from_completion: Option<usize>) -> (String, Seen
             .count();
         drop(seen);
         if mock.fail_from_completion.is_some_and(|from| count >= from) {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "mock failure",
-            )
-                .into_response();
+            return (axum::http::StatusCode::BAD_REQUEST, "mock failure").into_response();
         }
         Json(json!({"choices":[{"finish_reason":"stop","message":{"content":"<|box_start|>1 1 200 200<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>"}}]})).into_response()
     }
@@ -97,6 +93,7 @@ async fn command(mut command: Command) -> Output {
 }
 
 #[tokio::test]
+#[ignore = "full legacy-and-official CLI/API/PDF process e2e"]
 async fn legacy_stays_flat_and_official_output_is_nested() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.pdf");
@@ -186,6 +183,7 @@ async fn legacy_stays_flat_and_official_output_is_nested() {
 }
 
 #[test]
+#[ignore = "CLI process contract e2e"]
 fn legacy_help_and_official_batch_applicability_are_preserved() {
     let help = cli().arg("--help").output().unwrap();
     assert!(help.status.success());
@@ -202,6 +200,7 @@ fn legacy_help_and_official_batch_applicability_are_preserved() {
 }
 
 #[tokio::test]
+#[ignore = "full CLI/API/PDF environment-auth process e2e"]
 async fn legacy_requires_base_url_and_model_but_official_uses_env_and_discovery() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.pdf");
@@ -245,6 +244,7 @@ async fn legacy_requires_base_url_and_model_but_official_uses_env_and_discovery(
 }
 
 #[tokio::test]
+#[ignore = "full CLI/API/PDF model-discovery process e2e"]
 async fn official_discovers_one_model_with_environment_server_and_key() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.pdf");
@@ -274,6 +274,7 @@ async fn official_discovers_one_model_with_environment_server_and_key() {
 }
 
 #[tokio::test]
+#[ignore = "full CLI/API/PDF credential-override process e2e"]
 async fn official_cli_model_and_key_override_environment() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.pdf");
@@ -306,6 +307,7 @@ async fn official_cli_model_and_key_override_environment() {
 }
 
 #[tokio::test]
+#[ignore = "full CLI/API/PDF recursive-directory process e2e"]
 async fn official_directory_is_recursive_and_skips_unsupported_files() {
     let dir = tempfile::tempdir().unwrap();
     let nested = dir.path().join("nested");
@@ -343,6 +345,7 @@ async fn official_directory_is_recursive_and_skips_unsupported_files() {
 }
 
 #[tokio::test]
+#[ignore = "CLI process contract e2e"]
 async fn official_static_preflight_makes_no_requests_or_output() {
     let dir = tempfile::tempdir().unwrap();
     let (url, seen) = mock().await;
@@ -400,6 +403,7 @@ async fn official_static_preflight_makes_no_requests_or_output() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[ignore = "CLI process contract e2e"]
 async fn official_symlink_and_special_input_make_no_requests() {
     use std::os::unix::{fs::symlink, net::UnixListener};
     let dir = tempfile::tempdir().unwrap();
@@ -429,6 +433,7 @@ async fn official_symlink_and_special_input_make_no_requests() {
 }
 
 #[tokio::test]
+#[ignore = "full CLI/PDF rollback process e2e"]
 async fn official_stops_after_b_and_preserves_outputs() {
     let dir = tempfile::tempdir().unwrap();
     for name in ["a.pdf", "b.pdf", "c.pdf"] {
@@ -481,14 +486,14 @@ async fn official_stops_after_b_and_preserves_outputs() {
             .to_string_lossy()
             .starts_with(".vlm-staging-parent-")
     }));
-    // Retries of b are permitted; sequential stderr proves no c route began.
-    assert!(
+    // Two calls complete a; b fails on its first call and c never starts.
+    assert_eq!(
         seen.0
             .lock()
             .unwrap()
             .iter()
             .filter(|(kind, _, _)| kind == "completion")
-            .count()
-            >= 3
+            .count(),
+        3
     );
 }

@@ -14,7 +14,11 @@ requires-python = ">=3.9"
 Repository = "https://github.com/agentsyaml/mineru-rs"
 Issues = "https://github.com/agentsyaml/mineru-rs/issues"
 
+[project.scripts]
+mineru = "mineru_rs._cli:main"
+
 [tool.maturin]
 manifest-path = "Cargo.toml"
-module-name = "mineru_rs"
+module-name = "mineru_rs._native"
+python-source = "python"
 features = ["pyo3/extension-module"]

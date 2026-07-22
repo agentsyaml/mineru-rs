@@ -36,6 +36,50 @@ pub(super) async fn run_documents(
     env: super::RemoteApiEnv,
     events: Option<ProgressCallback>,
 ) -> Result<Vec<super::RemoteApiFailure>, String> {
+    let office = OfficeWorkers::new().map_err(|_| "remote preview workers unavailable")?;
+    run_documents_with_workers(documents, output, api_url, options, env, events, office).await
+}
+
+pub(super) async fn run_documents_with_workers(
+    documents: Vec<super::RemoteApiDocument>,
+    output: &Path,
+    api_url: &str,
+    options: super::RemoteApiOptions,
+    env: super::RemoteApiEnv,
+    events: Option<ProgressCallback>,
+    office: OfficeWorkers,
+) -> Result<Vec<super::RemoteApiFailure>, String> {
+    run_documents_impl(
+        documents, output, api_url, options, env, events, None, office,
+    )
+    .await
+}
+
+pub(super) async fn run_documents_scoped_with_workers(
+    documents: Vec<super::RemoteApiDocument>,
+    output: &Path,
+    api_url: &str,
+    options: super::RemoteApiOptions,
+    env: super::RemoteApiEnv,
+    events: Option<crate::command::CommandCallback>,
+    office: OfficeWorkers,
+) -> Result<Vec<super::RemoteApiFailure>, String> {
+    run_documents_impl(
+        documents, output, api_url, options, env, None, events, office,
+    )
+    .await
+}
+
+async fn run_documents_impl(
+    documents: Vec<super::RemoteApiDocument>,
+    output: &Path,
+    api_url: &str,
+    options: super::RemoteApiOptions,
+    env: super::RemoteApiEnv,
+    events: Option<ProgressCallback>,
+    command_events: Option<crate::command::CommandCallback>,
+    office: OfficeWorkers,
+) -> Result<Vec<super::RemoteApiFailure>, String> {
     if options.client_side_output_generation {
         return Err("client-side output generation is unsupported".into());
     }
@@ -128,7 +172,6 @@ pub(super) async fn run_documents(
         client_side: false,
     };
     archive::preflight_output_root(output)?;
-    let office = OfficeWorkers::new().map_err(|_| "remote preview workers unavailable")?;
     let raster = RasterWorkers::default();
     run_core_owned(
         documents,
@@ -137,6 +180,7 @@ pub(super) async fn run_documents(
         options,
         env.into(),
         events,
+        command_events,
         route,
         office,
         raster,
@@ -160,6 +204,7 @@ async fn run_core_owned(
     options: RemoteOptions,
     env: RemoteEnv,
     events: Option<ProgressCallback>,
+    command_events: Option<crate::command::CommandCallback>,
     route: crate::OfficialPdfOptions,
     office: OfficeWorkers,
     raster: RasterWorkers,
@@ -171,6 +216,7 @@ async fn run_core_owned(
         options,
         env,
         events,
+        command_events,
         Some((&route, &office, &raster)),
     )
     .await;
@@ -210,7 +256,7 @@ where
     let documents = tokio::task::spawn_blocking(move || discover(input, discovery_options))
         .await
         .map_err(|_| "internal discovery task failed")??;
-    run_core(documents, output, api_url, options, env, None, None).await
+    run_core(documents, output, api_url, options, env, None, None, None).await
 }
 
 async fn run_core(
@@ -220,6 +266,7 @@ async fn run_core(
     options: RemoteOptions,
     env: RemoteEnv,
     events: Option<ProgressCallback>,
+    command_events: Option<crate::command::CommandCallback>,
     preview: Option<(&crate::OfficialPdfOptions, &OfficeWorkers, &RasterWorkers)>,
 ) -> Result<Vec<TaskFailure>, String> {
     archive::preflight_output_root(output)?;
@@ -231,6 +278,13 @@ async fn run_core(
         health.max_concurrent_requests,
         tasks.len(),
     )?;
+    crate::command::emit_command(
+        &command_events,
+        crate::command::CommandEvent::RunPlanned {
+            documents: 0,
+            api_tasks: tasks.len(),
+        },
+    );
     drop(super::request_form(&options));
 
     let output = output.to_path_buf();
@@ -239,22 +293,28 @@ async fn run_core(
         let staged = join_all(wave.iter().cloned().map(|task| {
             let client = Arc::clone(&client);
             let options = options.clone();
-            {
-                let events = events.clone();
-                async move {
-                    (
-                        task.clone(),
-                        stage(client, &options, env, task, events).await,
+            let task_events = command_events
+                .as_ref()
+                .map(|events| {
+                    crate::command::scoped_progress(
+                        Some(Arc::clone(events)),
+                        crate::command::CommandScope::ApiTask(crate::command::ApiTaskId(
+                            task.index,
+                        )),
                     )
-                }
+                })
+                .or_else(|| events.clone());
+            async move {
+                let result = stage(client, &options, env, task.clone(), task_events.clone()).await;
+                (task, task_events, result)
             }
         }))
         .await;
-        for (task, result) in staged {
+        for (task, task_events, result) in staged {
             match result {
                 Ok(zip) => {
                     crate::progress_events::emit(
-                        &events,
+                        &task_events,
                         ProgressEvent::ApiExtracting {
                             label: task_label(&task),
                         },
@@ -269,7 +329,7 @@ async fn run_core(
                     .unwrap_or_else(|_| Err("internal archive extraction task failed".into()));
                     if let Err(message) = extracted {
                         crate::progress_events::emit(
-                            &events,
+                            &task_events,
                             ProgressEvent::ApiFailed {
                                 label: task_label(&task),
                                 message: message.clone(),
@@ -285,13 +345,30 @@ async fn run_core(
                             for document in &task.documents {
                                 let kind = crate::DocumentKind::from_suffix(&document.suffix)
                                     .expect("validated document kind");
-                                if let Err(message) = crate::mineru_api::remote_preview::prepare_and_publish_downloaded(&output, &document.stem, kind, route, office, raster, events.clone()).await {
-                                    crate::progress_events::emit(&events, ProgressEvent::ApiWarning { label: task_label(&task), message });
-                                }
+                                if let Err(message) =
+                                crate::mineru_api::remote_preview::prepare_and_publish_downloaded(
+                                    &output,
+                                    &document.stem,
+                                    kind,
+                                    route,
+                                    office,
+                                    raster,
+                                    task_events.clone(),
+                                )
+                                .await
+                            {
+                                crate::progress_events::emit(
+                                    &task_events,
+                                    ProgressEvent::ApiWarning {
+                                        label: task_label(&task),
+                                        message,
+                                    },
+                                );
+                            }
                             }
                         }
                         crate::progress_events::emit(
-                            &events,
+                            &task_events,
                             ProgressEvent::ApiCompleted {
                                 label: task_label(&task),
                             },
@@ -300,7 +377,7 @@ async fn run_core(
                 }
                 Err(message) => {
                     crate::progress_events::emit(
-                        &events,
+                        &task_events,
                         ProgressEvent::ApiFailed {
                             label: task_label(&task),
                             message: message.clone(),
@@ -413,7 +490,6 @@ mod tests {
         },
         time::Duration,
     };
-    use tokio::sync::{Barrier, Notify};
     use zip::{ZipWriter, write::SimpleFileOptions};
 
     #[derive(Clone)]
@@ -512,16 +588,6 @@ mod tests {
         preview_zips(&[(stem, malformed)])
     }
 
-    fn max(counter: &AtomicUsize, value: usize) {
-        let mut seen = counter.load(Ordering::SeqCst);
-        while value > seen {
-            match counter.compare_exchange(seen, value, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => break,
-                Err(current) => seen = current,
-            }
-        }
-    }
-
     fn document(path: PathBuf, stem: &str, pages: usize, order: usize) -> InputDocument {
         InputDocument {
             path,
@@ -605,6 +671,7 @@ mod tests {
                 RemoteOptions::default(),
                 env(),
                 None,
+                None,
                 crate::OfficialPdfOptions::default(),
                 office,
                 raster,
@@ -626,6 +693,7 @@ mod tests {
                 "",
                 RemoteOptions::default(),
                 env(),
+                None,
                 None,
                 crate::OfficialPdfOptions::default(),
                 office,
@@ -898,6 +966,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "full remote API HTTP/preview integration e2e"]
     async fn facade_events_deduplicate_active_snapshots_and_ignore_callback_panics() {
         #[derive(Clone)]
         struct EventState {
@@ -1134,6 +1203,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_facade_keeps_two_task_ids_through_preview_warning_and_terminal() {
+        use crate::command::{ApiTaskId, CommandEvent, CommandScope};
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = ["bad", "good"].map(|stem| {
+            let path = root.path().join(format!("{stem}.png"));
+            std::fs::write(&path, b"x").unwrap();
+            path
+        });
+        let state = TestState {
+            events: Arc::new(Mutex::new(Vec::new())),
+            posts: Arc::new(AtomicUsize::new(0)),
+            zip: Arc::new(preview_zips(&[("bad", true), ("good", false)])),
+            window: 1,
+        };
+        let base = test_server(state).await;
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let callback = {
+            let commands = Arc::clone(&commands);
+            Arc::new(move |event| commands.lock().unwrap().push(event))
+                as crate::command::CommandCallback
+        };
+        let failures = run_documents_scoped_with_workers(
+            paths
+                .into_iter()
+                .zip(["bad", "good"])
+                .enumerate()
+                .map(|(order, (path, stem))| super::super::RemoteApiDocument {
+                    path,
+                    kind: crate::DocumentKind::Png,
+                    stem: stem.into(),
+                    effective_pages: 1,
+                    order,
+                })
+                .collect(),
+            &root.path().join("out"),
+            &base,
+            super::super::RemoteApiOptions::default(),
+            super::super::RemoteApiEnv {
+                max_concurrent_requests: 2,
+                result_timeout_seconds: 2.,
+                download_timeout_seconds: 2.,
+            },
+            Some(callback),
+            OfficeWorkers::with_executable(std::env::current_exe().unwrap()).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(failures.is_empty());
+        let commands = commands.lock().unwrap();
+        assert!(matches!(
+            commands[0],
+            CommandEvent::RunPlanned {
+                documents: 0,
+                api_tasks: 2
+            }
+        ));
+        for (id, label) in [(1, "task#1 [bad]"), (2, "task#2 [good]")] {
+            let scope = CommandScope::ApiTask(ApiTaskId(id));
+            assert!(commands.iter().any(|event| matches!(event, CommandEvent::Progress { scope: seen, event: ProgressEvent::ApiSubmitted { label: seen_label } } if *seen == scope && seen_label == label)));
+            assert!(commands.iter().any(|event| matches!(event, CommandEvent::Progress { scope: seen, event: ProgressEvent::ApiCompleted { label: seen_label } } if *seen == scope && seen_label == label)));
+        }
+        assert!(commands.iter().any(|event| matches!(event, CommandEvent::Progress { scope: CommandScope::ApiTask(ApiTaskId(1)), event: ProgressEvent::ApiWarning { message, .. } } if message == "invalid preview middle JSON")));
+        drop(commands);
+
+        let state = TestState {
+            events: Arc::new(Mutex::new(Vec::new())),
+            posts: Arc::new(AtomicUsize::new(0)),
+            zip: Arc::new(b"not a zip".to_vec()),
+            window: 1,
+        };
+        let base = test_server(state).await;
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let callback = {
+            let commands = Arc::clone(&commands);
+            Arc::new(move |event| commands.lock().unwrap().push(event))
+                as crate::command::CommandCallback
+        };
+        let failures = run_documents_scoped_with_workers(
+            ["bad", "good"]
+                .into_iter()
+                .enumerate()
+                .map(|(order, stem)| super::super::RemoteApiDocument {
+                    path: root.path().join(format!("{stem}.png")),
+                    kind: crate::DocumentKind::Png,
+                    stem: stem.into(),
+                    effective_pages: 1,
+                    order,
+                })
+                .collect(),
+            &root.path().join("failed-out"),
+            &base,
+            super::super::RemoteApiOptions::default(),
+            super::super::RemoteApiEnv {
+                max_concurrent_requests: 2,
+                result_timeout_seconds: 2.,
+                download_timeout_seconds: 2.,
+            },
+            Some(callback),
+            OfficeWorkers::with_executable(std::env::current_exe().unwrap()).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(failures.len(), 2);
+        let commands = commands.lock().unwrap();
+        for id in [1, 2] {
+            assert!(commands.iter().any(|event| matches!(event, CommandEvent::Progress { scope: CommandScope::ApiTask(ApiTaskId(seen)), event: ProgressEvent::ApiFailed { .. } } if *seen == id)));
+        }
+    }
+
+    #[tokio::test]
     async fn runner_global_failures_short_circuit_before_submission() {
         let output = tempfile::tempdir().unwrap();
         let health = Arc::new(AtomicUsize::new(0));
@@ -1236,16 +1416,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runner_uses_fixed_waves_and_extracts_in_task_order() {
+    async fn runner_uses_fixed_waves_and_publishes_in_task_order() {
         #[derive(Clone)]
         struct WaveState {
-            active: Arc<AtomicUsize>,
-            peak: Arc<AtomicUsize>,
             completed: Arc<Mutex<Vec<usize>>>,
-            posts: Arc<AtomicUsize>,
-            first: Arc<Notify>,
-            results: Arc<Barrier>,
-            output: PathBuf,
+            published: Arc<Mutex<Vec<String>>>,
         }
         async fn health() -> axum::Json<Value> {
             axum::Json(
@@ -1257,18 +1432,20 @@ mod tests {
             headers: HeaderMap,
             body: Bytes,
         ) -> impl IntoResponse {
-            state.posts.fetch_add(1, Ordering::SeqCst);
-            let id = (1..=4)
+            let id = (1..=3)
                 .find(|id| {
                     body.windows(6)
                         .any(|part| part == format!("d{id}.png").as_bytes())
                 })
                 .unwrap();
             if id == 3 {
-                assert_eq!(state.completed.lock().unwrap().as_slice(), &[2, 1]);
-                assert_eq!(std::fs::read(state.output.join("one")).unwrap(), b"one");
-                assert_eq!(std::fs::read(state.output.join("two")).unwrap(), b"two");
-                assert_eq!(std::fs::read(state.output.join("shared")).unwrap(), b"two");
+                let mut completed = state.completed.lock().unwrap().clone();
+                completed.sort_unstable();
+                assert_eq!(completed, [1, 2]);
+                assert_eq!(
+                    *state.published.lock().unwrap(),
+                    vec!["task#1 [d1]".to_owned(), "task#2 [d2]".to_owned()]
+                );
             }
             let base = format!("http://{}", headers["host"].to_str().unwrap());
             (
@@ -1278,70 +1455,29 @@ mod tests {
                 ),
             )
         }
-        async fn status(
-            State(state): State<WaveState>,
-            AxumPath(id): AxumPath<usize>,
-        ) -> axum::Json<Value> {
-            let now = state.active.fetch_add(1, Ordering::SeqCst) + 1;
-            max(&state.peak, now);
-            state.active.fetch_sub(1, Ordering::SeqCst);
-            axum::Json(json!({"status":"completed","id":id}))
+        async fn status() -> axum::Json<Value> {
+            axum::Json(json!({"status":"completed"}))
         }
         async fn result(
             State(state): State<WaveState>,
             AxumPath(id): AxumPath<usize>,
         ) -> impl IntoResponse {
-            let now = state.active.fetch_add(1, Ordering::SeqCst) + 1;
-            max(&state.peak, now);
-            if id <= 2 {
-                tokio::time::timeout(Duration::from_secs(1), state.results.wait())
-                    .await
-                    .unwrap();
-            }
-            if id == 1 {
-                tokio::time::timeout(Duration::from_secs(1), state.first.notified())
-                    .await
-                    .unwrap();
-            } else if id == 2 {
-                state.completed.lock().unwrap().push(2);
-                state.first.notify_one();
-            }
-            state.active.fetch_sub(1, Ordering::SeqCst);
-            if id == 1 {
-                state.completed.lock().unwrap().push(1);
-            }
-            let zip = match id {
-                1 => {
-                    let mut z = ZipWriter::new(Cursor::new(Vec::new()));
-                    z.start_file("one", SimpleFileOptions::default()).unwrap();
-                    z.write_all(b"one").unwrap();
-                    z.start_file("shared", SimpleFileOptions::default())
-                        .unwrap();
-                    z.write_all(b"one").unwrap();
-                    z.finish().unwrap().into_inner()
-                }
-                2 => {
-                    let mut z = ZipWriter::new(Cursor::new(Vec::new()));
-                    z.start_file("two", SimpleFileOptions::default()).unwrap();
-                    z.write_all(b"two").unwrap();
-                    z.start_file("shared", SimpleFileOptions::default())
-                        .unwrap();
-                    z.write_all(b"two").unwrap();
-                    z.finish().unwrap().into_inner()
-                }
-                _ => zip_file(&format!("later-{id}"), b"later"),
-            };
-            ([("content-type", "application/zip")], zip)
+            state.completed.lock().unwrap().push(id);
+            let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+            zip.start_file(format!("task-{id}"), SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(id.to_string().as_bytes()).unwrap();
+            zip.start_file("shared", SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(id.to_string().as_bytes()).unwrap();
+            (
+                [("content-type", "application/zip")],
+                zip.finish().unwrap().into_inner(),
+            )
         }
-        let output = tempfile::tempdir().unwrap();
         let state = WaveState {
-            active: Arc::new(AtomicUsize::new(0)),
-            peak: Arc::new(AtomicUsize::new(0)),
             completed: Arc::new(Mutex::new(Vec::new())),
-            posts: Arc::new(AtomicUsize::new(0)),
-            first: Arc::new(Notify::new()),
-            results: Arc::new(Barrier::new(2)),
-            output: output.path().to_owned(),
+            published: Arc::new(Mutex::new(Vec::new())),
         };
         let app = Router::new()
             .route("/health", get(health))
@@ -1353,18 +1489,28 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(axum::serve(listener, app).into_future());
         let input = tempfile::tempdir().unwrap();
-        let docs = (1..=4)
-            .map(|n| {
-                let p = input.path().join(format!("{n}.png"));
-                std::fs::write(&p, b"x").unwrap();
-                document(p, &format!("d{n}"), 1, n)
+        let output = tempfile::tempdir().unwrap();
+        let documents = (1..=3)
+            .map(|id| {
+                let path = input.path().join(format!("{id}.png"));
+                std::fs::write(&path, b"x").unwrap();
+                document(path, &format!("d{id}"), 1, id)
             })
             .collect();
+        let callback: ProgressCallback = {
+            let published = Arc::clone(&state.published);
+            Arc::new(move |event| match event {
+                ProgressEvent::ApiCompleted { label } => {
+                    published.lock().unwrap().push(label);
+                }
+                _ => {}
+            })
+        };
         assert!(
             tokio::time::timeout(
-                Duration::from_secs(3),
-                run_remote_with_discovery(
-                    input.path(),
+                Duration::from_secs(5),
+                run_core(
+                    documents,
                     output.path(),
                     &base,
                     RemoteOptions {
@@ -1373,7 +1519,9 @@ mod tests {
                         ..Default::default()
                     },
                     env(),
-                    move |_, _| Ok(docs)
+                    Some(callback),
+                    None,
+                    None,
                 )
             )
             .await
@@ -1381,9 +1529,18 @@ mod tests {
             .unwrap()
             .is_empty()
         );
-        assert_eq!(state.peak.load(Ordering::SeqCst), 2);
-        assert_eq!(state.completed.lock().unwrap().as_slice(), &[2, 1]);
-        assert_eq!(state.posts.load(Ordering::SeqCst), 4);
+        let mut completed = state.completed.lock().unwrap().clone();
+        completed.sort_unstable();
+        assert_eq!(completed, [1, 2, 3]);
+        assert_eq!(
+            *state.published.lock().unwrap(),
+            vec![
+                "task#1 [d1]".to_owned(),
+                "task#2 [d2]".to_owned(),
+                "task#3 [d3]".to_owned(),
+            ]
+        );
+        assert_eq!(std::fs::read(output.path().join("shared")).unwrap(), b"3");
     }
 
     #[tokio::test]

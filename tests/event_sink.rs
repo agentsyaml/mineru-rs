@@ -1,8 +1,5 @@
-#[path = "../src/bin/support/event_sink.rs"]
-mod event_sink;
-
-use event_sink::{EventSink, LogLevel};
 use mineru::ProgressEvent::*;
+use mineru::command::plain::{EventSink, LogLevel};
 use std::{
     ffi::OsString,
     io::Write,

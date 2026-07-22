@@ -80,11 +80,19 @@ fn rotate(image: RgbImage, rotation: Option<Rotation>) -> RgbImage {
     }
 }
 pub(crate) fn data_url(image: &RgbImage) -> Result<String> {
+    Ok(png_data_url(&png_bytes(image)?))
+}
+
+pub(crate) fn png_bytes(image: &RgbImage) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     DynamicImage::ImageRgb8(image.clone())
         .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
         .map_err(|e| Error::Image(e.to_string()))?;
-    Ok(format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
+    Ok(bytes)
+}
+
+fn png_data_url(bytes: &[u8]) -> String {
+    format!("data:image/png;base64,{}", STANDARD.encode(bytes))
 }
 
 pub(crate) fn jpeg_data_url(image: &RgbImage) -> Result<String> {
@@ -311,6 +319,18 @@ fn paint_token(image: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, text: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_data_url_uses_the_canonical_png_bytes() {
+        let image = RgbImage::from_pixel(2, 1, Rgb([1, 2, 3]));
+        let bytes = png_bytes(&image).unwrap();
+        assert_eq!(
+            STANDARD
+                .decode(data_url(&image).unwrap().rsplit(',').next().unwrap())
+                .unwrap(),
+            bytes
+        );
+    }
 
     #[test]
     fn table_coordinate_scaling_is_overflow_safe_and_compatible() {

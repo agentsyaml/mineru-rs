@@ -1,4 +1,4 @@
-use crate::{Error, Limits, PdfInput, Result};
+use crate::{Error, Limits, PdfInput, Result, TaskWorkLease};
 use bytes::Bytes;
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{RenderSettings, hayro_interpret::InterpreterSettings, hayro_syntax::Pdf, render};
@@ -105,6 +105,16 @@ pub(crate) async fn render_window(
     limits: Limits,
     workers: usize,
 ) -> Result<Vec<RenderedPage>> {
+    render_window_for_task(document, indexes, limits, workers, TaskWorkLease::default()).await
+}
+
+pub(crate) async fn render_window_for_task(
+    document: Arc<ParsedPdf>,
+    indexes: Vec<usize>,
+    limits: Limits,
+    workers: usize,
+    task_work_lease: TaskWorkLease,
+) -> Result<Vec<RenderedPage>> {
     let mut sizes = Vec::with_capacity(indexes.len());
     for index in indexes {
         sizes.push((index, page_dimensions(&document, index, &limits)?.2));
@@ -122,13 +132,20 @@ pub(crate) async fn render_window(
                 Arc::clone(&document),
                 window_pending.next().expect("window has enough pages"),
                 limits.clone(),
+                task_work_lease.clone(),
             );
         }
         while let Some(result) = tasks.join_next().await {
             let page = result.map_err(|e| Error::WorkerJoin(e.to_string()))??;
             rendered.insert(page.index, page);
             if let Some(index) = window_pending.next() {
-                spawn_render(&mut tasks, Arc::clone(&document), index, limits.clone());
+                spawn_render(
+                    &mut tasks,
+                    Arc::clone(&document),
+                    index,
+                    limits.clone(),
+                    task_work_lease.clone(),
+                );
             }
         }
     }
@@ -164,8 +181,9 @@ fn spawn_render(
     document: Arc<ParsedPdf>,
     index: usize,
     limits: Limits,
+    task_work_lease: TaskWorkLease,
 ) {
-    tasks.spawn_blocking(move || render_page_safe(&document, index, &limits));
+    tasks.spawn_blocking(task_work_lease.wrap(move || render_page_safe(&document, index, &limits)));
 }
 
 pub(crate) fn render_page_safe(

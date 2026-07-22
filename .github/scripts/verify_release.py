@@ -13,7 +13,11 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import typing
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -37,6 +41,7 @@ PLATFORMS = {
     "win32-x64-msvc": ("win32", "x64", None, "win_amd64"),
     "win32-arm64-msvc": ("win32", "arm64", None, ""),
 }
+NPM_ROOT_FILES = ["index.js", "index.d.ts", "api.js", "api.d.ts", "bin/mineru.js"]
 WHEEL_SLOTS = {
     "manylinux-x64": "manylinux2014_x86_64",
     "manylinux-arm64": "manylinux2014_aarch64",
@@ -45,6 +50,9 @@ WHEEL_SLOTS = {
     "windows-x64": "win_amd64",
 }
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+NPM_DEV_DEPENDENCIES = {"@napi-rs/cli": "^3.2.0"}
+PYPI_USER_AGENT = "mineru-rs-release-verifier/1"
 
 
 def fail(message: str) -> typing.NoReturn:
@@ -76,6 +84,42 @@ def only_files(directory: Path, suffix: str) -> list[Path]:
     if files != selected:
         fail(f"unexpected files in {directory}: {[str(p) for p in files if p not in selected]}")
     return selected
+
+
+def validate_node_root(npm: dict, lock: dict, version: str) -> None:
+    if npm.get("name") != NPM_ROOT or npm.get("version") != version:
+        fail("npm root name/version differs")
+    if npm.get("license") != LICENSE or repository_url(npm.get("repository")) != REPOSITORY:
+        fail("npm root repository/license differs")
+    if (
+        "dependencies" in npm
+        or "optionalDependencies" in npm
+        or npm.get("devDependencies") != NPM_DEV_DEPENDENCIES
+        or npm.get("main") != "api.js"
+        or npm.get("types") != "api.d.ts"
+        or npm.get("bin") != {"mineru": "bin/mineru.js"}
+        or npm.get("files") != NPM_ROOT_FILES
+        or any(field in npm for field in ("os", "cpu", "libc", "exports"))
+    ):
+        fail("npm root facade/dependency/platform metadata differs")
+    packages = lock.get("packages")
+    lock_root = packages.get("") if isinstance(packages, dict) else None
+    if not isinstance(lock_root, dict):
+        fail("npm lockfile has no valid root package")
+    if (lock.get("name"), lock.get("version"), lock_root.get("name"), lock_root.get("version")) != (
+        NPM_ROOT,
+        version,
+        NPM_ROOT,
+        version,
+    ):
+        fail("both npm lockfile root name/version fields must match")
+    if (
+        "dependencies" in lock_root
+        or "optionalDependencies" in lock_root
+        or lock_root.get("devDependencies") != npm["devDependencies"]
+        or lock_root.get("bin") != npm["bin"]
+    ):
+        fail("npm lockfile root dependency/bin metadata differs")
 
 
 def check_identity(args: argparse.Namespace) -> None:
@@ -119,18 +163,7 @@ def check_identity(args: argparse.Namespace) -> None:
 
     npm = load_json(args.root / "bindings/node/package.json")
     lock = load_json(args.root / "bindings/node/package-lock.json")
-    if npm.get("name") != NPM_ROOT or npm.get("version") != version:
-        fail("npm root name/version differs")
-    if npm.get("license") != LICENSE or repository_url(npm.get("repository")) != REPOSITORY:
-        fail("npm root repository/license differs")
-    lock_root = lock.get("packages", {}).get("", {})
-    if (lock.get("name"), lock.get("version"), lock_root.get("name"), lock_root.get("version")) != (
-        NPM_ROOT,
-        version,
-        NPM_ROOT,
-        version,
-    ):
-        fail("both npm lockfile root name/version fields must match")
+    validate_node_root(npm, lock, version)
     with (args.root / "bindings/python/pyproject.toml").open("rb") as f:
         if tomllib is None:
             fail("TOML verification requires Python 3.11+")
@@ -142,13 +175,15 @@ def check_identity(args: argparse.Namespace) -> None:
         or project.get("license") != LICENSE
         or project.get("urls", {}).get("Repository") != REPOSITORY
         or project.get("dynamic") != ["version"]
-        or maturin.get("module-name") != "mineru_rs"
+        or project.get("scripts") != {"mineru": "mineru_rs._cli:main"}
+        or maturin.get("module-name") != "mineru_rs._native"
+        or maturin.get("python-source") != "python"
     ):
         fail("PyPI distribution/module metadata differs")
     print(version)
 
 
-def archive_files(path: Path) -> tuple[str, dict[str, bytes]]:
+def archive_contents(path: Path) -> tuple[str, dict[str, bytes], dict[str, int]]:
     with tarfile.open(path, "r:gz") as archive:
         members = archive.getmembers()
         normalized = []
@@ -167,6 +202,7 @@ def archive_files(path: Path) -> tuple[str, dict[str, bytes]]:
             fail(f"archive {path} must have one root directory")
         root = roots.pop()
         files: dict[str, bytes] = {}
+        modes: dict[str, int] = {}
         for member, pure in normalized:
             if member.isdir():
                 continue
@@ -177,7 +213,14 @@ def archive_files(path: Path) -> tuple[str, dict[str, bytes]]:
             stream = archive.extractfile(member)
             if stream is None:
                 fail(f"cannot read tar member {member.name!r}")
-            files[PurePosixPath(*pure.parts[1:]).as_posix()] = stream.read()
+            relative = PurePosixPath(*pure.parts[1:]).as_posix()
+            files[relative] = stream.read()
+            modes[relative] = member.mode & 0o777
+    return root, files, modes
+
+
+def archive_files(path: Path) -> tuple[str, dict[str, bytes]]:
+    root, files, _ = archive_contents(path)
     return root, files
 
 
@@ -278,9 +321,10 @@ def check_crate(args: argparse.Namespace) -> None:
     print(path)
 
 
-def zip_files(path: Path) -> dict[str, bytes]:
+def zip_contents(path: Path) -> tuple[dict[str, bytes], dict[str, int]]:
     with zipfile.ZipFile(path) as archive:
         files = {}
+        modes = {}
         seen = set()
         for member in archive.infolist():
             pure = PurePosixPath(member.filename)
@@ -292,7 +336,13 @@ def zip_files(path: Path) -> dict[str, bytes]:
             seen.add(name)
             if not member.is_dir():
                 files[name] = archive.read(member)
-        return files
+                modes[name] = (member.external_attr >> 16) & 0o777
+        return files, modes
+
+
+def zip_files(path: Path) -> dict[str, bytes]:
+    files, _ = zip_contents(path)
+    return files
 
 
 def expected_wheel_tags(platform: str) -> set[str]:
@@ -306,7 +356,7 @@ def validate_wheel(path: Path, version: str) -> str:
     platform = match.group(1)
     if any(part.startswith("linux_") for part in platform.split(".")):
         fail(f"raw linux wheel is forbidden: {path.name}")
-    files = zip_files(path)
+    files, modes = zip_contents(path)
     metadata_names = [n for n in files if n.endswith(".dist-info/METADATA")]
     wheel_names = [n for n in files if n.endswith(".dist-info/WHEEL")]
     if len(metadata_names) != 1 or len(wheel_names) != 1:
@@ -318,8 +368,27 @@ def validate_wheel(path: Path, version: str) -> str:
     tags = wheel.get_all("Tag", [])
     if set(tags) != expected_wheel_tags(platform):
         fail(f"wheel tags are not exclusively cp39-abi3: {tags}")
-    if not any("mineru_rs" in PurePosixPath(name).name and name.endswith((".so", ".pyd")) for name in files):
-        fail(f"wheel has no mineru_rs native module: {path.name}")
+    native = [name for name in files if re.fullmatch(r"mineru_rs/_native(?:\.abi3)?\.(?:so|pyd)", name)]
+    windows = "win_" in platform
+    helper = f"mineru_rs/mineru-office-convert{'.exe' if windows else ''}"
+    package_files = {name for name in files if name.startswith("mineru_rs/")}
+    expected_package = {"mineru_rs/__init__.py", "mineru_rs/_cli.py", helper, *native}
+    if len(native) != 1 or package_files != expected_package:
+        fail(f"wheel mixed package payload differs in {path.name}: {sorted(package_files)}")
+    dist_info = f"mineru_rs-{version}.dist-info"
+    expected_metadata = {
+        f"{dist_info}/METADATA",
+        f"{dist_info}/WHEEL",
+        f"{dist_info}/entry_points.txt",
+        f"{dist_info}/RECORD",
+        f"{dist_info}/sboms/mineru-python.cyclonedx.json",
+    }
+    if set(files) - package_files != expected_metadata:
+        fail(f"wheel metadata payload differs in {path.name}")
+    if files[f"{dist_info}/entry_points.txt"] != b"[console_scripts]\nmineru=mineru_rs._cli:main\n":
+        fail(f"wheel console entry point differs in {path.name}")
+    if not windows and modes.get(helper) != 0o755:
+        fail(f"wheel helper mode is not 0755 in {path.name}")
     return platform
 
 
@@ -336,19 +405,189 @@ def check_wheels(args: argparse.Namespace) -> None:
     print("\n".join(str(path) for path in files))
 
 
-def npm_payload(manifest: dict, files: dict[str, bytes], native: typing.Optional[str]) -> None:
-    declared = manifest.get("files")
-    expected_declared = [native] if native else ["index.js", "index.d.ts"]
-    if declared != expected_declared:
-        fail(f"npm files field differs for {manifest.get('name')}: {declared}")
-    payload = set(files) - {"package.json"}
-    allowed_docs = {name for name in payload if PurePosixPath(name).name.lower().startswith(("readme", "license"))}
-    if payload - allowed_docs != set(expected_declared):
-        fail(f"npm tarball payload differs for {manifest.get('name')}: {sorted(payload)}")
+def local_wheel_hashes(directory: Path, project: str, version: str) -> dict[str, str]:
+    if not directory.is_dir() or directory.is_symlink():
+        fail(f"wheel directory is not a real directory: {directory}")
+    files = only_files(directory, ".whl")
+    distribution = re.sub(r"[-_.]+", "_", project).lower()
+    wheel_re = re.compile(
+        rf"{re.escape(distribution)}-{re.escape(version)}-(?:[0-9][0-9A-Za-z_.]*-)?[^-]+-[^-]+-[^-]+\.whl\Z"
+    )
+    if not files:
+        fail(f"no wheels found in {directory}")
+    if any(path.parent != directory or path.is_symlink() or not wheel_re.fullmatch(path.name) for path in files):
+        fail(f"unexpected wheel path or filename in {directory}: {[str(path) for path in files]}")
+    hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+    if len(hashes) != len(files):
+        fail("duplicate local wheel filenames")
+    return hashes
 
 
-def validate_npm(path: Path, version: str) -> str:
-    root, raw = archive_files(path)
+def parse_pypi_files(payload: object) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        fail("malformed PyPI JSON: root must be an object")
+    root = typing.cast(dict[str, object], payload)
+    urls = root.get("urls")
+    if not isinstance(urls, list):
+        fail("malformed PyPI JSON: urls must be a list")
+    files: dict[str, str] = {}
+    for entry in urls:
+        if not isinstance(entry, dict):
+            fail("malformed PyPI JSON: URL entry must be an object")
+        url_entry = typing.cast(dict[str, object], entry)
+        filename = url_entry.get("filename")
+        digests = url_entry.get("digests")
+        digest = typing.cast(dict[str, object], digests).get("sha256") if isinstance(digests, dict) else None
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or Path(filename).name != filename
+            or not isinstance(digest, str)
+            or not SHA256_RE.fullmatch(digest)
+        ):
+            fail("malformed PyPI filename or SHA-256 digest")
+        if filename in files:
+            fail(f"duplicate PyPI filename: {filename}")
+        files[filename] = digest
+    return files
+
+
+def pypi_missing(local: dict[str, str], remote: dict[str, str]) -> set[str]:
+    extra = set(remote) - set(local)
+    if extra:
+        fail(f"PyPI has unexpected files: {sorted(extra)}")
+    mismatched = sorted(name for name in remote if remote[name] != local[name])
+    if mismatched:
+        fail(f"PyPI SHA-256 mismatch: {mismatched}")
+    return set(local) - set(remote)
+
+
+def require_pypi_postflight(local: dict[str, str], remote: dict[str, str]) -> None:
+    missing = pypi_missing(local, remote)
+    if missing:
+        fail(f"PyPI is missing files: {sorted(missing)}")
+
+
+def pypi_release_files(project: str, version: str) -> tuple[int, dict[str, str] | None, int | None]:
+    url = "https://pypi.org/pypi/{}/{}/json".format(
+        urllib.parse.quote(project, safe=""), urllib.parse.quote(version, safe="")
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": PYPI_USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            status = response.status
+            retry_after = response.headers.get("Retry-After")
+            if status != 200:
+                if status == 429 or 500 <= status < 600:
+                    return status, None, int(retry_after) if retry_after and retry_after.strip().isdigit() else None
+                fail(f"unexpected PyPI HTTP status {status}")
+            try:
+                payload = json.loads(response.read().decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                fail(f"malformed PyPI JSON: {error}")
+            return 200, parse_pypi_files(payload), None
+    except urllib.error.HTTPError as error:
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        if error.code == 404 or error.code == 429 or 500 <= error.code < 600:
+            return error.code, None, int(retry_after) if retry_after and retry_after.strip().isdigit() else None
+        fail(f"unexpected PyPI HTTP status {error.code}")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return 0, None, None
+
+
+def retry_pypi(delay: int | None, fallback: int) -> None:
+    time.sleep(min(delay, 30) if delay is not None else fallback)
+
+
+def rebuild_missing_directory(local_directory: Path, missing_directory: Path, missing: set[str]) -> None:
+    local = local_directory.resolve()
+    destination = missing_directory.resolve()
+    if local == destination or local in destination.parents or destination in local.parents:
+        fail("missing directory must not overlap the local wheel directory")
+    if missing_directory.is_symlink():
+        fail("missing directory must not be a symlink")
+    if missing_directory.exists():
+        if not missing_directory.is_dir():
+            fail("missing directory exists and is not a directory")
+        shutil.rmtree(missing_directory)
+    missing_directory.mkdir(parents=True)
+    for filename in sorted(missing):
+        shutil.copy2(local_directory / filename, missing_directory / filename)
+
+
+def pypi_preflight(args: argparse.Namespace) -> None:
+    local = local_wheel_hashes(args.directory, args.project, args.version)
+    remote: dict[str, str] | None = None
+    last_status = 0
+    for attempt in range(4):
+        status, fetched, retry_after = pypi_release_files(args.project, args.version)
+        last_status = status
+        if status == 404:
+            remote = {}
+            break
+        if status == 200:
+            remote = typing.cast(dict[str, str], fetched)
+            break
+        if attempt < 3:
+            retry_pypi(retry_after, 2**attempt)
+    if remote is None:
+        fail(f"PyPI preflight unavailable after 4 attempts; last status={last_status or 'network error'}")
+    missing = pypi_missing(local, remote)
+    rebuild_missing_directory(args.directory, args.missing_directory, missing)
+    print(f"PyPI preflight: already={len(local) - len(missing)} missing={len(missing)}")
+
+
+def pypi_postflight(args: argparse.Namespace) -> None:
+    local = local_wheel_hashes(args.directory, args.project, args.version)
+    last_remote: dict[str, str] | None = None
+    last_status = 0
+    for attempt in range(5):
+        status, remote, retry_after = pypi_release_files(args.project, args.version)
+        last_status = status
+        if status == 200:
+            last_remote = typing.cast(dict[str, str], remote)
+            missing = pypi_missing(local, last_remote)
+            if not missing:
+                print(f"PyPI postflight: verified={len(local)}")
+                return
+        if attempt < 4:
+            retry_pypi(retry_after, 2**attempt)
+    if last_remote is not None:
+        require_pypi_postflight(local, last_remote)
+    fail(f"PyPI postflight unavailable after 5 attempts; last status={last_status or 'network error'}")
+
+
+def expected_platform_manifest(root: dict, suffix: str, version: str) -> dict:
+    os_name, cpu, libc, _ = PLATFORMS[suffix]
+    native = f"mineru.{suffix}.node"
+    helper = f"mineru-office-convert{'.exe' if os_name == 'win32' else ''}"
+    manifest: dict[str, typing.Any] = {
+        "name": f"{NPM_ROOT}-{suffix}",
+        "version": version,
+        "cpu": [cpu],
+        "main": native,
+        "files": [native, helper],
+    }
+    for field in ("description", "keywords", "author", "authors", "homepage", "license", "engines", "repository", "bugs"):
+        if field in root:
+            manifest[field] = root[field]
+    if "publishConfig" in root:
+        manifest["publishConfig"] = {
+            key: root["publishConfig"][key] for key in ("registry", "access") if key in root["publishConfig"]
+        }
+    manifest["os"] = [os_name]
+    if libc:
+        manifest["libc"] = [libc]
+    manifest["exports"] = {
+        ".": f"./{native}",
+        "./helper": f"./{helper}",
+        "./package.json": "./package.json",
+    }
+    return manifest
+
+
+def validate_npm(path: Path, version: str, root_manifest: dict) -> str:
+    root, raw, modes = archive_contents(path)
     if root != "package" or "package.json" not in raw:
         fail(f"npm tarball {path} has invalid root")
     manifest = json.loads(raw["package.json"])
@@ -365,24 +604,34 @@ def validate_npm(path: Path, version: str) -> str:
         if any(field in manifest for field in ("os", "cpu", "libc")):
             fail("root npm package must not have platform constraints")
         expected = {f"{NPM_ROOT}-{suffix}": version for suffix in PLATFORMS}
-        if manifest.get("optionalDependencies") != expected:
-            fail("root optionalDependencies are not the exact six native packages")
-        npm_payload(manifest, raw, None)
+        if (
+            manifest.get("main") != "api.js"
+            or manifest.get("types") != "api.d.ts"
+            or manifest.get("bin") != {"mineru": "bin/mineru.js"}
+            or manifest.get("files") != NPM_ROOT_FILES
+            or manifest.get("optionalDependencies") != expected
+            or any(field in manifest for field in ("os", "cpu", "libc", "exports"))
+        ):
+            fail("npm root facade/files/bin/platform metadata differs")
+        if set(raw) != {"package.json", *NPM_ROOT_FILES}:
+            fail(f"npm root payload differs: {sorted(raw)}")
+        bin_path = "bin/mineru.js"
+        if not raw[bin_path].startswith(b"#!/usr/bin/env node\n") or modes.get(bin_path) != 0o755:
+            fail("npm root bin shebang/mode differs")
         return name
     if not isinstance(name, str) or not name.startswith(f"{NPM_ROOT}-"):
         fail(f"unexpected npm package name {name!r}")
     suffix = name.removeprefix(f"{NPM_ROOT}-")
     if suffix not in PLATFORMS:
         fail(f"unexpected npm platform package {name}")
-    os_name, cpu, libc, _ = PLATFORMS[suffix]
-    if manifest.get("os") != [os_name] or manifest.get("cpu") != [cpu]:
-        fail(f"npm os/cpu differs for {name}")
-    if (manifest.get("libc") if libc else None) != ([libc] if libc else None):
-        fail(f"npm libc differs for {name}")
-    native = f"mineru.{suffix}.node"
-    if manifest.get("main") != native:
-        fail(f"npm native main differs for {name}")
-    npm_payload(manifest, raw, native)
+    expected = expected_platform_manifest(root_manifest, suffix, version)
+    if manifest != expected or "bin" in manifest:
+        fail(f"npm platform manifest differs for {name}")
+    native, helper = expected["files"]
+    if set(raw) != {"package.json", native, helper}:
+        fail(f"npm platform payload differs for {name}: {sorted(raw)}")
+    if PLATFORMS[suffix][0] != "win32" and modes.get(helper) != 0o755:
+        fail(f"npm platform helper mode differs for {name}")
     return name
 
 
@@ -390,7 +639,16 @@ def check_npm(args: argparse.Namespace) -> None:
     files = only_files(args.directory, ".tgz")
     if len(files) != 7:
         fail(f"expected exactly seven npm tarballs, found {len(files)}")
-    names = [validate_npm(path, args.version) for path in files]
+    manifests = []
+    for path in files:
+        _, raw = archive_files(path)
+        if "package.json" not in raw:
+            fail(f"npm tarball {path} has no package.json")
+        manifests.append(json.loads(raw["package.json"]))
+    roots = [manifest for manifest in manifests if manifest.get("name") == NPM_ROOT]
+    if len(roots) != 1:
+        fail("npm package set must contain exactly one root manifest")
+    names = [validate_npm(path, args.version, roots[0]) for path in files]
     expected = {NPM_ROOT, *(f"{NPM_ROOT}-{suffix}" for suffix in PLATFORMS)}
     if len(names) != len(set(names)) or set(names) != expected:
         fail(f"npm package set differs: {sorted(names)}")
@@ -412,6 +670,113 @@ def self_test(_: argparse.Namespace) -> None:
         "cp39-abi3-manylinux_2_17_aarch64", "cp39-abi3-manylinux2014_aarch64",
     }
     with tempfile.TemporaryDirectory() as tmp:
+        def must_fail(call: typing.Callable[[], object], message: str) -> None:
+            try:
+                call()
+            except SystemExit:
+                return
+            raise AssertionError(message)
+
+        def write_wheel(path: Path, helper_mode: int = 0o755, entry_point: bytes = b"[console_scripts]\nmineru=mineru_rs._cli:main\n") -> None:
+            dist = "mineru_rs-1.2.3.dist-info"
+            contents = {
+                "mineru_rs/__init__.py": b"",
+                "mineru_rs/_cli.py": b"",
+                "mineru_rs/_native.abi3.so": b"native",
+                "mineru_rs/mineru-office-convert": b"helper",
+                f"{dist}/METADATA": b"Name: mineru-rs\nVersion: 1.2.3\n",
+                f"{dist}/WHEEL": b"Wheel-Version: 1.0\nTag: cp39-abi3-macosx_11_0_arm64\n",
+                f"{dist}/entry_points.txt": entry_point,
+                f"{dist}/RECORD": b"",
+                f"{dist}/sboms/mineru-python.cyclonedx.json": b"{}",
+            }
+            with zipfile.ZipFile(path, "w") as archive:
+                for name, data in contents.items():
+                    member = zipfile.ZipInfo(name)
+                    mode = helper_mode if name.endswith("mineru-office-convert") else 0o644
+                    member.external_attr = mode << 16
+                    archive.writestr(member, data)
+
+        def write_npm_tar(path: Path, manifest: dict, payload: dict[str, bytes], modes: dict[str, int]) -> None:
+            with tarfile.open(path, "w:gz") as archive:
+                for name, data in {"package.json": json.dumps(manifest).encode(), **payload}.items():
+                    member = tarfile.TarInfo(f"package/{name}")
+                    member.size = len(data)
+                    member.mode = modes.get(name, 0o644)
+                    archive.addfile(member, io.BytesIO(data))
+
+        version = "1.2.3"
+        optional = {f"{NPM_ROOT}-{suffix}": version for suffix in PLATFORMS}
+        identity_npm = {
+            "name": NPM_ROOT,
+            "version": version,
+            "license": LICENSE,
+            "repository": {"url": f"git+{REPOSITORY}.git"},
+            "main": "api.js",
+            "types": "api.d.ts",
+            "bin": {"mineru": "bin/mineru.js"},
+            "files": NPM_ROOT_FILES,
+            "devDependencies": NPM_DEV_DEPENDENCIES,
+        }
+        identity_lock = {
+            "name": NPM_ROOT,
+            "version": version,
+            "packages": {"": {
+                "name": NPM_ROOT,
+                "version": version,
+                "bin": identity_npm["bin"],
+                "devDependencies": NPM_DEV_DEPENDENCIES,
+            }},
+        }
+        validate_node_root(identity_npm, identity_lock, version)
+        bad_npm = json.loads(json.dumps(identity_npm))
+        bad_npm["dependencies"] = {}
+        must_fail(lambda: validate_node_root(bad_npm, identity_lock, version), "root runtime dependencies were accepted")
+        bad_npm = json.loads(json.dumps(identity_npm))
+        bad_npm["optionalDependencies"] = optional
+        must_fail(lambda: validate_node_root(bad_npm, identity_lock, version), "source optional dependencies were accepted")
+        bad_lock = json.loads(json.dumps(identity_lock))
+        bad_lock["packages"][""]["dependencies"] = {}
+        must_fail(lambda: validate_node_root(identity_npm, bad_lock, version), "lock root dependencies were accepted")
+        bad_lock = json.loads(json.dumps(identity_lock))
+        bad_lock["packages"][""]["optionalDependencies"] = optional
+        must_fail(lambda: validate_node_root(identity_npm, bad_lock, version), "lock optional dependencies were accepted")
+        bad_lock = json.loads(json.dumps(identity_lock))
+        bad_lock["packages"][""]["devDependencies"] = {"@napi-rs/cli": "wrong"}
+        must_fail(lambda: validate_node_root(identity_npm, bad_lock, version), "lock devDependency mismatch was accepted")
+
+        local_hashes = {"one.whl": "a" * 64, "two.whl": "b" * 64}
+        assert pypi_missing(local_hashes, {}) == set(local_hashes)
+        assert pypi_missing(local_hashes, {"one.whl": "a" * 64}) == {"two.whl"}
+        must_fail(
+            lambda: pypi_missing(local_hashes, {"one.whl": "c" * 64}),
+            "PyPI hash mismatch was accepted",
+        )
+        must_fail(
+            lambda: pypi_missing(local_hashes, {"extra.whl": "c" * 64}),
+            "extra PyPI file was accepted",
+        )
+        must_fail(
+            lambda: require_pypi_postflight(local_hashes, {"one.whl": "a" * 64}),
+            "incomplete PyPI postflight was accepted",
+        )
+        require_pypi_postflight(local_hashes, local_hashes)
+        assert parse_pypi_files({"urls": [{"filename": "one.whl", "digests": {"sha256": "a" * 64}}]}) == {
+            "one.whl": "a" * 64
+        }
+        must_fail(
+            lambda: parse_pypi_files({"urls": [{"filename": "one.whl", "digests": {"sha256": "A" * 64}}]}),
+            "malformed PyPI digest was accepted",
+        )
+
+        pypi_dir = Path(tmp) / "pypi"
+        pypi_dir.mkdir()
+        pypi_wheel = pypi_dir / "mineru_rs-1.2.3-cp39-abi3-any.whl"
+        pypi_wheel.write_bytes(b"wheel")
+        assert local_wheel_hashes(pypi_dir, "mineru-rs", version) == {
+            pypi_wheel.name: hashlib.sha256(b"wheel").hexdigest()
+        }
+
         package = Path(tmp) / "package"
         package.mkdir()
         expected_crate = package / "mineru-1.2.3.crate"
@@ -451,6 +816,67 @@ def self_test(_: argparse.Namespace) -> None:
             pass
         else:
             raise AssertionError("duplicate normalized tar member was accepted")
+
+        wheel_path = Path(tmp) / "mineru_rs-1.2.3-cp39-abi3-macosx_11_0_arm64.whl"
+        write_wheel(wheel_path)
+        assert validate_wheel(wheel_path, "1.2.3") == "macosx_11_0_arm64"
+        write_wheel(wheel_path, 0o644)
+        must_fail(lambda: validate_wheel(wheel_path, "1.2.3"), "non-executable wheel helper was accepted")
+        write_wheel(wheel_path, entry_point=b"[console_scripts]\nwrong=wrong:main\n")
+        must_fail(lambda: validate_wheel(wheel_path, "1.2.3"), "wrong wheel entry point was accepted")
+
+        npm_dir = Path(tmp) / "npm"
+        npm_dir.mkdir()
+        root_manifest = {
+            "name": NPM_ROOT,
+            "version": version,
+            "description": "Native Node.js helpers for MinerU Rust",
+            "main": "api.js",
+            "types": "api.d.ts",
+            "bin": {"mineru": "bin/mineru.js"},
+            "license": LICENSE,
+            "repository": {"type": "git", "url": f"git+{REPOSITORY}.git"},
+            "bugs": {"url": f"{REPOSITORY}/issues"},
+            "files": NPM_ROOT_FILES,
+            "optionalDependencies": optional,
+            "publishConfig": {"access": "public", "registry": "https://registry.npmjs.org/"},
+            "engines": {"node": ">=18"},
+        }
+        root_payload = {name: (b"#!/usr/bin/env node\n" if name == "bin/mineru.js" else b"x") for name in NPM_ROOT_FILES}
+        root_path = npm_dir / f"alexsun-top-mineru-{version}.tgz"
+        write_npm_tar(root_path, root_manifest, root_payload, {"bin/mineru.js": 0o755})
+        for suffix, platform_config in PLATFORMS.items():
+            os_name = platform_config[0]
+            manifest = expected_platform_manifest(root_manifest, suffix, version)
+            native, helper = manifest["files"]
+            platform_path = npm_dir / f"alexsun-top-mineru-{suffix}-{version}.tgz"
+            write_npm_tar(
+                platform_path,
+                manifest,
+                {native: b"native", helper: b"helper"},
+                {helper: 0o644 if os_name == "win32" else 0o755},
+            )
+        check_npm(argparse.Namespace(directory=npm_dir, version=version))
+
+        bad_root_path = Path(tmp) / f"alexsun-top-mineru-{version}.tgz"
+        write_npm_tar(bad_root_path, root_manifest, root_payload, {"bin/mineru.js": 0o644})
+        must_fail(
+            lambda: validate_npm(bad_root_path, version, root_manifest),
+            "non-executable npm root bin was accepted",
+        )
+
+        bad_dir = Path(tmp) / "bad-npm"
+        bad_dir.mkdir()
+        suffix = "darwin-arm64"
+        bad_manifest = expected_platform_manifest(root_manifest, suffix, version)
+        bad_manifest["exports"]["./extra"] = "./extra"
+        native, helper = bad_manifest["files"]
+        bad_path = bad_dir / f"alexsun-top-mineru-{suffix}-{version}.tgz"
+        write_npm_tar(bad_path, bad_manifest, {native: b"native", helper: b"helper"}, {helper: 0o755})
+        must_fail(
+            lambda: validate_npm(bad_path, version, root_manifest),
+            "extra npm platform export was accepted",
+        )
     print("verify_release self-test passed")
 
 
@@ -483,6 +909,19 @@ def parser() -> argparse.ArgumentParser:
     wheel.add_argument("--count", type=int, required=True)
     wheel.add_argument("--platform", choices=(*WHEEL_SLOTS, "all"), required=True)
     wheel.set_defaults(func=check_wheels)
+
+    preflight = sub.add_parser("pypi-preflight")
+    preflight.add_argument("--project", required=True)
+    preflight.add_argument("--version", required=True)
+    preflight.add_argument("--directory", type=Path, required=True)
+    preflight.add_argument("--missing-directory", type=Path, required=True)
+    preflight.set_defaults(func=pypi_preflight)
+
+    postflight = sub.add_parser("pypi-postflight")
+    postflight.add_argument("--project", required=True)
+    postflight.add_argument("--version", required=True)
+    postflight.add_argument("--directory", type=Path, required=True)
+    postflight.set_defaults(func=pypi_postflight)
 
     npm = sub.add_parser("npm")
     npm.add_argument("--directory", type=Path, required=True)

@@ -59,6 +59,7 @@ clap = { version = "4", features = ["derive"] }
 futures-core = "0.3"
 futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp", "tiff"] }
+indicatif = "0.18.6"
 httpdate = "1"
 md5 = "0.7"
 hayro = "=0.5.0"
@@ -94,7 +95,7 @@ members = [".", "bindings/python", "bindings/node"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"

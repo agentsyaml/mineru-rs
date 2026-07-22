@@ -1,15 +1,15 @@
-//! Private binary-only direct VLM runner; intentionally not a library API.
-use super::official_env::apply_route_env;
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::{
-    ambient_authority,
-    fs::{Dir, OpenOptions},
-};
-use mineru::{
+//! Shared direct VLM runner for the canonical command and legacy CLI boundary.
+use super::env::apply_route_env;
+use crate::{
     MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialPdfOptions, ProgressCallback,
     ProgressEvent, RasterWorkers, VlmHeader, VlmHttpConfig, canonical_stem,
     input_prepare::{DocumentKind, prepare_with_warning},
     unique_output_stems,
+};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
 };
 use std::{
     io::{IsTerminal, Read, Write},
@@ -19,7 +19,8 @@ use std::{
     time::Instant,
 };
 
-pub(crate) type WarningCallback = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
+pub(super) type WarningCallback = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
+type DirectError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum DirectMode {
@@ -39,8 +40,24 @@ fn emit_warning(callback: &Option<WarningCallback>, source: &str, message: &str)
     }
 }
 
+fn document_events(
+    command_events: &Option<super::CommandCallback>,
+    events: &Option<ProgressCallback>,
+    document_id: usize,
+) -> Option<ProgressCallback> {
+    command_events
+        .as_ref()
+        .map(|callback| {
+            super::scoped_progress(
+                Some(Arc::clone(callback)),
+                super::CommandScope::Document(super::DocumentId(document_id)),
+            )
+        })
+        .or_else(|| events.clone())
+}
+
 #[derive(Debug)]
-pub(crate) struct DirectOptions {
+pub(super) struct DirectOptions {
     pub input: PathBuf,
     pub output: PathBuf,
     pub base_url: Option<String>,
@@ -56,10 +73,10 @@ pub(crate) struct DirectOptions {
     pub canonical_mixed: bool,
 }
 
-fn err(s: impl Into<String>) -> Box<dyn std::error::Error> {
+fn err(s: impl Into<String>) -> DirectError {
     s.into().into()
 }
-fn clean(v: Option<String>, name: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+fn clean(v: Option<String>, name: &str) -> Result<Option<String>, DirectError> {
     v.map(|v| {
         let v = v.trim().to_owned();
         if v.is_empty() || v.chars().any(char::is_control) {
@@ -72,7 +89,7 @@ fn clean(v: Option<String>, name: &str) -> Result<Option<String>, Box<dyn std::e
     })
     .transpose()
 }
-fn absolute(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn absolute(path: &Path) -> Result<PathBuf, DirectError> {
     let path = if path.is_absolute() {
         path.to_owned()
     } else {
@@ -103,7 +120,7 @@ fn enumerate(
     path: &Path,
     inputs: &mut Vec<(PathBuf, DocumentKind)>,
     skipped: &mut Vec<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), DirectError> {
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() || !(meta.is_file() || meta.is_dir()) {
         return Err(err(format!(
@@ -135,9 +152,9 @@ fn enumerate(
     Ok(())
 }
 
-pub(crate) fn discover_inputs(
+pub(super) fn discover_inputs(
     path: &Path,
-) -> Result<(PathBuf, Vec<(PathBuf, DocumentKind)>, Vec<PathBuf>), Box<dyn std::error::Error>> {
+) -> Result<(PathBuf, Vec<(PathBuf, DocumentKind)>, Vec<PathBuf>), DirectError> {
     let input = absolute(path)?;
     let mut inputs = Vec::new();
     let mut skipped = Vec::new();
@@ -149,9 +166,9 @@ pub(crate) fn discover_inputs(
     Ok((input, inputs, skipped))
 }
 
-pub(crate) fn allocate_input_stems(
+pub(super) fn allocate_input_stems(
     inputs: &[(PathBuf, DocumentKind)],
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, DirectError> {
     let raw_stems: Vec<_> = inputs
         .iter()
         .map(|(p, _)| {
@@ -159,12 +176,12 @@ pub(crate) fn allocate_input_stems(
                 .file_stem()
                 .and_then(|x| x.to_str())
                 .ok_or_else(|| err("non-UTF-8 input name"))?;
-            canonical_stem(stem).map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+            canonical_stem(stem).map_err(|e| -> DirectError { Box::new(e) })
         })
-        .collect::<Result<_, Box<dyn std::error::Error>>>()?;
+        .collect::<Result<_, DirectError>>()?;
     Ok(unique_output_stems(&raw_stems))
 }
-fn open_dir(path: &Path) -> Result<Dir, Box<dyn std::error::Error>> {
+fn open_dir(path: &Path) -> Result<Dir, DirectError> {
     let mut dir = Dir::open_ambient_dir("/", ambient_authority())?;
     for c in path.components().skip(1) {
         let Component::Normal(x) = c else {
@@ -174,7 +191,7 @@ fn open_dir(path: &Path) -> Result<Dir, Box<dyn std::error::Error>> {
     }
     Ok(dir)
 }
-fn snapshot(path: &Path, cap: usize) -> Result<bytes::Bytes, Box<dyn std::error::Error>> {
+fn snapshot(path: &Path, cap: usize) -> Result<bytes::Bytes, DirectError> {
     let path = absolute(path)?;
     let names: Vec<_> = path
         .components()
@@ -221,7 +238,7 @@ fn output_chain(
     stem: &str,
     input: Option<&Dir>,
     target: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+) -> Result<PathBuf, DirectError> {
     let root = absolute(root)?;
     let mut current = Dir::open_ambient_dir("/", ambient_authority())?;
     let mut exists = true;
@@ -276,17 +293,17 @@ fn output_chain(
     }
     Ok(root)
 }
-fn config(options: &DirectOptions) -> Result<VlmHttpConfig, Box<dyn std::error::Error>> {
+fn config(options: &DirectOptions, env: &super::Environment) -> Result<VlmHttpConfig, DirectError> {
     let server = clean(options.base_url.clone(), options.server_option_label)?;
     let model = clean(options.model.clone(), "--model")?;
     let key = clean(
         options
             .api_key
             .clone()
-            .or_else(|| std::env::var("MINERU_VL_API_KEY").ok()),
+            .or_else(|| env.string("MINERU_VL_API_KEY")),
         "--api-key",
     )?;
-    let mut config = VlmHttpConfig::default();
+    let mut config = env.vlm_http_config();
     if let Some(server) = server {
         config.server_url = Some(server.parse()?);
         config.invalid_server_url = false;
@@ -356,38 +373,84 @@ impl<W: Write> Progress<W> {
     }
 }
 
-#[allow(dead_code)] // Used by the legacy mineru-vlm binary entrypoint.
-pub(crate) async fn run(options: DirectOptions) -> Result<(), Box<dyn std::error::Error>> {
-    run_impl(options, None, None, DirectMode::LegacyOutput).await
+pub(super) async fn run_legacy(
+    options: DirectOptions,
+    env: super::Environment,
+) -> Result<(), DirectError> {
+    run_impl(
+        options,
+        None,
+        None,
+        None,
+        DirectMode::LegacyOutput,
+        None,
+        env,
+    )
+    .await
 }
 
 #[allow(dead_code)]
-pub(crate) async fn run_with_events(
+pub(super) async fn run_with_events(
     options: DirectOptions,
+    office_workers: OfficeWorkers,
+    env: super::Environment,
     events: Option<ProgressCallback>,
     warnings: Option<WarningCallback>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    run_impl(options, events, warnings, DirectMode::CallbackOutput).await
+) -> Result<(), DirectError> {
+    run_impl(
+        options,
+        events,
+        None,
+        warnings,
+        DirectMode::CallbackOutput,
+        Some(office_workers),
+        env,
+    )
+    .await
+}
+
+pub(super) async fn run_with_scoped_events(
+    options: DirectOptions,
+    office_workers: OfficeWorkers,
+    env: super::Environment,
+    events: Option<super::CommandCallback>,
+    warnings: Option<WarningCallback>,
+) -> Result<(), DirectError> {
+    run_impl(
+        options,
+        None,
+        events,
+        warnings,
+        DirectMode::CallbackOutput,
+        Some(office_workers),
+        env,
+    )
+    .await
 }
 
 async fn run_impl(
     options: DirectOptions,
     events: Option<ProgressCallback>,
+    command_events: Option<super::CommandCallback>,
     warnings: Option<WarningCallback>,
     mode: DirectMode,
-) -> Result<(), Box<dyn std::error::Error>> {
+    office_workers: Option<OfficeWorkers>,
+    env: super::Environment,
+) -> Result<(), DirectError> {
     if !options.canonical_mixed {
-        return run_legacy(options).await;
+        return run_legacy_impl(options, &env).await;
     }
-    let office_workers = OfficeWorkers::new()?;
+    let office_workers = office_workers.ok_or_else(|| err("office workers unavailable"))?;
     let raster_workers = RasterWorkers::default();
     let result = run_inner(
         &options,
         &office_workers,
         &raster_workers,
         events,
+        command_events,
         warnings,
         mode,
+        &env,
     )
     .await;
     office_workers.drain().await;
@@ -399,7 +462,7 @@ fn enumerate_legacy(
     path: &Path,
     pdfs: &mut Vec<PathBuf>,
     skipped: &mut Vec<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), DirectError> {
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() || !(meta.is_file() || meta.is_dir()) {
         return Err(err(format!(
@@ -426,7 +489,10 @@ fn enumerate_legacy(
     Ok(())
 }
 
-async fn run_legacy(options: DirectOptions) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_legacy_impl(
+    options: DirectOptions,
+    env: &super::Environment,
+) -> Result<(), DirectError> {
     if options.batch_size == 0 {
         return Err(err("--batch-size must be greater than zero"));
     }
@@ -436,7 +502,7 @@ async fn run_legacy(options: DirectOptions) -> Result<(), Box<dyn std::error::Er
     route.formula_enable = !options.no_formula;
     route.table_enable = !options.no_table;
     route.image_analysis = !options.no_image_analysis;
-    if apply_route_env(&mut route, |name| std::env::var_os(name)) {
+    if apply_route_env(&mut route, |name| env.os(name)) {
         eprintln!("warning: invalid MINERU_PROCESSING_WINDOW_SIZE; using 64");
     }
     route.validate()?;
@@ -462,22 +528,22 @@ async fn run_legacy(options: DirectOptions) -> Result<(), Box<dyn std::error::Er
                     .and_then(|x| x.to_str())
                     .ok_or_else(|| err("non-UTF-8 input name"))?,
             )
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            .map_err(|e| Box::new(e) as DirectError)?;
             if !planned.insert(format!("{}/vlm", stem.to_ascii_lowercase())) {
                 return Err(err("duplicate output stem"));
             }
             output_chain(&output, &stem, input_dir.as_ref(), "vlm")?;
             Ok((path, stem))
         })
-        .collect::<Result<_, Box<dyn std::error::Error>>>()?;
+        .collect::<Result<_, DirectError>>()?;
     for path in skipped {
         eprintln!("skipped unsupported input: {}", path.display());
     }
-    let client = MinerUVlmClient::connect(config(&options)?, MinerUVlmConfig::default()).await?;
+    let client =
+        MinerUVlmClient::connect(config(&options, env)?, MinerUVlmConfig::default()).await?;
     let total = candidates.len();
     let batches = total.div_ceil(options.batch_size);
-    let stderr = std::io::stderr();
-    let mut progress = Progress::new(stderr.lock(), std::io::stderr().is_terminal());
+    let mut progress = Progress::new(std::io::stderr(), std::io::stderr().is_terminal());
     let mut completed = 0;
     for (i, batch) in candidates.chunks(options.batch_size).enumerate() {
         progress.batch = i + 1;
@@ -503,13 +569,13 @@ async fn run_legacy(options: DirectOptions) -> Result<(), Box<dyn std::error::Er
                 let root = output_chain(&output, stem, input_dir.as_ref(), "vlm")?;
                 client
                     .parse_and_write_official_pdf(
-                        mineru::PdfInput::Bytes(bytes),
+                        crate::PdfInput::Bytes(bytes),
                         route.clone(),
                         &root,
                         stem,
                     )
                     .await
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                    .map_err(|e| Box::new(e) as DirectError)
             }
             .await;
             if let Err(error) = result {
@@ -537,9 +603,11 @@ async fn run_inner(
     office_workers: &OfficeWorkers,
     raster_workers: &RasterWorkers,
     events: Option<ProgressCallback>,
+    command_events: Option<super::CommandCallback>,
     warnings: Option<WarningCallback>,
     mode: DirectMode,
-) -> Result<(), Box<dyn std::error::Error>> {
+    env: &super::Environment,
+) -> Result<(), DirectError> {
     if options.batch_size == 0 {
         return Err(err("--batch-size must be greater than zero"));
     }
@@ -549,7 +617,7 @@ async fn run_inner(
     route.formula_enable = !options.no_formula;
     route.table_enable = !options.no_table;
     route.image_analysis = !options.no_image_analysis;
-    if apply_route_env(&mut route, |name| std::env::var_os(name)) {
+    if apply_route_env(&mut route, |name| env.os(name)) {
         if mode == DirectMode::LegacyOutput {
             eprintln!("warning: invalid MINERU_PROCESSING_WINDOW_SIZE; using 64");
         } else {
@@ -578,12 +646,20 @@ async fn run_inner(
     let candidates: Vec<_> = inputs
         .into_iter()
         .zip(allocated)
-        .map(|((p, kind), stem)| {
+        .enumerate()
+        .map(|(index, ((p, kind), stem))| {
             let target = if kind.is_office() { "office" } else { "vlm" };
             output_chain(&output, &stem, input_dir.as_ref(), target)?;
-            Ok((p, kind, stem))
+            Ok((index + 1, p, kind, stem))
         })
-        .collect::<Result<_, Box<dyn std::error::Error>>>()?;
+        .collect::<Result<_, DirectError>>()?;
+    super::emit_command(
+        &command_events,
+        super::CommandEvent::RunPlanned {
+            documents: candidates.len(),
+            api_tasks: 0,
+        },
+    );
     for path in skipped {
         if mode == DirectMode::LegacyOutput {
             eprintln!("skipped unsupported input: {}", path.display());
@@ -591,11 +667,11 @@ async fn run_inner(
             emit_warning(&warnings, "unsupported input", &path.display().to_string());
         }
     }
-    let client = MinerUVlmClient::connect(config(&options)?, MinerUVlmConfig::default()).await?;
+    let client =
+        MinerUVlmClient::connect(config(options, env)?, MinerUVlmConfig::default()).await?;
     let total = candidates.len();
     let batches = total.div_ceil(options.batch_size);
-    let stderr = std::io::stderr();
-    let mut progress = Progress::new(stderr.lock(), std::io::stderr().is_terminal());
+    let mut progress = Progress::new(std::io::stderr(), std::io::stderr().is_terminal());
     let mut completed = 0;
     for (i, batch) in candidates.chunks(options.batch_size).enumerate() {
         progress.batch = i + 1;
@@ -608,7 +684,8 @@ async fn run_inner(
                 false,
             );
         }
-        for (path, kind, stem) in batch {
+        for (candidate_id, path, kind, stem) in batch {
+            let task_events = document_events(&command_events, &events, *candidate_id);
             if mode == DirectMode::LegacyOutput {
                 progress.say(
                     format_args!(
@@ -622,7 +699,7 @@ async fn run_inner(
             }
             if mode == DirectMode::CallbackOutput {
                 emit_event(
-                    &events,
+                    &task_events,
                     ProgressEvent::DocumentStarted {
                         document: stem.clone(),
                     },
@@ -652,7 +729,7 @@ async fn run_inner(
                 if mode == DirectMode::CallbackOutput {
                     if let Some(message) = warning {
                         emit_event(
-                            &events,
+                            &task_events,
                             ProgressEvent::OfficeWarning {
                                 document: stem.clone(),
                                 message,
@@ -660,7 +737,7 @@ async fn run_inner(
                         );
                     }
                     emit_event(
-                        &events,
+                        &task_events,
                         ProgressEvent::DocumentPrepared {
                             document: stem.clone(),
                         },
@@ -682,22 +759,22 @@ async fn run_inner(
                             route,
                             &root,
                             stem,
-                            events.clone(),
+                            task_events.clone(),
                         )
                         .await
-                        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+                        .map_err(|e| -> DirectError { Box::new(e) })
                 } else {
                     client
                         .parse_and_write_prepared_pdf(prepared, route, &root, stem)
                         .await
-                        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+                        .map_err(|e| -> DirectError { Box::new(e) })
                 }
             }
             .await;
             if let Err(e) = result {
                 if mode == DirectMode::CallbackOutput {
                     emit_event(
-                        &events,
+                        &task_events,
                         ProgressEvent::DocumentFailed {
                             document: stem.clone(),
                             message: e.to_string(),
@@ -714,7 +791,7 @@ async fn run_inner(
             progress.done += 1;
             if mode == DirectMode::CallbackOutput {
                 emit_event(
-                    &events,
+                    &task_events,
                     ProgressEvent::DocumentCompleted {
                         document: stem.clone(),
                     },
@@ -736,8 +813,8 @@ async fn run_inner(
 
 #[cfg(test)]
 mod tests {
+    use super::super::env::{Decimal, decimal};
     use super::*;
-    use crate::support::official_env::{Decimal, decimal};
     use std::collections::HashMap;
     use std::{ffi::OsString, time::Duration};
 
@@ -946,6 +1023,10 @@ mod tests {
             "source",
             "message",
         );
+        super::super::emit_command(
+            &Some(Arc::new(|_| panic!("command callback"))),
+            super::super::CommandEvent::RunCompleted,
+        );
     }
 
     #[tokio::test]
@@ -987,6 +1068,8 @@ mod tests {
                 batch_size: 1,
                 canonical_mixed: true,
             },
+            OfficeWorkers::with_executable(std::env::current_exe().unwrap()).unwrap(),
+            super::super::Environment::process(),
             Some(event_callback),
             Some(warning_callback),
         )
@@ -1005,5 +1088,167 @@ mod tests {
             ]
         );
         assert!(warnings.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn document_callbacks_keep_page_events_on_their_stable_scope() {
+        use super::super::{CommandEvent, CommandScope, DocumentId};
+        use std::sync::Mutex;
+
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let callback = {
+            let commands = Arc::clone(&commands);
+            Arc::new(move |event| commands.lock().unwrap().push(event))
+                as super::super::CommandCallback
+        };
+        let first = document_events(&Some(callback.clone()), &None, 1).unwrap();
+        let second = document_events(&Some(callback), &None, 2).unwrap();
+        first(ProgressEvent::DocumentStarted {
+            document: "a".into(),
+        });
+        first(ProgressEvent::DocumentPageCompleted {
+            document: "a".into(),
+            page_index: 0,
+            completed: 1,
+            total: 1,
+        });
+        second(ProgressEvent::DocumentStarted {
+            document: "b".into(),
+        });
+        let events = commands.lock().unwrap();
+        assert!(matches!(
+            events[0],
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(1)),
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[1],
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(1)),
+                event: ProgressEvent::DocumentPageCompleted { .. }
+            }
+        ));
+        assert!(matches!(
+            events[2],
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(2)),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn scoped_runner_keeps_second_id_after_first_success_then_failure() {
+        use super::super::{CommandEvent, CommandScope, DocumentId};
+        use axum::{Json, Router, routing::post};
+        use serde_json::json;
+        use std::io::Cursor;
+        use std::sync::Mutex;
+
+        let input = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(input.path().join("a.png"), png).unwrap();
+        std::fs::write(input.path().join("b.png"), b"also not a PNG").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/v1/chat/completions",
+                    post(|| async {
+                        Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
+                    }),
+                ),
+            )
+            .into_future(),
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let callback = {
+            let events = Arc::clone(&events);
+            Arc::new(move |event| events.lock().unwrap().push(event))
+                as super::super::CommandCallback
+        };
+        let result = run_with_scoped_events(
+            DirectOptions {
+                input: input.path().to_owned(),
+                output: output.path().to_owned(),
+                base_url: Some(base_url),
+                server_option_label: "--url",
+                model: Some("mock".into()),
+                api_key: None,
+                page_start: None,
+                page_end: None,
+                no_formula: false,
+                no_table: false,
+                no_image_analysis: false,
+                batch_size: 1,
+                canonical_mixed: true,
+            },
+            OfficeWorkers::with_executable(std::env::current_exe().unwrap()).unwrap(),
+            super::super::Environment::process(),
+            Some(callback),
+            None,
+        )
+        .await;
+        assert_eq!(result.unwrap_err().to_string(), "invalid image");
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events[0],
+            CommandEvent::RunPlanned {
+                documents: 2,
+                api_tasks: 0
+            }
+        ));
+        let first_completed = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    CommandEvent::Progress {
+                        scope: CommandScope::Document(DocumentId(1)),
+                        event: ProgressEvent::DocumentCompleted { .. }
+                    }
+                )
+            })
+            .unwrap();
+        let second_started = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    CommandEvent::Progress {
+                        scope: CommandScope::Document(DocumentId(2)),
+                        event: ProgressEvent::DocumentStarted { .. }
+                    }
+                )
+            })
+            .unwrap();
+        let second_failed = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    CommandEvent::Progress {
+                        scope: CommandScope::Document(DocumentId(2)),
+                        event: ProgressEvent::DocumentFailed { .. }
+                    }
+                )
+            })
+            .unwrap();
+        assert!(first_completed < second_started && second_started < second_failed);
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(1)),
+                event: ProgressEvent::DocumentFailed { .. }
+            }
+        )));
     }
 }

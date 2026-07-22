@@ -146,7 +146,7 @@ impl MineruApiClient {
         &self,
         status_url: &str,
         env: RemoteEnv,
-        mut callback: Option<&mut dyn FnMut(StatusSnapshot)>,
+        mut callback: Option<&mut (dyn FnMut(StatusSnapshot) + Send)>,
     ) -> Result<(), String> {
         let timeout = Duration::try_from_secs_f64(env.result_timeout_seconds)
             .map_err(|_| "task result deadline is invalid".to_string())?;

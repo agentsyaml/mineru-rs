@@ -1,4 +1,6 @@
 use clap::Parser;
+use mineru::command::env::{Decimal, RouteEnv, decimal, nonnegative_decimal, snapshot_route_env};
+use mineru::command::plain::{EventSink, LogLevel};
 use std::sync::Arc;
 use std::{
     ffi::OsString,
@@ -9,13 +11,6 @@ use std::{
     process::ExitCode,
     time::Duration,
 };
-#[path = "support/event_sink.rs"]
-#[allow(dead_code)]
-mod event_sink;
-use event_sink::{EventSink, LogLevel};
-#[path = "support/official_env.rs"]
-mod official_env;
-use official_env::{Decimal, RouteEnv, decimal, nonnegative_decimal, snapshot_route_env};
 
 #[derive(Parser)]
 #[command(about = "MinerU mixed vlm-http-client task service")]

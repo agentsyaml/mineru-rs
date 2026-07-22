@@ -80,6 +80,7 @@ pub struct VlmHttpClient {
     http: Client,
     base: Url,
     model: String,
+    task_work_lease: TaskWorkLease,
 }
 impl std::fmt::Debug for VlmHttpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -91,6 +92,13 @@ impl std::fmt::Debug for VlmHttpClient {
 
 impl VlmHttpClient {
     pub async fn connect(config: VlmHttpConfig) -> VlmResult<Self> {
+        Self::connect_for_task(config, TaskWorkLease::default()).await
+    }
+
+    pub(crate) async fn connect_for_task(
+        config: VlmHttpConfig,
+        task_work_lease: TaskWorkLease,
+    ) -> VlmResult<Self> {
         if config.invalid_server_url {
             return Err(VlmError::InvalidConfig("invalid server URL".into()));
         }
@@ -102,22 +110,20 @@ impl VlmHttpClient {
                 "server_url must be a safe HTTP(S) URL".into(),
             ));
         }
-        let mut builder = Client::builder()
+        let builder = Client::builder()
             .no_proxy()
             .redirect(Policy::none())
             .timeout(config.http_timeout)
             .connect_timeout(config.connect_timeout)
             .pool_max_idle_per_host(config.max_keepalive_connections)
             .pool_idle_timeout(config.keepalive_expiry);
-        if let Some(n) = config.max_connections {
-            builder = builder.pool_max_idle_per_host(n);
-        }
         let http = builder.build().map_err(|e| transport("connect", &e))?;
         let client = Self {
             config: Arc::new(config),
             http,
             base,
             model: String::new(),
+            task_work_lease,
         };
         let requested = client
             .config
@@ -176,7 +182,10 @@ impl VlmHttpClient {
         }
         let body = tokio::time::timeout_at(
             deadline,
-            tokio::task::spawn_blocking(move || official_body(config, model, request)),
+            tokio::task::spawn_blocking(
+                self.task_work_lease
+                    .wrap(move || official_body(config, model, request)),
+            ),
         )
         .await
         .map_err(|_| VlmError::Timeout {
@@ -186,7 +195,7 @@ impl VlmHttpClient {
             operation: "chat",
             message: "body worker failed".into(),
         })??;
-        let body = json_body(body, Some(deadline)).await?;
+        let body = json_body(body, Some(deadline), &self.task_work_lease).await?;
         tokio::time::timeout_at(
             deadline,
             self.complete_limited(body, cap, budget, Some(deadline)),
@@ -209,7 +218,7 @@ impl VlmHttpClient {
     ) -> VlmResult<Vec<String>> {
         let limit = semaphore
             .unwrap_or_else(|| Arc::new(Semaphore::new(self.config.max_concurrency.max(1))));
-        let n = limit.available_permits().max(1);
+        let n = requests.len().max(1);
         let mut jobs = stream::iter(requests.into_iter().enumerate().map(|(i, r)| {
             let me = self.clone();
             let l = limit.clone();
@@ -260,7 +269,7 @@ impl VlmHttpClient {
     ) -> VlmResult<VlmBatchCompletionStream> {
         let l = semaphore
             .unwrap_or_else(|| Arc::new(Semaphore::new(self.config.max_concurrency.max(1))));
-        let width = l.available_permits().max(1);
+        let width = requests.len().max(1);
         let client = self.clone();
         let producer = stream::iter(requests.into_iter().enumerate().map(move |(i, r)| {
             let me = client.clone();
@@ -274,7 +283,7 @@ impl VlmHttpClient {
             }
         }))
         .buffer_unordered(width);
-        // Keep the public stream type while scheduling only `width` requests at once.
+        // The semaphore, not a snapshot of its permits, controls active HTTP work.
         Ok(Box::pin(FailFastBatch {
             inner: Box::pin(producer),
             failed: false,
@@ -337,7 +346,7 @@ impl VlmHttpClient {
         Ok(models)
     }
     async fn complete(&self, r: VlmRequest, streaming: bool) -> VlmResult<String> {
-        let body = json_body(self.body(r, streaming).await?, None).await?;
+        let body = json_body(self.body(r, streaming).await?, None, &self.task_work_lease).await?;
         self.complete_limited(body, self.config.max_response_bytes, None, None)
             .await
             .map(|x| x.0)
@@ -362,12 +371,17 @@ impl VlmHttpClient {
         let (v, bytes) = v;
         let text = if deadline.is_some() {
             let allow_truncated_content = self.config.allow_truncated_content;
-            json_worker(deadline, "chat", move || {
-                completion_text(v, allow_truncated_content)
+            let end_token = self.config.end_token.clone();
+            json_worker(deadline, "chat", &self.task_work_lease, move || {
+                completion_text(v, allow_truncated_content, &end_token)
             })
             .await?
         } else {
-            completion_text(v, self.config.allow_truncated_content)?
+            completion_text(
+                v,
+                self.config.allow_truncated_content,
+                &self.config.end_token,
+            )?
         };
         Ok((text, bytes))
     }
@@ -466,7 +480,7 @@ impl VlmHttpClient {
                     }
                     let b = read_limited_budgeted(r, cap, "response", budget.as_deref()).await?;
                     let bytes = b.len();
-                    return json_response(b, op, deadline)
+                    return json_response(b, op, deadline, &self.task_work_lease)
                         .await
                         .map(|value| (value, bytes));
                 }
@@ -503,22 +517,34 @@ impl VlmHttpClient {
         }
         let config = self.config.clone();
         let model = self.model.clone();
-        json_worker(None, "chat", move || {
+        json_worker(None, "chat", &self.task_work_lease, move || {
             Ok(build_body(
                 &config, &model, prompt, sampling, priority, streaming, images,
             ))
         })
         .await
     }
-    async fn image(&self, input: VlmImageInput) -> VlmResult<Option<(Vec<u8>, String)>> {
+    async fn image(&self, input: VlmImageInput) -> VlmResult<Option<(Bytes, String)>> {
         match input {
             VlmImageInput::RemoteUrl(url) => {
                 let bytes = self.remote(url).await?;
-                crate::vlm_image::admit_bytes(bytes, None, self.config.clone())
-                    .await
-                    .map(Some)
+                crate::vlm_image::admit_bytes_for_task(
+                    bytes,
+                    None,
+                    self.config.clone(),
+                    &self.task_work_lease,
+                )
+                .await
+                .map(Some)
             }
-            input => crate::vlm_image::admit_local(input, self.config.clone()).await,
+            input => {
+                crate::vlm_image::admit_local_for_task(
+                    input,
+                    self.config.clone(),
+                    &self.task_work_lease,
+                )
+                .await
+            }
         }
     }
 
@@ -526,18 +552,23 @@ impl VlmHttpClient {
         &self,
         input: VlmImageInput,
     ) -> VlmResult<Option<image::DynamicImage>> {
-        crate::vlm_image::decode_local(input, self.config.clone()).await
+        crate::vlm_image::decode_local_for_task(input, self.config.clone(), &self.task_work_lease)
+            .await
     }
     pub(crate) async fn admit_local_image(
         &self,
         input: VlmImageInput,
     ) -> VlmResult<Option<VlmImageInput>> {
-        Ok(crate::vlm_image::admit_local(input, self.config.clone())
-            .await?
-            .map(|(data, media_type)| VlmImageInput::Bytes {
-                data: data.into(),
-                media_type: Some(media_type),
-            }))
+        Ok(crate::vlm_image::admit_local_for_task(
+            input,
+            self.config.clone(),
+            &self.task_work_lease,
+        )
+        .await?
+        .map(|(data, media_type)| VlmImageInput::Bytes {
+            data,
+            media_type: Some(media_type),
+        }))
     }
     pub(crate) async fn decode_admitted_image(
         &self,
@@ -545,16 +576,18 @@ impl VlmHttpClient {
     ) -> VlmResult<Option<image::DynamicImage>> {
         match input {
             VlmImageInput::None => Ok(None),
-            VlmImageInput::Bytes { data, .. } => tokio::task::spawn_blocking(move || {
-                image::load_from_memory(&data)
-                    .map(Some)
-                    .map_err(|_| VlmError::InvalidImageInput("invalid image".into()))
-            })
-            .await
-            .map_err(|_| VlmError::Transport {
-                operation: "image",
-                message: "image worker failed".into(),
-            })?,
+            VlmImageInput::Bytes { data, .. } => {
+                tokio::task::spawn_blocking(self.task_work_lease.wrap(move || {
+                    image::load_from_memory(&data)
+                        .map(Some)
+                        .map_err(|_| VlmError::InvalidImageInput("invalid image".into()))
+                }))
+                .await
+                .map_err(|_| VlmError::Transport {
+                    operation: "image",
+                    message: "image worker failed".into(),
+                })?
+            }
             _ => Err(VlmError::InvalidImageInput(
                 "internal image was not admitted".into(),
             )),
@@ -562,6 +595,9 @@ impl VlmHttpClient {
     }
     pub(crate) fn max_decoded_pixels(&self) -> u64 {
         self.config.max_decoded_pixels
+    }
+    pub(crate) fn task_work_lease(&self) -> TaskWorkLease {
+        self.task_work_lease.clone()
     }
     async fn remote(&self, mut url: Url) -> VlmResult<Vec<u8>> {
         if !self.config.allow_remote_images {
@@ -624,7 +660,7 @@ impl VlmHttpClient {
         r: VlmRequest,
         tx: std::sync::mpsc::Sender<VlmResult<String>>,
     ) -> VlmResult<()> {
-        let body = json_body(self.body(r, true).await?, None).await?;
+        let body = json_body(self.body(r, true).await?, None, &self.task_work_lease).await?;
         let mut attempt = 0;
         let mut response = loop {
             match self
@@ -743,7 +779,11 @@ impl VlmHttpClient {
         }
     }
 }
-fn completion_text(mut response: Value, allow_truncated_content: bool) -> VlmResult<String> {
+fn completion_text(
+    mut response: Value,
+    allow_truncated_content: bool,
+    end_token: &str,
+) -> VlmResult<String> {
     if response.get("error").is_some()
         || response.get("object").and_then(Value::as_str) == Some("error")
     {
@@ -769,14 +809,13 @@ fn completion_text(mut response: Value, allow_truncated_content: bool) -> VlmRes
         .and_then(|message| message.get_mut("content"))
         .ok_or_else(|| protocol("chat", "missing string content"))?;
     match std::mem::replace(content, Value::Null) {
-        Value::String(text) => Ok(strip_end(text)),
+        Value::String(text) => Ok(strip_end(text, end_token)),
         Value::Null => Ok(String::new()),
         _ => Err(protocol("chat", "missing string content")),
     }
 }
-fn strip_end(mut text: String) -> String {
-    let token = std::env::var("MINERU_VLM_END_TOKEN").unwrap_or_else(|_| "<|im_end|>".into());
-    if !token.is_empty() && text.ends_with(&token) {
+fn strip_end(mut text: String, token: &str) -> String {
+    if !token.is_empty() && text.ends_with(token) {
         text.truncate(text.len() - token.len());
     }
     text
@@ -850,7 +889,7 @@ fn build_body(
     sampling: Option<SamplingParams>,
     priority: VlmPriority,
     streaming: bool,
-    images: Vec<(Vec<u8>, String)>,
+    images: Vec<(Bytes, String)>,
 ) -> Value {
     let images = images.into_iter().map(|(bytes, media)| {
         json!({"type":"image_url","image_url":{"url":format!("data:{media};base64,{}", STANDARD.encode(bytes))}})
@@ -958,8 +997,12 @@ fn official_body(config: Arc<VlmHttpConfig>, model: String, r: VlmRequest) -> Vl
     ))
 }
 
-async fn json_body(body: Value, deadline: Option<tokio::time::Instant>) -> VlmResult<Bytes> {
-    json_worker(deadline, "chat", move || {
+async fn json_body(
+    body: Value,
+    deadline: Option<tokio::time::Instant>,
+    task_work_lease: &TaskWorkLease,
+) -> VlmResult<Bytes> {
+    json_worker(deadline, "chat", task_work_lease, move || {
         serde_json::to_vec(&body)
             .map(Bytes::from)
             .map_err(|_| protocol("chat", "request JSON serialization failed"))
@@ -971,8 +1014,9 @@ async fn json_response(
     body: Vec<u8>,
     operation: &'static str,
     deadline: Option<tokio::time::Instant>,
+    task_work_lease: &TaskWorkLease,
 ) -> VlmResult<Value> {
-    json_worker(deadline, operation, move || {
+    json_worker(deadline, operation, task_work_lease, move || {
         serde_json::from_slice(&body).map_err(|_| protocol(operation, "invalid JSON response"))
     })
     .await
@@ -981,9 +1025,10 @@ async fn json_response(
 async fn json_worker<T: Send + 'static>(
     deadline: Option<tokio::time::Instant>,
     operation: &'static str,
+    task_work_lease: &TaskWorkLease,
     job: impl FnOnce() -> VlmResult<T> + Send + 'static,
 ) -> VlmResult<T> {
-    let worker = tokio::task::spawn_blocking(job);
+    let worker = tokio::task::spawn_blocking(task_work_lease.wrap(job));
     let result = if let Some(deadline) = deadline {
         tokio::time::timeout_at(deadline, worker)
             .await
@@ -1246,9 +1291,13 @@ fn sse_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{VlmHttpClient, build_body, global, json_worker, model_candidates};
-    use crate::{SamplingParams, VlmError, VlmHttpConfig, VlmImageInput, vlm_image::admit_local};
+    use super::{VlmHttpClient, build_body, global, json_worker, model_candidates, strip_end};
+    use crate::{
+        SamplingParams, TaskWorkLease, VlmError, VlmHttpConfig, VlmImageInput,
+        vlm_image::admit_local,
+    };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use bytes::Bytes;
     use image::{DynamicImage, ImageFormat};
     use reqwest::Client;
     use std::{
@@ -1301,6 +1350,7 @@ mod tests {
                 http: Client::new(),
                 base: Url::parse(base).unwrap(),
                 model: String::new(),
+                task_work_lease: TaskWorkLease::default(),
             };
             assert_eq!(client.url("models").unwrap().as_str(), expected, "{base}");
         }
@@ -1314,6 +1364,7 @@ mod tests {
             base: Url::parse("https://user:pass@example.com:8443/proxy%2Ftenant?token=a%2Fb")
                 .unwrap(),
             model: String::new(),
+            task_work_lease: TaskWorkLease::default(),
         };
 
         assert_eq!(
@@ -1367,6 +1418,16 @@ mod tests {
     }
 
     #[test]
+    fn strip_end_only_uses_the_supplied_config_token() {
+        assert_eq!(strip_end("value-END".into(), "-END"), "value");
+        assert_eq!(
+            strip_end("value<|im_end|>".into(), "-END"),
+            "value<|im_end|>"
+        );
+        assert_eq!(strip_end("value".into(), ""), "value");
+    }
+
+    #[test]
     fn shared_body_builder_keeps_official_and_public_protocol_fields_aligned() {
         let body = build_body(
             &VlmHttpConfig {
@@ -1392,21 +1453,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_workers_honor_official_deadlines() {
+    async fn timed_out_json_worker_holds_task_lease_until_it_exits() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = gate.clone().acquire_owned().await.unwrap();
+        let root = TaskWorkLease::from_permit(permit);
+        let worker_lease = root.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+        let task = tokio::spawn(async move {
+            json_worker(Some(deadline), "chat", &worker_lease, move || {
+                let _ = started_tx.send(());
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .await
+        });
+        started_rx.await.unwrap();
         assert!(matches!(
-            json_worker(
-                Some(tokio::time::Instant::now() + Duration::from_millis(1)),
-                "chat",
-                || {
-                    std::thread::sleep(Duration::from_millis(20));
-                    Ok(())
-                },
-            )
-            .await,
+            task.await.unwrap(),
             Err(VlmError::Timeout {
                 operation: "official PDF"
             })
         ));
+        drop(root);
+        assert!(gate.clone().try_acquire_owned().is_err());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if gate.clone().try_acquire_owned().is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
@@ -1473,9 +1555,11 @@ mod tests {
             })
         ));
 
+        let shared = Bytes::from(bytes.clone());
+        let shared_ptr = shared.as_ptr();
         let admitted = admit_local(
             VlmImageInput::Bytes {
-                data: bytes.clone().into(),
+                data: shared,
                 media_type: Some("image/png".into()),
             },
             Arc::new(VlmHttpConfig {
@@ -1487,7 +1571,9 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(admitted, (bytes, "image/png".into()));
+        assert_eq!(admitted.0.as_ref(), bytes.as_slice());
+        assert_eq!(admitted.0.as_ptr(), shared_ptr);
+        assert_eq!(admitted.1, "image/png");
     }
 
     #[tokio::test]

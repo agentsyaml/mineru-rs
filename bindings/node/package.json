@@ -1,9 +1,12 @@
 {
   "name": "@alexsun-top/mineru",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Native Node.js helpers for MinerU Rust",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "api.js",
+  "types": "api.d.ts",
+  "bin": {
+    "mineru": "bin/mineru.js"
+  },
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
@@ -14,7 +17,10 @@
   },
   "files": [
     "index.js",
-    "index.d.ts"
+    "index.d.ts",
+    "api.js",
+    "api.d.ts",
+    "bin/mineru.js"
   ],
   "publishConfig": {
     "access": "public",

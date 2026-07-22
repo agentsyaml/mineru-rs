@@ -4,8 +4,6 @@ use mineru::{
 };
 use std::path::PathBuf;
 
-mod support;
-
 #[derive(Debug, Parser)]
 #[command(about = "Parse a PDF with a MinerU VLM service")]
 struct Cli {
@@ -47,11 +45,10 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.official_output {
-        let options = support::direct_vlm::DirectOptions {
+        let options = mineru::command::LegacyDirectOptions {
             input: cli.input,
             output: cli.output,
             base_url: cli.base_url,
-            server_option_label: "--base-url",
             model: cli.model,
             api_key: cli.api_key,
             page_start: cli.page_start.map(|page| page as usize),
@@ -60,9 +57,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             no_table: cli.no_table,
             no_image_analysis: cli.no_image_analysis,
             batch_size: cli.batch_size,
-            canonical_mixed: false,
         };
-        return support::direct_vlm::run(options).await;
+        return mineru::command::run_legacy_direct(options)
+            .await
+            .map_err(Into::into);
     }
     let base_url = cli.base_url.ok_or("--base-url is required")?;
     let model = cli.model.ok_or("--model is required")?;

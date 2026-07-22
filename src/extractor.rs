@@ -11,16 +11,23 @@ use tokio::{sync::Semaphore, task::JoinSet};
 #[derive(Debug, Clone)]
 pub(crate) struct PageExtractor {
     openai: Arc<OpenAi>,
-    concurrency: usize,
-    image_bytes: usize,
+    request_gate: Arc<Semaphore>,
+    image_byte_gate: Arc<Semaphore>,
+    max_image_bytes: usize,
     max_blocks_per_page: usize,
 }
 impl PageExtractor {
     pub(crate) fn new(config: &ClientConfig) -> Result<Self> {
         Ok(Self {
             openai: Arc::new(OpenAi::new(config)?),
-            concurrency: config.request_concurrency,
-            image_bytes: config.limits.max_in_flight_image_bytes,
+            request_gate: Arc::new(Semaphore::new(config.request_concurrency)),
+            image_byte_gate: Arc::new(Semaphore::new(
+                config
+                    .limits
+                    .max_in_flight_image_bytes
+                    .min(u32::MAX as usize),
+            )),
+            max_image_bytes: config.limits.max_in_flight_image_bytes,
             max_blocks_per_page: config.limits.max_blocks_per_page,
         })
     }
@@ -28,10 +35,16 @@ impl PageExtractor {
         &self,
         page_index: usize,
         page_size: [f32; 2],
-        image: RgbImage,
+        image: Arc<RgbImage>,
         options: &ParseOptions,
     ) -> Result<PageResult> {
         let page = image_pipeline::page_png(&image)?;
+        let _request = self
+            .request_gate
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::WorkerJoin("request semaphore closed".into()))?;
         let layout_text = self
             .openai
             .completion(
@@ -42,12 +55,10 @@ impl PageExtractor {
                 options.allow_truncated,
             )
             .await?;
+        drop(_request);
         let mut blocks = parse_page_blocks(&layout_text, self.max_blocks_per_page)?;
         let table_images = image_pipeline::build_table_image_map(&mut blocks);
-        let page = Arc::new(image);
-        let semaphore = Arc::new(Semaphore::new(self.concurrency));
-        let bytes = Arc::new(Semaphore::new(self.image_bytes.min(u32::MAX as usize)));
-        let max_image_bytes = self.image_bytes;
+        let max_image_bytes = self.max_image_bytes;
         let mut jobs = JoinSet::new();
         for (index, block) in blocks.iter().enumerate() {
             if block
@@ -76,9 +87,9 @@ impl PageExtractor {
                 continue;
             }
             let client = self.openai.clone();
-            let permit = semaphore.clone();
-            let byte_permit = bytes.clone();
-            let source = page.clone();
+            let permit = self.request_gate.clone();
+            let byte_permit = self.image_byte_gate.clone();
+            let source = image.clone();
             let bbox = block.bbox;
             let angle = block.angle;
             let table = block.kind.as_str() == crate::BlockKind::TABLE;
@@ -364,7 +375,8 @@ mod tests {
     use crate::{BlockKind, ClientConfig, ContentBlock, Limits, NormalizedBbox};
     use axum::{Json, Router, routing::post};
     use serde_json::{Map, json};
-    use tokio::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::{net::TcpListener, time::Duration};
 
     fn block(kind: &str, content: Option<&str>) -> ContentBlock {
         ContentBlock {
@@ -462,7 +474,12 @@ mod tests {
         let extractor = PageExtractor::new(&config).unwrap();
         assert!(matches!(
             extractor
-                .extract_page(7, [1., 1.], RgbImage::new(1, 1), &ParseOptions::default())
+                .extract_page(
+                    7,
+                    [1., 1.],
+                    Arc::new(RgbImage::new(1, 1)),
+                    &ParseOptions::default(),
+                )
                 .await,
             Err(Error::LimitExceeded {
                 resource: "blocks per page",
@@ -470,5 +487,61 @@ mod tests {
                 actual: 2
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn window_pages_share_request_limit_and_restore_order() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let active = active.clone();
+                let peak = peak.clone();
+                move || {
+                    let active = active.clone();
+                    let peak = peak.clone();
+                    async move {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Json(json!({"choices":[{"finish_reason":"stop","message":{"content":"<|box_start|>0 0 1000 1000<|box_end|><|ref_start|>text<|ref_end|>"}}]}))
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = ClientConfig::new(format!("http://{address}"), "model").unwrap();
+        config.request_concurrency = 2;
+        let extractor = PageExtractor::new(&config).unwrap();
+        let mut jobs = JoinSet::new();
+        for index in [2, 0, 1] {
+            let extractor = extractor.clone();
+            jobs.spawn(async move {
+                extractor
+                    .extract_page(
+                        index,
+                        [1., 1.],
+                        Arc::new(RgbImage::new(1, 1)),
+                        &ParseOptions::default(),
+                    )
+                    .await
+                    .unwrap()
+            });
+        }
+        let mut pages = Vec::new();
+        while let Some(page) = jobs.join_next().await {
+            pages.push(page.unwrap());
+        }
+        pages.sort_unstable_by_key(|page| page.page_index);
+
+        assert_eq!(
+            pages.iter().map(|page| page.page_index).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
     }
 }

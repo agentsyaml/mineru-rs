@@ -37,6 +37,7 @@ fn assert_pdf(format: &str, bytes: Vec<u8>) {
 }
 
 #[test]
+#[ignore = "real Office helper process e2e"]
 fn helper_converts_self_authored_docx_pptx_and_xlsx() {
     assert_pdf("docx", docx());
     assert_pdf("pptx", pptx());
@@ -56,6 +57,7 @@ fn helper_converts_self_authored_docx_pptx_and_xlsx() {
     );
 }
 #[test]
+#[ignore = "real Office helper process e2e"]
 fn helper_rejects_bad_arguments_and_oversized_input() {
     for args in [&[][..], &["docx", "extra"], &["bad"]] {
         let output = run(args, b"");

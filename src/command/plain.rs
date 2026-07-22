@@ -4,7 +4,8 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use mineru::{ProgressCallback, ProgressEvent, sanitize_event_text};
+use super::{CommandCallback, CommandEvent};
+use crate::{ProgressCallback, ProgressEvent, sanitize_event_text};
 
 const TEXT_CAP: usize = 512;
 
@@ -43,7 +44,7 @@ impl LogLevel {
         Self::parse(std::env::var_os("MINERU_LOG_LEVEL"))
     }
 
-    fn admits(self, severity: Severity) -> bool {
+    pub(crate) fn admits(self, severity: Severity) -> bool {
         match self {
             Self::Trace | Self::Debug | Self::Info => true,
             Self::Success | Self::Warning => severity != Severity::Info,
@@ -54,7 +55,7 @@ impl LogLevel {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum Severity {
+pub(crate) enum Severity {
     Info,
     Warning,
     Error,
@@ -100,6 +101,15 @@ impl<W: Write + Send + 'static> EventSink<W> {
     pub fn warning_callback(self: &Arc<Self>) -> WarningCallback {
         let sink = Arc::clone(self);
         Arc::new(move |source, message| sink.warning(source, message))
+    }
+
+    pub(crate) fn command_callback(self: &Arc<Self>) -> CommandCallback {
+        let sink = Arc::clone(self);
+        Arc::new(move |event| {
+            if let CommandEvent::Progress { event, .. } = event {
+                sink.event(event);
+            }
+        })
     }
 
     pub fn event(&self, event: ProgressEvent) {
@@ -317,5 +327,57 @@ fn format_event(event: ProgressEvent) -> (Severity, &'static str, String, Option
             Some(clean(message)),
             false,
         ),
+    }
+}
+
+pub(crate) fn event_severity(event: &ProgressEvent) -> Severity {
+    match event {
+        ProgressEvent::RequestRejected { .. }
+        | ProgressEvent::RequestFailed { .. }
+        | ProgressEvent::DocumentFailed { .. }
+        | ProgressEvent::ApiFailed { .. } => Severity::Error,
+        ProgressEvent::OfficeWarning { .. } | ProgressEvent::ApiWarning { .. } => Severity::Warning,
+        _ => Severity::Info,
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use crate::command::{CommandEvent, CommandScope, DocumentId};
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+    impl Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn command_lifecycle_is_silent_and_progress_is_plain() {
+        let buffer = Buffer::default();
+        let sink = Arc::new(EventSink::new(buffer.clone(), false, LogLevel::Info));
+        let callback = sink.command_callback();
+        callback(CommandEvent::RunPlanned {
+            documents: 1,
+            api_tasks: 0,
+        });
+        callback(CommandEvent::RunCompleted);
+        callback(CommandEvent::RunFailed {
+            message: "ignored".into(),
+        });
+        assert!(buffer.0.lock().unwrap().is_empty());
+        callback(CommandEvent::Progress {
+            scope: CommandScope::Document(DocumentId(1)),
+            event: ProgressEvent::DocumentStarted {
+                document: "doc".into(),
+            },
+        });
+        assert_eq!(&*buffer.0.lock().unwrap(), b"document started: doc\n");
     }
 }

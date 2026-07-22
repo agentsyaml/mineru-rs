@@ -182,6 +182,12 @@ mod tests {
     }
 
     #[test]
+    fn sanitizer_only_redacts_bearer_as_a_word() {
+        let sanitized = sanitize_vlm_error_bytes(b"Bearer token forbearer token", 1024);
+        assert_eq!(sanitized, "Bearer [REDACTED] forbearer token");
+    }
+
+    #[test]
     fn sanitizer_redacts_quoted_json_secrets() {
         let sanitized = sanitize_vlm_error_bytes(
             br#"{"token":"json-secret","password": "also-secret","api-key":"k1","access_token":"k2","refresh_token":k3,"client_secret":'k4'}"#,

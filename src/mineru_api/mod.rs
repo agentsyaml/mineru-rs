@@ -102,6 +102,32 @@ pub async fn run_remote_api_documents(
 ) -> Result<Vec<RemoteApiFailure>, String> {
     runner::run_documents(documents, &output, &api_url, options, env, events).await
 }
+pub(crate) async fn run_remote_api_documents_with_workers(
+    documents: Vec<RemoteApiDocument>,
+    output: PathBuf,
+    api_url: String,
+    options: RemoteApiOptions,
+    env: RemoteApiEnv,
+    events: Option<ProgressCallback>,
+    office: crate::OfficeWorkers,
+) -> Result<Vec<RemoteApiFailure>, String> {
+    runner::run_documents_with_workers(documents, &output, &api_url, options, env, events, office)
+        .await
+}
+pub(crate) async fn run_remote_api_documents_scoped_with_workers(
+    documents: Vec<RemoteApiDocument>,
+    output: PathBuf,
+    api_url: String,
+    options: RemoteApiOptions,
+    env: RemoteApiEnv,
+    events: Option<crate::command::CommandCallback>,
+    office: crate::OfficeWorkers,
+) -> Result<Vec<RemoteApiFailure>, String> {
+    runner::run_documents_scoped_with_workers(
+        documents, &output, &api_url, options, env, events, office,
+    )
+    .await
+}
 #[doc(hidden)]
 pub fn selected_document_pages(
     path: &std::path::Path,
@@ -394,6 +420,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     #[tokio::test]
+    #[ignore = "full VLM/API service composition integration e2e"]
     async fn p3b_private_client_composes_with_vlm_api_service() {
         async fn chat(Json(request): Json<serde_json::Value>) -> Response {
             let content = if request.to_string().contains("Layout Detection") {

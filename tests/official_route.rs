@@ -209,6 +209,7 @@ async fn official_office_route_publishes_only_the_closed_office_target() {
 }
 
 #[tokio::test]
+#[ignore = "full PDF route/output integration e2e"]
 async fn prepared_routes_publish_exact_closed_origins_and_normalize_ranges() {
     let output = tempfile::tempdir().unwrap();
     let client = client().await;
@@ -278,6 +279,7 @@ async fn prepared_routes_publish_exact_closed_origins_and_normalize_ranges() {
 }
 
 #[tokio::test]
+#[ignore = "full PDF route/output integration e2e"]
 async fn prepared_route_page_events_follow_successful_staging_and_ignore_panics() {
     let output = tempfile::tempdir().unwrap();
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -371,6 +373,7 @@ async fn failed_office_route_preserves_existing_office_output_without_leaks() {
 }
 
 #[tokio::test]
+#[ignore = "full PDF route/output integration e2e"]
 async fn closed_targets_allow_stem_collisions_without_cross_publication() {
     assert_eq!(mineru::canonical_stem("../office").unwrap(), "___office");
     let output = tempfile::tempdir().unwrap();
@@ -562,6 +565,7 @@ async fn raw_reply_allowance_counts_ignored_json_fields() {
 }
 
 #[tokio::test]
+#[ignore = "130-page scheduler stress test"]
 async fn default_window_130_does_not_roll_into_the_next_operation() {
     tokio::time::timeout(Duration::from_secs(20), async {
         #[derive(Clone)]

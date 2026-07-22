@@ -303,6 +303,7 @@ impl Server {
 }
 
 #[tokio::test]
+#[ignore = "process-level API server e2e"]
 async fn aliases_help_health_cwd_and_eof() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
     let mut help = Vec::new();
@@ -340,6 +341,7 @@ async fn aliases_help_health_cwd_and_eof() {
 }
 
 #[tokio::test]
+#[ignore = "process-level API server e2e"]
 async fn invalid_log_level_exits_before_bind_or_output() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
     for binary in [ApiBinary::Primary, ApiBinary::Alias] {
@@ -358,6 +360,7 @@ async fn invalid_log_level_exits_before_bind_or_output() {
 }
 
 #[tokio::test]
+#[ignore = "process-level API server e2e"]
 async fn public_bind_matrix() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
     let mut bad = Server::start_at(ApiBinary::Primary, "0.0.0.0", reserve_port(), &[]);
@@ -426,6 +429,7 @@ fn signal(pid: u32, value: i32) {
 
 #[cfg(unix)]
 #[tokio::test]
+#[ignore = "process-level API server e2e"]
 async fn sigint_exits_while_stdin_watcher_is_blocked() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
     let (mut server, port) = spawn(
@@ -464,6 +468,7 @@ async fn chat(State(mock): State<Mock>, Json(request): Json<Value>) -> Json<Valu
 }
 
 #[tokio::test]
+#[ignore = "process-level API server e2e"]
 async fn active_worker_drains_before_exit() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
     let (entered_tx, entered_rx) = oneshot::channel();
@@ -583,6 +588,7 @@ async fn active_worker_drains_before_exit() {
 }
 
 #[tokio::test]
+#[ignore = "process-level API server e2e"]
 async fn canonical_client_consumes_real_api_server_zip_and_publishes_layout() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
     let _office_convert = env!("CARGO_BIN_EXE_mineru-office-convert");

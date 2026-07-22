@@ -1,6 +1,6 @@
 use crate::{
     Limits, MinerUVlmClient, OfficialOutputManifest, OfficialPdfOptions, PageResult, PdfInput,
-    ProgressCallback, ProgressEvent, VlmError, VlmResult,
+    ProgressCallback, ProgressEvent, TaskWorkLease, VlmError, VlmResult,
     official_builders::{OfficialBuildPage, prepare_official_page_until},
     official_output::{OfficialOutputStage, OfficialOutputTarget},
     pdf, preview,
@@ -16,12 +16,12 @@ use std::{
 fn effective_render_workers(
     available_cpus: usize,
     configured_workers: usize,
-    admitted_pages: usize,
+    selected_pages: usize,
 ) -> usize {
     available_cpus
         .min(configured_workers)
         .min(3)
-        .min((admitted_pages / 30).max(1))
+        .min((selected_pages / 30).max(1))
 }
 
 async fn render_with_timeout<T>(
@@ -118,17 +118,18 @@ impl RouteDeadline {
 
     async fn blocking<T: Send + 'static>(
         self,
+        task_work_lease: &TaskWorkLease,
         job: impl FnOnce() -> T + Send + 'static,
     ) -> VlmResult<T> {
         let remaining = self.remaining()?;
-        let mut task = tokio::task::spawn_blocking(job);
+        let mut task = tokio::task::spawn_blocking(task_work_lease.wrap(job));
         let wait = tokio::time::sleep(remaining);
         tokio::pin!(wait);
         tokio::select! {
             result = &mut task => result.map_err(|error| VlmError::Pdf(error.to_string())),
             _ = &mut wait => {
-                // A library parser/renderer may not be cancellable. Its job owns only input
-                // data, never route staging, so returning promptly cannot race cleanup.
+                // Blocking library work may not be cancellable after it starts. Its task lease
+                // keeps admission held until it exits; staged output retains its cleanup guard.
                 task.abort();
                 drop(task);
                 Err(VlmError::Timeout { operation: "official PDF" })
@@ -229,18 +230,23 @@ async fn parse_and_write_to(
     events: Option<ProgressCallback>,
 ) -> VlmResult<OfficialOutputManifest> {
     options.validate()?;
+    let task_work_lease = client.task_work_lease();
     let stem = crate::canonical_stem(stem)?;
     let deadline = RouteDeadline::new(options.total_deadline)?;
     let limits = route_limits(&options);
 
     let read_limits = limits.clone();
     let bytes = deadline
-        .blocking(move || pdf::read_input(input, &read_limits))
+        .blocking(&task_work_lease, move || {
+            pdf::read_input(input, &read_limits)
+        })
         .await?
         .map_err(map)?;
     let parse_limits = limits.clone();
     let parsed = deadline
-        .blocking(move || pdf::parse_document(bytes, &parse_limits))
+        .blocking(&task_work_lease, move || {
+            pdf::parse_document(bytes, &parse_limits)
+        })
         .await?
         .map_err(map)?;
     let count = pdf::page_count(&parsed);
@@ -264,7 +270,7 @@ async fn parse_and_write_to(
     let max_stage_assets = options.max_total_asset_bytes;
     let max_stage_text = options.max_staged_text_bytes;
     let mut stage = deadline
-        .blocking(move || {
+        .blocking(&task_work_lease, move || {
             OfficialOutputStage::begin(
                 &root,
                 &stage_stem,
@@ -284,6 +290,11 @@ async fn parse_and_write_to(
     render_limits.max_rendered_image_bytes = options
         .max_rendered_image_bytes
         .min(options.max_in_flight_image_bytes);
+    let render_workers = effective_render_workers(
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        options.render_workers,
+        indexes.len(),
+    );
 
     while cursor < indexes.len() {
         if let Err(error) = deadline.check() {
@@ -317,17 +328,13 @@ async fn parse_and_write_to(
             window_bytes = window_bytes.saturating_add(bytes);
             window.push(index);
         }
-        let render_workers = effective_render_workers(
-            std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
-            options.render_workers,
-            window.len(),
-        );
         let rendered = match render_with_timeout(deadline, options.render_timeout, async {
-            pdf::render_window(
+            pdf::render_window_for_task(
                 parsed.clone(),
                 window.clone(),
                 render_limits.clone(),
                 render_workers,
+                task_work_lease.clone(),
             )
             .await
             .map_err(map)
@@ -474,7 +481,7 @@ async fn parse_and_write_to(
                     .collect(),
             };
             let (returned_stage, result) = deadline
-                .blocking(move || {
+                .blocking(&task_work_lease, move || {
                     let result = (|| {
                         deadline.check()?;
                         stage.write_preview_page(&preview_page)
@@ -502,7 +509,7 @@ async fn parse_and_write_to(
                 }
             };
             let built = match deadline
-                .blocking(move || {
+                .blocking(&task_work_lease, move || {
                     prepare_official_page_until(
                         OfficialBuildPage {
                             slice_page_idx: page.index,
@@ -526,7 +533,7 @@ async fn parse_and_write_to(
                 return Err(dispose_stage(stage, error).await);
             }
             let (returned_stage, result) = deadline
-                .blocking(move || {
+                .blocking(&task_work_lease, move || {
                     let result = (|| {
                         deadline.check()?;
                         stage.write_prepared_page(page.index, built.page, &built.assets)
@@ -555,7 +562,7 @@ async fn parse_and_write_to(
         return Err(dispose_stage(stage, error).await);
     }
     let source = match deadline
-        .blocking(move || {
+        .blocking(&task_work_lease, move || {
             deadline.check()?;
             Ok(pdf::source_bytes(&parsed))
         })
@@ -570,7 +577,7 @@ async fn parse_and_write_to(
     let formula_enable = options.formula_enable;
     let table_enable = options.table_enable;
     let (stage, result) = deadline
-        .blocking(move || {
+        .blocking(&task_work_lease, move || {
             let result = (|| {
                 stage.finalize_document(formula_enable, table_enable, deadline.instant())?;
                 let preview_pages = stage.preview_pages()?;
@@ -596,19 +603,20 @@ async fn parse_and_write_to(
     if let Err(error) = deadline.check() {
         return Err(dispose_stage(stage, error).await);
     }
-    commit_stage(stage, deadline).await
+    commit_stage(stage, deadline, &task_work_lease).await
 }
 
 async fn commit_stage(
     stage: OfficialOutputStage,
     deadline: RouteDeadline,
+    task_work_lease: &TaskWorkLease,
 ) -> VlmResult<OfficialOutputManifest> {
     let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
     let (permit_tx, permit_rx) = std::sync::mpsc::sync_channel(1);
-    let task = tokio::task::spawn_blocking(move || {
+    let task = tokio::task::spawn_blocking(task_work_lease.wrap(move || {
         let _ = started_tx.send(());
         admitted_commit(stage, permit_rx, deadline)
-    });
+    }));
     // A queued blocking task owns the stage but cannot publish: it is parked on the permit.
     // Abort before admission drops that stage, whose capability-only Drop schedules cleanup.
     tokio::select! {
@@ -704,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_render_workers_uses_window_cpu_and_configured_caps() {
+    fn effective_render_workers_uses_selected_page_total_cpu_and_configured_caps() {
         assert_eq!(effective_render_workers(8, 8, 29), 1);
         assert_eq!(effective_render_workers(8, 8, 30), 1);
         assert_eq!(effective_render_workers(8, 8, 59), 1);
@@ -761,10 +769,12 @@ mod tests {
             tokio::task::spawn_blocking(move || held.recv().expect("release worker"));
             tokio::time::sleep(Duration::from_millis(10)).await;
             let deadline = RouteDeadline::new(Duration::from_millis(10)).expect("deadline");
+            let task_work_lease = crate::TaskWorkLease::default();
             let job_ran = Arc::clone(&ran);
             assert!(matches!(
                 deadline
-                    .blocking(move || job_ran.store(true, Ordering::SeqCst))
+                    .blocking(&task_work_lease, move || job_ran
+                        .store(true, Ordering::SeqCst))
                     .await,
                 Err(crate::VlmError::Timeout { .. })
             ));
@@ -796,10 +806,11 @@ mod tests {
             tokio::task::spawn_blocking(move || held.recv().expect("release worker"));
             tokio::time::sleep(Duration::from_millis(10)).await;
             let started = Instant::now();
+            let task_work_lease = crate::TaskWorkLease::default();
             assert!(matches!(
                 RouteDeadline::new(Duration::from_millis(10))
                     .expect("deadline")
-                    .blocking(move || drop(stage))
+                    .blocking(&task_work_lease, move || drop(stage))
                     .await,
                 Err(crate::VlmError::Timeout { .. })
             ));

@@ -106,6 +106,29 @@ pub enum VlmBatchPriority {
     PerItem(Vec<VlmPriority>),
 }
 pub type VlmSemaphore = Option<Arc<tokio::sync::Semaphore>>;
+#[derive(Clone, Default)]
+pub(crate) struct TaskWorkLease(Option<Arc<tokio::sync::OwnedSemaphorePermit>>);
+impl TaskWorkLease {
+    pub(crate) fn from_permit(permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self(Some(Arc::new(permit)))
+    }
+
+    pub(crate) fn wrap<T, F>(&self, job: F) -> impl FnOnce() -> T + Send + 'static
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let lease = self.clone();
+        move || lease.run(job)
+    }
+
+    fn run<T>(self, job: impl FnOnce() -> T) -> T {
+        let Self(permit) = self;
+        let result = job();
+        drop(permit);
+        result
+    }
+}
 pub type VlmBatchCompletionStream =
     Pin<Box<dyn Stream<Item = VlmResult<(usize, String)>> + Send + Unpin>>;
 pub struct VlmSseStream {
@@ -381,6 +404,21 @@ pub(crate) fn unsupported<T>() -> VlmResult<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn task_work_lease_releases_only_after_last_clone() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = gate.clone().acquire_owned().await.unwrap();
+        let root = TaskWorkLease::from_permit(permit);
+        let first = root.clone();
+        let last = first.clone();
+
+        drop(root);
+        drop(first);
+        assert!(gate.clone().try_acquire_owned().is_err());
+        drop(last);
+        assert!(gate.try_acquire_owned().is_ok());
+    }
 
     #[test]
     fn image_request_admits_zero_or_many_inputs() {

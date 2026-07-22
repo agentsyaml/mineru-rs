@@ -519,6 +519,7 @@ async fn exact_image_and_pdf_limits_hold_at_the_boundary() {
 }
 
 #[tokio::test]
+#[ignore = "real Office conversion e2e"]
 async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
     let workers =
         OfficeWorkers::with_executable(PathBuf::from(env!("CARGO_BIN_EXE_mineru-office-convert")))

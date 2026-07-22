@@ -58,6 +58,10 @@ pub struct VlmHttpConfig {
     /// Set only when MINERU_VL_SERVER was present but could not be parsed.
     pub invalid_server_url: bool,
     pub headers: Vec<VlmHeader>,
+    /// API key captured when this configuration was created.
+    pub api_key: Option<String>,
+    /// Completion suffix captured when this configuration was created.
+    pub end_token: String,
     pub prompt: Option<String>,
     pub system_prompt: Option<String>,
     pub sampling_params: Option<SamplingParams>,
@@ -66,6 +70,9 @@ pub struct VlmHttpConfig {
     pub max_concurrency: usize,
     pub http_timeout: Duration,
     pub connect_timeout: Duration,
+    /// Deprecated compatibility no-op. Active request concurrency is controlled by
+    /// `max_concurrency`; per-host idle pooling is controlled by `max_keepalive_connections`.
+    #[deprecated(note = "compatibility no-op; use max_concurrency or max_keepalive_connections")]
     pub max_connections: Option<usize>,
     pub max_keepalive_connections: usize,
     pub keepalive_expiry: Duration,
@@ -93,12 +100,23 @@ impl fmt::Debug for VlmHttpConfig {
 }
 impl Default for VlmHttpConfig {
     fn default() -> Self {
+        Self::from_env(|name| env::var(name).ok())
+    }
+}
+impl VlmHttpConfig {
+    #[allow(deprecated)]
+    pub(crate) fn from_env(get: impl Fn(&str) -> Option<String>) -> Self {
+        let model_name = env_nonempty_with(&get, "MINERU_VL_MODEL_NAME");
+        let raw_server = env_nonempty_with(&get, "MINERU_VL_SERVER");
+        let api_key = env_nonempty_with(&get, "MINERU_VL_API_KEY");
+        let end_token = get("MINERU_VLM_END_TOKEN").unwrap_or_else(|| "<|im_end|>".into());
         Self {
-            model_name: env_nonempty("MINERU_VL_MODEL_NAME"),
-            server_url: env_nonempty("MINERU_VL_SERVER").and_then(|s| Url::parse(&s).ok()),
-            invalid_server_url: env_nonempty("MINERU_VL_SERVER")
-                .is_some_and(|s| Url::parse(&s).is_err()),
+            model_name,
+            server_url: raw_server.as_deref().and_then(|s| Url::parse(s).ok()),
+            invalid_server_url: raw_server.is_some_and(|s| Url::parse(&s).is_err()),
             headers: vec![],
+            api_key,
+            end_token,
             prompt: None,
             system_prompt: None,
             sampling_params: None,
@@ -110,7 +128,7 @@ impl Default for VlmHttpConfig {
             max_connections: None,
             max_keepalive_connections: 20,
             keepalive_expiry: Duration::from_secs(5),
-            debug: env_debug().unwrap_or(false),
+            debug: env_debug_with(&get).unwrap_or(false),
             max_retries: 3,
             retry_backoff_factor: 0.5,
             skip_model_name_checking: false,
@@ -131,25 +149,21 @@ impl VlmHttpConfig {
             .iter()
             .find(|h| h.name.eq_ignore_ascii_case("authorization"))
             .map(|h| h.value.clone())
-            .or_else(|| env_nonempty("MINERU_VL_API_KEY").map(|v| format!("Bearer {v}")))
+            .or_else(|| self.api_key.as_ref().map(|v| format!("Bearer {v}")))
     }
 }
-fn env_nonempty(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
+fn env_nonempty_with(get: &impl Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    get(name)
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty())
 }
-fn env_debug() -> Option<bool> {
-    env::var("MINERU_VL_DEBUG_ENABLE")
-        .ok()
-        .and_then(|v| match v.to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" => Some(true),
-            "0" | "false" | "no" => Some(false),
-            _ => None,
-        })
+fn env_debug_with(get: &impl Fn(&str) -> Option<String>) -> Option<bool> {
+    get("MINERU_VL_DEBUG_ENABLE").and_then(|v| match v.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Some(true),
+        "0" | "false" | "no" => Some(false),
+        _ => None,
+    })
 }
-
 #[derive(Debug, Clone)]
 pub struct MinerUVlmConfig {
     pub prompts: std::collections::BTreeMap<String, String>,
@@ -314,8 +328,24 @@ mod tests {
     fn authorization_header_takes_precedence_and_debug_redacts_secrets() {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous = env::var_os("MINERU_VL_API_KEY");
+        let previous_end = env::var_os("MINERU_VLM_END_TOKEN");
         // SAFETY: the lock serializes this test's process-wide environment mutation.
-        unsafe { env::set_var("MINERU_VL_API_KEY", "environment-secret") };
+        unsafe {
+            env::set_var("MINERU_VL_API_KEY", "environment-secret");
+            env::set_var("MINERU_VLM_END_TOKEN", "environment-end");
+        }
+
+        let captured = VlmHttpConfig::default();
+        // SAFETY: the lock serializes this test's process-wide environment mutation.
+        unsafe {
+            env::set_var("MINERU_VL_API_KEY", "late-secret");
+            env::set_var("MINERU_VLM_END_TOKEN", "late-end");
+        }
+        assert_eq!(
+            captured.authorization().as_deref(),
+            Some("Bearer environment-secret")
+        );
+        assert_eq!(captured.end_token, "environment-end");
 
         let config = VlmHttpConfig {
             headers: vec![VlmHeader::new("Authorization", "Bearer supplied-token").unwrap()],
@@ -330,7 +360,7 @@ mod tests {
         assert!(!debug.contains("environment-secret"));
         assert_eq!(
             VlmHttpConfig::default().authorization().as_deref(),
-            Some("Bearer environment-secret")
+            Some("Bearer late-secret")
         );
 
         // SAFETY: restore the process-wide environment before releasing the lock.
@@ -339,6 +369,11 @@ mod tests {
                 env::set_var("MINERU_VL_API_KEY", value);
             } else {
                 env::remove_var("MINERU_VL_API_KEY");
+            }
+            if let Some(value) = previous_end {
+                env::set_var("MINERU_VLM_END_TOKEN", value);
+            } else {
+                env::remove_var("MINERU_VLM_END_TOKEN");
             }
         }
     }

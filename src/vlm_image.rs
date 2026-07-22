@@ -1,22 +1,36 @@
-use crate::{VlmError, VlmHttpConfig, VlmImageInput, VlmResult};
+use crate::{TaskWorkLease, VlmError, VlmHttpConfig, VlmImageInput, VlmResult};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::Bytes;
 use image::ImageReader;
 use std::io::{Cursor, Read};
 
-pub(crate) type AdmittedImage = (Vec<u8>, String);
+pub(crate) type AdmittedImage = (Bytes, String);
 
+#[cfg(test)]
 pub(crate) async fn admit_local(
     input: VlmImageInput,
     config: std::sync::Arc<VlmHttpConfig>,
 ) -> VlmResult<Option<AdmittedImage>> {
-    image_worker(move || admit_local_blocking(input, &config)).await
+    admit_local_for_task(input, config, &TaskWorkLease::default()).await
 }
 
-pub(crate) async fn decode_local(
+pub(crate) async fn admit_local_for_task(
     input: VlmImageInput,
     config: std::sync::Arc<VlmHttpConfig>,
+    task_work_lease: &TaskWorkLease,
+) -> VlmResult<Option<AdmittedImage>> {
+    image_worker(task_work_lease, move || {
+        admit_local_blocking(input, &config)
+    })
+    .await
+}
+
+pub(crate) async fn decode_local_for_task(
+    input: VlmImageInput,
+    config: std::sync::Arc<VlmHttpConfig>,
+    task_work_lease: &TaskWorkLease,
 ) -> VlmResult<Option<image::DynamicImage>> {
-    image_worker(move || {
+    image_worker(task_work_lease, move || {
         let Some((bytes, _)) = admit_local_blocking(input, &config)? else {
             return Ok(None);
         };
@@ -27,12 +41,16 @@ pub(crate) async fn decode_local(
     .await
 }
 
-pub(crate) async fn admit_bytes(
+pub(crate) async fn admit_bytes_for_task(
     bytes: Vec<u8>,
     hint: Option<String>,
     config: std::sync::Arc<VlmHttpConfig>,
+    task_work_lease: &TaskWorkLease,
 ) -> VlmResult<AdmittedImage> {
-    image_worker(move || inspect(bytes, hint, &config)).await
+    image_worker(task_work_lease, move || {
+        inspect(bytes.into(), hint, &config)
+    })
+    .await
 }
 
 pub(crate) fn admit_local_blocking(
@@ -41,10 +59,10 @@ pub(crate) fn admit_local_blocking(
 ) -> VlmResult<Option<AdmittedImage>> {
     let (bytes, hint) = match input {
         VlmImageInput::None => return Ok(None),
-        VlmImageInput::Path(path) => (read_path(path, config.max_image_bytes)?, None),
+        VlmImageInput::Path(path) => (read_path(path, config.max_image_bytes)?.into(), None),
         VlmImageInput::Bytes { data, media_type } => {
             check_bytes(data.len(), config.max_image_bytes)?;
-            (data.to_vec(), media_type)
+            (data, media_type)
         }
         VlmImageInput::Base64 { data, media_type } => {
             encoded_fits(data.len(), config.max_image_bytes)?;
@@ -52,7 +70,7 @@ pub(crate) fn admit_local_blocking(
                 .decode(data)
                 .map_err(|_| VlmError::InvalidImageInput("invalid base64".into()))?;
             check_bytes(bytes.len(), config.max_image_bytes)?;
-            (bytes, media_type)
+            (bytes.into(), media_type)
         }
         VlmImageInput::DataUrl(data) => data_url(&data, config.max_image_bytes)?,
         VlmImageInput::RemoteUrl(_) => {
@@ -63,9 +81,10 @@ pub(crate) fn admit_local_blocking(
 }
 
 async fn image_worker<T: Send + 'static>(
+    task_work_lease: &TaskWorkLease,
     job: impl FnOnce() -> VlmResult<T> + Send + 'static,
 ) -> VlmResult<T> {
-    tokio::task::spawn_blocking(job)
+    tokio::task::spawn_blocking(task_work_lease.wrap(job))
         .await
         .map_err(|_| VlmError::Transport {
             operation: "image",
@@ -96,7 +115,7 @@ fn read_path(path: std::path::PathBuf, cap: usize) -> VlmResult<Vec<u8>> {
     Ok(bytes)
 }
 
-fn data_url(data: &str, cap: usize) -> VlmResult<(Vec<u8>, Option<String>)> {
+fn data_url(data: &str, cap: usize) -> VlmResult<(Bytes, Option<String>)> {
     let (media, encoded) = data
         .strip_prefix("data:")
         .and_then(|value| value.split_once(','))
@@ -111,7 +130,7 @@ fn data_url(data: &str, cap: usize) -> VlmResult<(Vec<u8>, Option<String>)> {
         .decode(encoded)
         .map_err(|_| VlmError::InvalidImageInput("invalid data URL".into()))?;
     check_bytes(bytes.len(), cap)?;
-    Ok((bytes, Some(media.into())))
+    Ok((bytes.into(), Some(media.into())))
 }
 
 fn supported_media(media: &str) -> Option<&'static str> {
@@ -154,13 +173,9 @@ fn check_bytes(actual: usize, cap: usize) -> VlmResult<()> {
     Ok(())
 }
 
-fn inspect(
-    bytes: Vec<u8>,
-    hint: Option<String>,
-    config: &VlmHttpConfig,
-) -> VlmResult<AdmittedImage> {
+fn inspect(bytes: Bytes, hint: Option<String>, config: &VlmHttpConfig) -> VlmResult<AdmittedImage> {
     check_bytes(bytes.len(), config.max_image_bytes)?;
-    let reader = ImageReader::new(Cursor::new(&bytes))
+    let reader = ImageReader::new(Cursor::new(bytes.as_ref()))
         .with_guessed_format()
         .map_err(|_| VlmError::InvalidImageInput("unsupported image".into()))?;
     let format = reader

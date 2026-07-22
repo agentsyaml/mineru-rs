@@ -6,7 +6,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use image::{DynamicImage, ImageFormat, imageops::FilterType};
 use regex::Regex;
-use std::{collections::HashSet, io::Cursor, path::PathBuf};
+use std::{collections::HashSet, io::Cursor, path::PathBuf, sync::Arc};
+use tokio::task::JoinSet;
 
 pub(crate) async fn parse(
     config: &ClientConfig,
@@ -31,6 +32,7 @@ pub(crate) async fn parse(
             "page range {start}..={end} is outside a {count}-page PDF"
         )));
     }
+    let options = Arc::new(options);
     let mut pages = Vec::new();
     let mut assets = Vec::new();
     let window = config.limits.page_window_size;
@@ -47,18 +49,30 @@ pub(crate) async fn parse(
         if rendered.is_empty() {
             return Err(Error::Pdf("renderer returned no page".into()));
         }
+        let mut jobs = JoinSet::new();
         for page in rendered {
             let index = page.index;
-            let image = std::sync::Arc::try_unwrap(page.image)
-                .map_err(|_| Error::Pdf("rendered image ownership was retained".into()))?;
+            let image = page.image;
             let source = image.clone();
-            let result = extractor
-                .extract_page(index, page.size, image, &options)
-                .await
-                .map_err(|source| Error::Page {
-                    page: index,
-                    source: Box::new(source),
-                })?;
+            let extractor = extractor.clone();
+            let options = options.clone();
+            jobs.spawn(async move {
+                let result = extractor
+                    .extract_page(index, page.size, image, &options)
+                    .await
+                    .map_err(|source| Error::Page {
+                        page: index,
+                        source: Box::new(source),
+                    })?;
+                Ok::<_, Error>((index, source, result))
+            });
+        }
+        let mut extracted = Vec::new();
+        while let Some(job) = jobs.join_next().await {
+            extracted.push(job.map_err(|error| Error::WorkerJoin(error.to_string()))??);
+        }
+        extracted.sort_unstable_by_key(|(index, _, _)| *index);
+        for (_, source, result) in extracted {
             pages.push(result);
             let generated = attach_assets(pages.last_mut().unwrap(), &source)?;
             extend_assets(&mut assets, generated, config.limits.max_total_asset_bytes)?;

@@ -1,8 +1,8 @@
-use mineru::OfficialPdfOptions;
+use crate::OfficialPdfOptions;
 use std::{ffi::OsString, time::Duration};
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Decimal {
+pub enum Decimal {
     Invalid,
     NonPositive,
     Positive(u64),
@@ -37,7 +37,7 @@ fn lex_decimal(value: &OsString, max: u64) -> Option<(bool, bool, u64)> {
     previous_digit.then_some((negative, nonzero, number))
 }
 
-pub(crate) fn decimal(value: &OsString, max: u64) -> Decimal {
+pub fn decimal(value: &OsString, max: u64) -> Decimal {
     let Some((negative, nonzero, number)) = lex_decimal(value, max) else {
         return Decimal::Invalid;
     };
@@ -49,13 +49,13 @@ pub(crate) fn decimal(value: &OsString, max: u64) -> Decimal {
 }
 
 #[allow(dead_code)] // The API binary uses this; the canonical CLI compiles the shared module too.
-pub(crate) fn nonnegative_decimal(value: &OsString, max: u64) -> Option<u64> {
+pub fn nonnegative_decimal(value: &OsString, max: u64) -> Option<u64> {
     let (negative, nonzero, number) = lex_decimal(value, max)?;
     (!negative || !nonzero).then_some(number)
 }
 
 /// Applies the P3a route environment without reading or mutating process state.
-pub(crate) fn apply_route_env(
+pub fn apply_route_env(
     route: &mut OfficialPdfOptions,
     lookup: impl Fn(&str) -> Option<OsString>,
 ) -> bool {
@@ -103,13 +103,13 @@ pub(crate) fn apply_route_env(
 
 #[allow(dead_code)] // This source is also included by binaries that only need apply_route_env.
 #[derive(Clone)]
-pub(crate) struct RouteEnv {
+pub struct RouteEnv {
     pub route: OfficialPdfOptions,
     pub formula: Option<bool>,
     pub table: Option<bool>,
 }
 #[allow(dead_code)] // The API binary uses this; the canonical CLI compiles the shared module too.
-pub(crate) fn snapshot_route_env(lookup: impl Fn(&str) -> Option<OsString>) -> RouteEnv {
+pub fn snapshot_route_env(lookup: impl Fn(&str) -> Option<OsString>) -> RouteEnv {
     let formula = lookup("MINERU_FORMULA_ENABLE")
         .map(|v| v.to_str().is_some_and(|v| v.to_lowercase() == "true"));
     let table = lookup("MINERU_TABLE_ENABLE")

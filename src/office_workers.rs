@@ -69,6 +69,11 @@ impl Drop for CancelGuard {
 }
 
 impl OfficeWorkers {
+    #[cfg(test)]
+    pub(crate) fn executable(&self) -> &std::path::Path {
+        &self.executable
+    }
+
     #[doc(hidden)]
     pub fn new() -> Result<Self, OfficeConvertError> {
         let executable = std::env::current_exe()
