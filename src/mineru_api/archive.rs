@@ -1,5 +1,6 @@
 use crate::error::sanitize_vlm_error_bytes;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(not(windows))]
 use cap_primitives::fs::open_dir_nofollow;
 use cap_std::{
     ambient_authority,
@@ -731,21 +732,67 @@ fn publish_file(
         .map_err(|_| "unable to publish extracted file".into())
 }
 
+#[cfg(windows)]
+fn windows_output_root_parts(path: &Path) -> Result<(PathBuf, Vec<Component<'_>>), String> {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let mut parts = Vec::new();
+    let anchor = match components.next() {
+        Some(Component::Prefix(prefix)) => {
+            let mut anchor = PathBuf::from(prefix.as_os_str());
+            match (prefix.kind(), components.next()) {
+                (Prefix::Disk(_), Some(root @ Component::RootDir)) => {
+                    anchor.push(root.as_os_str());
+                }
+                (Prefix::UNC(server, share), Some(root @ Component::RootDir))
+                    if !server.is_empty() && !share.is_empty() =>
+                {
+                    anchor.push(root.as_os_str());
+                }
+                (Prefix::UNC(server, share), None) if !server.is_empty() && !share.is_empty() => {}
+                _ => return Err("output root is unsafe".into()),
+            }
+            anchor
+        }
+        Some(Component::RootDir | Component::ParentDir) => {
+            return Err("output root is unsafe".into());
+        }
+        Some(component @ (Component::Normal(_) | Component::CurDir)) => {
+            parts.push(component);
+            PathBuf::from(".")
+        }
+        None => PathBuf::from("."),
+    };
+    for component in components {
+        match component {
+            Component::Normal(_) | Component::CurDir => parts.push(component),
+            _ => return Err("output root is unsafe".into()),
+        }
+    }
+    Ok((anchor, parts))
+}
+
 fn open_output_root(path: &Path, create: bool) -> Result<Dir, String> {
+    #[cfg(windows)]
+    let (anchor, components) = windows_output_root_parts(path)?;
+    #[cfg(not(windows))]
     let components: Vec<_> = path.components().collect();
+    #[cfg(not(windows))]
     if components
         .iter()
         .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
     {
         return Err("output root is unsafe".into());
     }
-    let mut root = Dir::open_ambient_dir(
-        if path.is_absolute() { "/" } else { "." },
-        ambient_authority(),
-    )
-    .map_err(|_| "unable to open output root")?;
+    #[cfg(not(windows))]
+    let anchor = if path.is_absolute() { "/" } else { "." };
+    let mut root = Dir::open_ambient_dir(anchor, ambient_authority())
+        .map_err(|_| "unable to open output root")?;
+    #[cfg(not(windows))]
     let alias = cfg!(target_os = "macos")
         && matches!(components.as_slice(), [Component::RootDir, Component::Normal(x), ..] if *x == "tmp" || *x == "var");
+    #[cfg(not(windows))]
     if alias {
         root = Dir::from_std_file(
             open_dir_nofollow(&root.into_std_file(), Path::new("private"))
@@ -1245,6 +1292,16 @@ mod tests {
         archive.extract(&relative, limits()).unwrap();
         assert_eq!(std::fs::read(relative.join("file")).unwrap(), b"contents");
         std::fs::remove_dir_all(relative).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preflight_creates_fresh_absolute_output_root() {
+        let holder = tempfile::tempdir().unwrap();
+        let output = holder.path().join("fresh");
+        assert!(output.is_absolute());
+        preflight_output_root(&output).unwrap();
+        assert!(output.is_dir());
     }
 
     #[cfg(target_os = "macos")]

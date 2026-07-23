@@ -194,6 +194,7 @@ jobs:
         run: |
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc command::direct::tests -- --test-threads=1
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_output::tests -- --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=1
       - name: Check ARM64 Windows tests
         run: cargo +1.89.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
 
