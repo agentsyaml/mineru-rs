@@ -156,16 +156,6 @@ impl VlmHttpClient {
     pub async fn predict(&self, request: VlmRequest) -> VlmResult<String> {
         self.complete(request, false).await
     }
-    #[allow(dead_code)] // retained for the current official-route snapshot page
-    pub(crate) async fn predict_capped(
-        &self,
-        request: VlmRequest,
-        cap: usize,
-        deadline: tokio::time::Instant,
-    ) -> VlmResult<(String, usize)> {
-        self.predict_official_budgeted(request, cap, None, deadline)
-            .await
-    }
     pub(crate) async fn predict_official_budgeted(
         &self,
         request: VlmRequest,
@@ -288,46 +278,6 @@ impl VlmHttpClient {
             inner: Box::pin(producer),
             failed: false,
         }))
-    }
-    pub async fn predict_scored(&self, _: VlmRequest) -> VlmResult<VlmScoredOutput> {
-        unsupported()
-    }
-    pub async fn batch_predict_scored(
-        &self,
-        _: Vec<VlmRequest>,
-    ) -> VlmResult<Vec<VlmScoredOutput>> {
-        unsupported()
-    }
-    pub async fn aio_predict_scored(&self, _: VlmRequest) -> VlmResult<VlmScoredOutput> {
-        unsupported()
-    }
-    pub async fn aio_batch_predict_scored(
-        &self,
-        _: Vec<VlmRequest>,
-        _: VlmSemaphore,
-    ) -> VlmResult<Vec<VlmScoredOutput>> {
-        unsupported()
-    }
-    pub async fn score(&self, _: VlmRequest, _: String) -> VlmResult<VlmScoredOutput> {
-        unsupported()
-    }
-    pub async fn batch_score(
-        &self,
-        _: Vec<VlmRequest>,
-        _: Vec<String>,
-    ) -> VlmResult<Vec<VlmScoredOutput>> {
-        unsupported()
-    }
-    pub async fn aio_score(&self, _: VlmRequest, _: String) -> VlmResult<VlmScoredOutput> {
-        unsupported()
-    }
-    pub async fn aio_batch_score(
-        &self,
-        _: Vec<VlmRequest>,
-        _: Vec<String>,
-        _: VlmSemaphore,
-    ) -> VlmResult<Vec<VlmScoredOutput>> {
-        unsupported()
     }
     async fn models(&self) -> VlmResult<Vec<String>> {
         let v = self.send_json("models", self.url("models")?, None).await?;

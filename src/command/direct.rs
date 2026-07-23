@@ -4,7 +4,6 @@ use crate::{
     MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialPdfOptions, ProgressCallback,
     ProgressEvent, RasterWorkers, VlmHeader, VlmHttpConfig, canonical_stem,
     input_prepare::{DocumentKind, prepare_with_warning},
-    unique_output_stems,
 };
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::{
@@ -179,7 +178,7 @@ pub(super) fn allocate_input_stems(
             canonical_stem(stem).map_err(|e| -> DirectError { Box::new(e) })
         })
         .collect::<Result<_, DirectError>>()?;
-    Ok(unique_output_stems(&raw_stems))
+    Ok(crate::mineru_api::planning::unique_stems(&raw_stems))
 }
 fn open_dir(path: &Path) -> Result<Dir, DirectError> {
     let mut dir = Dir::open_ambient_dir("/", ambient_authority())?;
@@ -1068,7 +1067,7 @@ mod tests {
                 batch_size: 1,
                 canonical_mixed: true,
             },
-            OfficeWorkers::with_executable(std::env::current_exe().unwrap()).unwrap(),
+            OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
             super::super::Environment::process(),
             Some(event_callback),
             Some(warning_callback),
@@ -1191,7 +1190,7 @@ mod tests {
                 batch_size: 1,
                 canonical_mixed: true,
             },
-            OfficeWorkers::with_executable(std::env::current_exe().unwrap()).unwrap(),
+            OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
             super::super::Environment::process(),
             Some(callback),
             None,

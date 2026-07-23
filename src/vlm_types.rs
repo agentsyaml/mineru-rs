@@ -230,27 +230,6 @@ impl fmt::Debug for VlmCompletion {
             .finish()
     }
 }
-#[derive(Clone)]
-pub struct VlmScoredOutput {
-    pub text: String,
-    pub token_ids: Vec<u32>,
-    pub logprobs: Vec<f32>,
-    pub perplexity: Option<f32>,
-    pub min_logprob: Option<f32>,
-    pub logprob_std: Option<f32>,
-}
-impl fmt::Debug for VlmScoredOutput {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("VlmScoredOutput")
-            .field("text_len", &self.text.len())
-            .field("token_count", &self.token_ids.len())
-            .field("logprob_count", &self.logprobs.len())
-            .field("perplexity", &self.perplexity)
-            .field("min_logprob", &self.min_logprob)
-            .field("logprob_std", &self.logprob_std)
-            .finish()
-    }
-}
 #[derive(Debug, Clone)]
 pub struct VlmLayoutBlock {
     pub block_type: String,
@@ -356,33 +335,11 @@ fn model_protocol(message: &str) -> VlmError {
     }
 }
 #[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub struct OfficialDocument {
-    pub document: crate::Document,
-    pub model_output: ModelOutput,
-    pub content_list_v2: Value,
-    pub diagnostics: Vec<String>,
-}
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OfficialOutputManifest {
     pub root: PathBuf,
     pub stem: String,
     pub vlm_dir: PathBuf,
-}
-#[allow(dead_code)]
-impl OfficialDocument {
-    pub fn output_stem(input: &crate::PdfInput) -> String {
-        match input {
-            crate::PdfInput::Path(path) => path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(sanitize_stem)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "document".into()),
-            crate::PdfInput::Bytes(_) => "document".into(),
-        }
-    }
 }
 #[allow(dead_code)]
 pub fn sanitize_stem(value: &str) -> String {
@@ -397,10 +354,6 @@ pub fn sanitize_stem(value: &str) -> String {
         })
         .collect()
 }
-pub(crate) fn unsupported<T>() -> VlmResult<T> {
-    Err(VlmError::Unsupported("scored/PPL is unavailable over HTTP"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,36 +411,20 @@ mod tests {
             finish_reason: "stop".into(),
             request_id: Some("request-id".into()),
         };
-        let scored = VlmScoredOutput {
-            text: "scored-secret-marker".into(),
-            token_ids: vec![424_242],
-            logprobs: vec![123.456],
-            perplexity: None,
-            min_logprob: None,
-            logprob_std: None,
-        };
-
         for (debug, marker) in [
             (format!("{request:?}"), "image-bytes-secret-marker"),
             (format!("{request:?}"), "data-url-secret-marker"),
             (format!("{request:?}"), "base64-secret-marker"),
             (format!("{request:?}"), "prompt-secret-marker"),
             (format!("{completion:?}"), "completion-secret-marker"),
-            (format!("{scored:?}"), "scored-secret-marker"),
-            (format!("{scored:?}"), "424242"),
-            (format!("{scored:?}"), "123.456"),
         ] {
             assert!(!debug.contains(marker), "{debug}");
         }
     }
 
     #[test]
-    fn official_path_stem_is_safe() {
+    fn output_stem_is_safe() {
         assert_eq!(sanitize_stem("a bad/pdf"), "a_bad_pdf");
-        assert_eq!(
-            OfficialDocument::output_stem(&crate::PdfInput::Bytes(Bytes::new())),
-            "document"
-        );
     }
 
     #[test]
@@ -507,6 +444,36 @@ mod tests {
         let mut collision = base;
         collision.extra.insert("type".into(), Value::Null);
         assert!(model_output_wire(&vec![vec![collision]]).is_err());
+    }
+
+    #[test]
+    fn model_wire_serializes_optional_and_extra_fields() {
+        let output = vec![vec![ModelBlock {
+            block_type: "text".into(),
+            bbox: Some(NormalizedBbox::new(0.0, 0.25, 0.75, 1.0).unwrap()),
+            angle: Some(Rotation::Deg90),
+            content: Some("continued".into()),
+            merge_prev: Some(true),
+            sub_type: Some("paragraph".into()),
+            extra: Map::from_iter([
+                ("confidence".into(), serde_json::json!(0.75)),
+                ("source".into(), serde_json::json!({"page": 3})),
+            ]),
+        }]];
+
+        assert_eq!(
+            model_output_wire(&output).unwrap(),
+            serde_json::json!([[{
+                "type": "text",
+                "bbox": [0.0, 0.25, 0.75, 1.0],
+                "angle": 90,
+                "content": "continued",
+                "merge_prev": true,
+                "sub_type": "paragraph",
+                "confidence": 0.75,
+                "source": {"page": 3}
+            }]])
+        );
     }
 
     #[test]

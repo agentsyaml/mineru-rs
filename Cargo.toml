@@ -19,7 +19,16 @@ include = [
     "LICENSE-APACHE",
     "docs/usage.md",
     "docs/compatibility.md",
-    "tests/fixtures/**",
+    "tests/fixtures/pdf/minimal.pdf",
+    "tests/fixtures/vlm/layout.txt",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_middle.json",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list.json",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list_v2.json",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5.md",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg",
+    "!tests/fixtures/input/README.md",
 ]
 
 [[bin]]
@@ -46,7 +55,6 @@ path = "src/bin/mineru-office-convert.rs"
 
 [features]
 default = []
-internal-mineru-api-client = ["dep:caseless", "dep:magika", "dep:ort"]
 
 [dependencies]
 base64 = "0.22"
@@ -79,12 +87,7 @@ tiff = "=0.11.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "net", "process", "io-util", "signal", "io-std"] }
 url = { version = "2", features = ["serde"] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-caseless = { version = "=0.2.2", optional = true }
 quick-xml = { version = "=0.41.0", default-features = false, features = ["encoding"] }
-
-[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-magika = { version = "=1.0.1", optional = true }
-ort = { version = "=2.0.0-rc.11", default-features = false, optional = true, features = ["std", "ndarray", "tracing", "download-binaries", "tls-native", "copy-dylibs"] }
 
 [dev-dependencies]
 
@@ -95,7 +98,7 @@ members = [".", "bindings/python", "bindings/node"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"

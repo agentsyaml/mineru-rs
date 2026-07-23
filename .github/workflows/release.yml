@@ -285,6 +285,7 @@ jobs:
         run: '"${{ runner.temp }}/node-packed-smoke/node_modules/.bin/mineru" --help'
       - name: Smoke installed launcher on Windows
         if: runner.os == 'Windows'
+        shell: pwsh
         run: '& "${{ runner.temp }}/node-packed-smoke/node_modules/.bin/mineru.cmd" --help'
       - name: Smoke installed API and Office conversion
         working-directory: ${{ runner.temp }}/node-packed-smoke

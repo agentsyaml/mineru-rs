@@ -207,8 +207,8 @@ impl RunContext {
         }))
     }
 
-    fn office_workers(&self) -> Result<OfficeWorkers, RunError> {
-        OfficeWorkers::with_executable(self.office_executable.clone()).map_err(RunError::new)
+    fn office_workers(&self) -> OfficeWorkers {
+        OfficeWorkers::with_executable(self.office_executable.clone())
     }
 
     fn with_output(mut self, events: CommandCallback, warnings: direct::WarningCallback) -> Self {
@@ -362,7 +362,7 @@ async fn run_core(
                 batch_size: 1,
                 canonical_mixed: true,
             },
-            context.office_workers()?,
+            context.office_workers(),
             context.environment.clone(),
             Some(events),
             Some(warnings),
@@ -444,7 +444,7 @@ async fn run_api(
         remote_options,
         env,
         Some(events),
-        context.office_workers()?,
+        context.office_workers(),
     )
     .await
     .map_err(RunError::new)?;
@@ -821,7 +821,7 @@ mod tests {
         assert!(RunContext::with_office_executable("relative".into()).is_err());
         let path = std::env::current_dir().unwrap().join("helper");
         let context = RunContext::with_office_executable(path.clone()).unwrap();
-        assert_eq!(context.office_workers().unwrap().executable(), &path);
+        assert_eq!(context.office_workers().executable(), &path);
     }
 
     #[test]

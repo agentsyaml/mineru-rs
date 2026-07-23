@@ -103,17 +103,23 @@ jobs:
               "docs/usage.md",
               "src/lib.rs",
               "tests/fixtures/pdf/minimal.pdf",
+              "tests/fixtures/vlm/layout.txt",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_middle.json",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list.json",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list_v2.json",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5.md",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg",
           }
           assert required <= files, sorted(required - files)
           assert any(path.startswith("src/") for path in files)
-          assert any(path.startswith("tests/fixtures/") for path in files)
           allowed = required | {".cargo_vcs_info.json"}
           unexpected = {
               path
               for path in files
               if path not in allowed
               and not path.startswith("src/")
-              and not path.startswith("tests/fixtures/")
           }
           assert not unexpected, sorted(unexpected)
           PY
@@ -150,9 +156,23 @@ jobs:
               "docs/usage.md",
               "src/lib.rs",
               "tests/fixtures/pdf/minimal.pdf",
+              "tests/fixtures/vlm/layout.txt",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_middle.json",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list.json",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list_v2.json",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5.md",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg",
+              "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg",
           }
           missing = sorted(path for path in required if not (package / path).is_file())
           assert not missing, missing
+          fixtures = {
+              path.relative_to(package).as_posix()
+              for path in (package / "tests/fixtures").rglob("*")
+              if path.is_file()
+          }
+          assert fixtures == {path for path in required if path.startswith("tests/fixtures/")}
           assert Path(f"{package}.crate").is_file()
           PY
           cargo +1.89.0 test --manifest-path "$PACKAGE_DIR/Cargo.toml" --lib --locked -- --test-threads=1

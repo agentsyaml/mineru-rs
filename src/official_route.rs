@@ -591,8 +591,7 @@ async fn parse_and_write_to(
                 )
                 .map_err(map)?;
                 stage.write_preview(&preview)?;
-                stage.assemble(deadline.instant())?;
-                stage.prepare_commit()
+                stage.assemble(deadline.instant())
             })();
             (stage, result)
         })

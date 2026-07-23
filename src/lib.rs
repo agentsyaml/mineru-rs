@@ -46,18 +46,14 @@ pub use input_prepare::RasterWorkers;
 #[doc(hidden)]
 pub use mineru_api::{
     RemoteApiDocument, RemoteApiEnv, RemoteApiFailure, RemoteApiOptions, normalize_remote_language,
-    parse_remote_api_env, run_remote_api_documents, selected_document_pages,
+    parse_remote_api_env, selected_document_pages,
 };
 #[doc(hidden)]
-pub use progress_events::{ProgressCallback, ProgressEvent, sanitize_event_text};
-#[doc(hidden)]
-pub fn unique_output_stems(stems: &[String]) -> Vec<String> {
-    mineru_api::unique_stems(stems)
-}
-#[doc(hidden)]
 pub use office_workers::{OfficeConvertError, OfficeWorkers};
-pub use official_output::{canonical_stem, write_official_outputs};
+pub use official_output::canonical_stem;
 pub use output::write_outputs;
+#[doc(hidden)]
+pub use progress_events::{ProgressCallback, ProgressEvent, sanitize_event_text};
 pub use types::{
     Asset, AssetKind, BlockKind, ContentBlock, Document, ModelInfo, NormalizedBbox, OutputManifest,
     PageRange, PageResult, ParseOptions, PdfInput, Rotation,
@@ -66,10 +62,10 @@ pub use vlm_client::{MinerUVlmClient, MinerUVlmPreprocessor};
 pub use vlm_config::{MinerUVlmConfig, SamplingParams, VlmHeader, VlmHttpConfig};
 pub use vlm_http::VlmHttpClient;
 pub use vlm_types::{
-    ModelBlock, ModelOutput, OfficialDocument, OfficialOutputManifest, OfficialPdfOptions,
-    VlmBatchCompletionStream, VlmBatchPriority, VlmCompletion, VlmEncodedImage, VlmExtractResult,
-    VlmImageInput, VlmLayoutBlock, VlmPreparedExtraction, VlmPreparedLayout, VlmPriority,
-    VlmRequest, VlmScoredOutput, VlmSemaphore, VlmSseStream,
+    ModelBlock, ModelOutput, OfficialOutputManifest, OfficialPdfOptions, VlmBatchCompletionStream,
+    VlmBatchPriority, VlmCompletion, VlmEncodedImage, VlmExtractResult, VlmImageInput,
+    VlmLayoutBlock, VlmPreparedExtraction, VlmPreparedLayout, VlmPriority, VlmRequest,
+    VlmSemaphore, VlmSseStream,
 };
 // Internal legacy modules still refer to these through crate::. They are not public API.
 use vlm_types::*;

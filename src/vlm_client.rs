@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 
-const SCORED_UNSUPPORTED: VlmError = VlmError::Unsupported("scored/PPL is unavailable over HTTP");
 const COVERED_IMAGE_CAPTION: &str = "_covered_image_caption";
 const POST_PROCESS_ORDER: &str = "mineru_post_process_order";
 
@@ -1196,27 +1195,18 @@ impl MinerUVlmClient {
         &self,
         image: VlmImageInput,
         priority: VlmPriority,
-        scored: Option<bool>,
         semaphore: VlmSemaphore,
     ) -> VlmResult<VlmExtractResult> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let image = self.admit_semantic_image(image).await?;
-        self.layout_admitted_raw(image, priority, scored, semaphore)
-            .await
+        self.layout_admitted_raw(image, priority, semaphore).await
     }
     async fn layout_admitted_raw(
         &self,
         image: VlmImageInput,
         priority: VlmPriority,
-        scored: Option<bool>,
         semaphore: VlmSemaphore,
     ) -> VlmResult<VlmExtractResult> {
         let semaphore = semaphore.or_else(|| self.default_batch_semaphore());
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let image = if let Some(image) = self.http.decode_admitted_image(image).await? {
             let preprocessor = self.preprocessor.clone();
             let max_pixels = self.http.max_decoded_pixels();
@@ -1259,12 +1249,8 @@ impl MinerUVlmClient {
         priority: VlmPriority,
         not_extract_list: &[String],
         image_analysis: Option<bool>,
-        scored: Option<bool>,
         semaphore: VlmSemaphore,
     ) -> VlmResult<VlmExtractResult> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let image = self.admit_semantic_image(image).await?;
         self.extract_admitted(
             image,
@@ -1272,7 +1258,6 @@ impl MinerUVlmClient {
             priority,
             not_extract_list,
             image_analysis,
-            scored,
             semaphore,
         )
         .await
@@ -1285,13 +1270,9 @@ impl MinerUVlmClient {
         priority: VlmPriority,
         not_extract_list: &[String],
         image_analysis: Option<bool>,
-        scored: Option<bool>,
         semaphore: VlmSemaphore,
     ) -> VlmResult<VlmExtractResult> {
         let semaphore = semaphore.or_else(|| self.default_batch_semaphore());
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         if let Some(decoded) = self.http.decode_admitted_image(image).await? {
             let preprocessor = self.preprocessor.clone();
             let prompts = not_extract_list.to_vec();
@@ -1346,27 +1327,21 @@ impl MinerUVlmClient {
         &self,
         i: VlmImageInput,
         p: VlmPriority,
-        scored: Option<bool>,
     ) -> VlmResult<VlmExtractResult> {
-        self.layout_raw(i, p, scored, self.default_batch_semaphore())
-            .await
+        self.layout_raw(i, p, self.default_batch_semaphore()).await
     }
     pub async fn batch_layout_detect(
         &self,
         images: Vec<VlmImageInput>,
         p: VlmBatchPriority,
-        scored: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let ps = priority_for(
             images.len(),
             p,
             self.preprocessor.config.incremental_priority,
         )?;
         try_join_all(images.into_iter().zip(ps).map(|(image, priority)| {
-            self.layout_raw(image, priority, scored, Some(self.layout_semaphore.clone()))
+            self.layout_raw(image, priority, Some(self.layout_semaphore.clone()))
         }))
         .await
     }
@@ -1375,9 +1350,8 @@ impl MinerUVlmClient {
         i: VlmImageInput,
         p: VlmPriority,
         sem: VlmSemaphore,
-        x: Option<bool>,
     ) -> VlmResult<VlmExtractResult> {
-        self.layout_raw(i, p, x, sem.or_else(|| self.default_batch_semaphore()))
+        self.layout_raw(i, p, sem.or_else(|| self.default_batch_semaphore()))
             .await
     }
     pub async fn aio_batch_layout_detect(
@@ -1385,17 +1359,13 @@ impl MinerUVlmClient {
         i: Vec<VlmImageInput>,
         p: VlmBatchPriority,
         sem: VlmSemaphore,
-        x: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        if x == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let sem = sem.or_else(|| self.default_batch_semaphore());
         let ps = priority_for(i.len(), p, self.preprocessor.config.incremental_priority)?;
         try_join_all(
             i.into_iter()
                 .zip(ps)
-                .map(|(image, priority)| self.layout_raw(image, priority, x, sem.clone())),
+                .map(|(image, priority)| self.layout_raw(image, priority, sem.clone())),
         )
         .await
     }
@@ -1404,13 +1374,9 @@ impl MinerUVlmClient {
         i: VlmImageInput,
         prompt: String,
         p: VlmPriority,
-        scored: Option<bool>,
         semaphore: VlmSemaphore,
     ) -> VlmResult<Option<String>> {
         let semaphore = semaphore.or_else(|| self.default_batch_semaphore());
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         if matches!(i, VlmImageInput::RemoteUrl(_)) {
             return Err(VlmError::InvalidImageInput(
                 "semantic operations require a local image".into(),
@@ -1484,9 +1450,8 @@ impl MinerUVlmClient {
         i: VlmImageInput,
         prompt: String,
         p: VlmPriority,
-        scored: Option<bool>,
     ) -> VlmResult<Option<String>> {
-        self.content_raw(i, prompt, p, scored, self.default_batch_semaphore())
+        self.content_raw(i, prompt, p, self.default_batch_semaphore())
             .await
     }
     pub async fn batch_content_extract(
@@ -1494,11 +1459,7 @@ impl MinerUVlmClient {
         images: Vec<VlmImageInput>,
         prompts: Vec<String>,
         p: VlmBatchPriority,
-        x: Option<bool>,
     ) -> VlmResult<Vec<Option<String>>> {
-        if x == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         if images.len() != prompts.len() {
             return Err(protocol("content", "image/prompt length mismatch"));
         }
@@ -1514,7 +1475,7 @@ impl MinerUVlmClient {
                 .zip(prompts)
                 .zip(ps)
                 .map(|((image, prompt), priority)| {
-                    self.content_raw(image, prompt, priority, x, semaphore.clone())
+                    self.content_raw(image, prompt, priority, semaphore.clone())
                 }),
         )
         .await
@@ -1525,9 +1486,8 @@ impl MinerUVlmClient {
         q: String,
         p: VlmPriority,
         sem: VlmSemaphore,
-        x: Option<bool>,
     ) -> VlmResult<Option<String>> {
-        self.content_raw(i, q, p, x, sem.or_else(|| self.default_batch_semaphore()))
+        self.content_raw(i, q, p, sem.or_else(|| self.default_batch_semaphore()))
             .await
     }
     pub async fn aio_batch_content_extract(
@@ -1536,11 +1496,7 @@ impl MinerUVlmClient {
         q: Vec<String>,
         p: VlmBatchPriority,
         sem: VlmSemaphore,
-        x: Option<bool>,
     ) -> VlmResult<Vec<Option<String>>> {
-        if x == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         if i.len() != q.len() {
             return Err(protocol("content", "image/prompt length mismatch"));
         }
@@ -1551,7 +1507,7 @@ impl MinerUVlmClient {
                 .zip(q)
                 .zip(ps)
                 .map(|((image, prompt), priority)| {
-                    self.content_raw(image, prompt, priority, x, sem.clone())
+                    self.content_raw(image, prompt, priority, sem.clone())
                 }),
         )
         .await
@@ -1561,19 +1517,15 @@ impl MinerUVlmClient {
         i: VlmImageInput,
         p: VlmPriority,
         q: Vec<String>,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<VlmExtractResult> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let i = self.admit_semantic_image(i).await?;
         let semaphore = self.default_batch_semaphore();
         let layout = self
-            .layout_admitted_raw(i.clone(), p, scored, semaphore.clone())
+            .layout_admitted_raw(i.clone(), p, semaphore.clone())
             .await?;
         let mut out = self
-            .extract_admitted(i, layout.blocks, p, &q, image_analysis, scored, semaphore)
+            .extract_admitted(i, layout.blocks, p, &q, image_analysis, semaphore)
             .await?;
         out.layout_completion = layout.layout_completion;
         Ok(out)
@@ -1584,19 +1536,13 @@ impl MinerUVlmClient {
         p: VlmPriority,
         sem: VlmSemaphore,
         q: Vec<String>,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<VlmExtractResult> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let i = self.admit_semantic_image(i).await?;
         let sem = sem.or_else(|| self.default_batch_semaphore());
-        let layout = self
-            .layout_admitted_raw(i.clone(), p, scored, sem.clone())
-            .await?;
+        let layout = self.layout_admitted_raw(i.clone(), p, sem.clone()).await?;
         let mut out = self
-            .extract_admitted(i, layout.blocks, p, &q, image_analysis, scored, sem)
+            .extract_admitted(i, layout.blocks, p, &q, image_analysis, sem)
             .await?;
         out.layout_completion = layout.layout_completion;
         Ok(out)
@@ -1606,7 +1552,6 @@ impl MinerUVlmClient {
         i: Vec<VlmImageInput>,
         p: VlmBatchPriority,
         q: Vec<String>,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
         self.aio_concurrent_two_step_extract(
@@ -1614,7 +1559,6 @@ impl MinerUVlmClient {
             p,
             q,
             self.default_batch_semaphore(),
-            scored,
             image_analysis,
         )
         .await
@@ -1625,23 +1569,12 @@ impl MinerUVlmClient {
         p: VlmBatchPriority,
         q: Vec<String>,
         sem: VlmSemaphore,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let sem = sem.or_else(|| self.default_batch_semaphore());
         let ps = priority_for(i.len(), p, self.preprocessor.config.incremental_priority)?;
         try_join_all(i.into_iter().zip(ps).map(|(image, priority)| {
-            self.aio_two_step_extract(
-                image,
-                priority,
-                sem.clone(),
-                q.clone(),
-                scored,
-                image_analysis,
-            )
+            self.aio_two_step_extract(image, priority, sem.clone(), q.clone(), image_analysis)
         }))
         .await
     }
@@ -1650,18 +1583,10 @@ impl MinerUVlmClient {
         i: Vec<VlmImageInput>,
         p: VlmBatchPriority,
         q: Vec<String>,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        self.aio_stepping_two_step_extract(
-            i,
-            p,
-            q,
-            self.default_batch_semaphore(),
-            scored,
-            image_analysis,
-        )
-        .await
+        self.aio_stepping_two_step_extract(i, p, q, self.default_batch_semaphore(), image_analysis)
+            .await
     }
     pub async fn aio_stepping_two_step_extract(
         &self,
@@ -1669,12 +1594,8 @@ impl MinerUVlmClient {
         p: VlmBatchPriority,
         q: Vec<String>,
         sem: VlmSemaphore,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let sem = sem.or_else(|| self.default_batch_semaphore());
         let priorities = priority_for(i.len(), p, self.preprocessor.config.incremental_priority)?;
         let mut admitted = Vec::with_capacity(i.len());
@@ -1686,9 +1607,7 @@ impl MinerUVlmClient {
                 .iter()
                 .cloned()
                 .zip(priorities.iter().copied())
-                .map(|(image, priority)| {
-                    self.layout_admitted_raw(image, priority, scored, sem.clone())
-                }),
+                .map(|(image, priority)| self.layout_admitted_raw(image, priority, sem.clone())),
         )
         .await?;
         let completions: Vec<_> = layouts
@@ -1697,16 +1616,7 @@ impl MinerUVlmClient {
             .collect();
         let pages = layouts.into_iter().map(|layout| layout.blocks).collect();
         let mut extracted = self
-            .batch_extract_flat_inner(
-                admitted,
-                pages,
-                priorities,
-                &q,
-                image_analysis,
-                scored,
-                sem,
-                true,
-            )
+            .batch_extract_flat_inner(admitted, pages, priorities, &q, image_analysis, sem, true)
             .await?;
         for (result, completion) in extracted.iter_mut().zip(completions) {
             result.layout_completion = completion;
@@ -1718,10 +1628,9 @@ impl MinerUVlmClient {
         images: Vec<VlmImageInput>,
         p: VlmBatchPriority,
         q: Vec<String>,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        self.concurrent_two_step_extract(images, p, q, scored, image_analysis)
+        self.concurrent_two_step_extract(images, p, q, image_analysis)
             .await
     }
     pub async fn aio_batch_two_step_extract(
@@ -1730,11 +1639,10 @@ impl MinerUVlmClient {
         p: VlmBatchPriority,
         q: Vec<String>,
         sem: VlmSemaphore,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
         let sem = sem.or_else(|| self.default_batch_semaphore());
-        self.aio_concurrent_two_step_extract(i, p, q, sem, scored, image_analysis)
+        self.aio_concurrent_two_step_extract(i, p, q, sem, image_analysis)
             .await
     }
     pub async fn extract_with_layout(
@@ -1743,7 +1651,6 @@ impl MinerUVlmClient {
         blocks: Vec<VlmLayoutBlock>,
         p: VlmPriority,
         q: Vec<String>,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<VlmExtractResult> {
         self.extract(
@@ -1752,7 +1659,6 @@ impl MinerUVlmClient {
             p,
             &q,
             image_analysis,
-            scored,
             self.default_batch_semaphore(),
         )
         .await
@@ -1765,19 +1671,14 @@ impl MinerUVlmClient {
         priorities: Vec<VlmPriority>,
         prompts: &[String],
         image_analysis: Option<bool>,
-        scored: Option<bool>,
         semaphore: VlmSemaphore,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         self.batch_extract_flat_inner(
             images,
             pages,
             priorities,
             prompts,
             image_analysis,
-            scored,
             semaphore,
             false,
         )
@@ -1791,13 +1692,9 @@ impl MinerUVlmClient {
         priorities: Vec<VlmPriority>,
         prompts: &[String],
         image_analysis: Option<bool>,
-        scored: Option<bool>,
         semaphore: VlmSemaphore,
         admitted: bool,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         let mut requests = Vec::new();
         let mut locations = Vec::new();
         for (page_index, ((image, blocks), priority)) in images
@@ -1881,12 +1778,8 @@ impl MinerUVlmClient {
         blocks: Vec<Vec<VlmLayoutBlock>>,
         p: VlmBatchPriority,
         q: Vec<String>,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         if images.len() != blocks.len() {
             return Err(protocol("extract", "image/layout length mismatch"));
         }
@@ -1901,7 +1794,6 @@ impl MinerUVlmClient {
             ps,
             &q,
             image_analysis,
-            scored,
             self.default_batch_semaphore(),
         )
         .await
@@ -1914,7 +1806,6 @@ impl MinerUVlmClient {
         p: VlmPriority,
         sem: VlmSemaphore,
         q: Vec<String>,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<VlmExtractResult> {
         self.extract(
@@ -1923,7 +1814,6 @@ impl MinerUVlmClient {
             p,
             &q,
             image_analysis,
-            scored,
             sem.or_else(|| self.default_batch_semaphore()),
         )
         .await
@@ -1936,18 +1826,14 @@ impl MinerUVlmClient {
         p: VlmBatchPriority,
         sem: VlmSemaphore,
         q: Vec<String>,
-        scored: Option<bool>,
         image_analysis: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        if scored == Some(true) {
-            return Err(SCORED_UNSUPPORTED);
-        }
         if i.len() != b.len() {
             return Err(protocol("extract", "image/layout length mismatch"));
         }
         let sem = sem.or_else(|| self.default_batch_semaphore());
         let ps = priority_for(i.len(), p, self.preprocessor.config.incremental_priority)?;
-        self.batch_extract_flat(i, b, ps, &q, image_analysis, scored, sem)
+        self.batch_extract_flat(i, b, ps, &q, image_analysis, sem)
             .await
     }
 }
@@ -2247,7 +2133,6 @@ mod tests {
             .layout_detect(
                 VlmImageInput::RemoteUrl("https://example.com/image.png".parse().unwrap()),
                 None,
-                None,
             )
             .await;
         assert!(matches!(result, Err(VlmError::InvalidImageInput(_))));
@@ -2409,9 +2294,7 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            client
-                .layout_detect(sized_image_input(1, 1), None, None)
-                .await,
+            client.layout_detect(sized_image_input(1, 1), None).await,
             Err(VlmError::LimitExceeded {
                 resource: "image pixels",
                 limit: 100,
@@ -2730,7 +2613,6 @@ mod tests {
                 VlmBatchPriority::All(None),
                 vec![],
                 None,
-                None,
             )
             .await
             .unwrap();
@@ -2755,13 +2637,7 @@ mod tests {
         write_png(&single);
         let client = delete_paths_client(vec![single.clone()]).await;
         let output = client
-            .two_step_extract(
-                VlmImageInput::Path(single.clone()),
-                None,
-                vec![],
-                None,
-                None,
-            )
+            .two_step_extract(VlmImageInput::Path(single.clone()), None, vec![], None)
             .await
             .unwrap();
         assert!(!single.exists());
@@ -2781,7 +2657,6 @@ mod tests {
                 paths.iter().cloned().map(VlmImageInput::Path).collect(),
                 VlmBatchPriority::All(None),
                 vec![],
-                None,
                 None,
             )
             .await
@@ -2805,7 +2680,6 @@ mod tests {
                     vec![image_input(), image_input(), image_input()],
                     VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
                     vec![],
-                    None,
                     None,
                 )
                 .await
@@ -2842,7 +2716,6 @@ mod tests {
                 vec!["text".into(), "text".into()],
                 VlmBatchPriority::All(None),
                 Some(semaphore),
-                None,
             )
             .await
             .unwrap();
@@ -2862,7 +2735,6 @@ mod tests {
                 vec![image_input(), image_input(), image_input()],
                 VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
                 Some(Arc::new(tokio::sync::Semaphore::new(1))),
-                None,
             )
             .await
             .unwrap();
@@ -2885,7 +2757,6 @@ mod tests {
                 .batch_layout_detect(
                     vec![image_input(), image_input(), image_input()],
                     VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
-                    None,
                 )
                 .await
         });
@@ -2964,13 +2835,11 @@ mod tests {
                 vec![image_input(), image_input(), image_input()],
                 VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
                 None,
-                None,
             ),
             client.aio_batch_content_extract(
                 vec![image_input(), image_input(), image_input()],
                 vec!["text".into(), "text".into(), "text".into()],
                 VlmBatchPriority::PerItem(vec![Some(3), Some(1), Some(2)]),
-                None,
                 None,
             ),
         );
@@ -2998,26 +2867,24 @@ mod tests {
         let state = mock_state();
         let client = mock_client(state.clone()).await;
         let (layout, content, two_step, external, aio_layout, aio_content, aio_external) = tokio::join!(
-            client.layout_detect(image_input(), None, None),
-            client.content_extract(image_input(), BlockKind::TEXT.into(), None, None),
-            client.two_step_extract(image_input(), None, vec![], None, None),
+            client.layout_detect(image_input(), None),
+            client.content_extract(image_input(), BlockKind::TEXT.into(), None),
+            client.two_step_extract(image_input(), None, vec![], None),
             client.extract_with_layout(
                 image_input(),
                 vec![block(BlockKind::TEXT)],
                 None,
                 vec![],
                 None,
-                None,
             ),
-            client.aio_layout_detect(image_input(), None, None, None),
-            client.aio_content_extract(image_input(), BlockKind::TEXT.into(), None, None, None,),
+            client.aio_layout_detect(image_input(), None, None),
+            client.aio_content_extract(image_input(), BlockKind::TEXT.into(), None, None),
             client.aio_extract_with_layout(
                 image_input(),
                 vec![block(BlockKind::TEXT)],
                 None,
                 None,
                 vec![],
-                None,
                 None,
             ),
         );
@@ -3038,30 +2905,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn axum_scored_semantic_request_is_unsupported_without_chat() {
-        let state = mock_state();
-        let client = mock_client(state.clone()).await;
-        assert!(matches!(
-            client.layout_detect(image_input(), None, Some(true)).await,
-            Err(VlmError::Unsupported(_))
-        ));
-        assert_eq!(state.requests.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn axum_two_step_scored_is_unsupported_without_chat() {
-        let state = mock_state();
-        let client = mock_client(state.clone()).await;
-        assert!(matches!(
-            client
-                .two_step_extract(image_input(), None, vec![], Some(true), None)
-                .await,
-            Err(VlmError::Unsupported(_))
-        ));
-        assert_eq!(state.requests.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
     async fn axum_caller_layout_image_analysis_false_suppresses_visuals() {
         let state = mock_state();
         let client = mock_client(state.clone()).await;
@@ -3071,7 +2914,6 @@ mod tests {
                 vec![block(BlockKind::IMAGE)],
                 None,
                 vec![],
-                None,
                 Some(false),
             )
             .await
@@ -3092,7 +2934,6 @@ mod tests {
                 VlmBatchPriority::PerItem(vec![Some(20), Some(10)]),
                 vec![],
                 None,
-                None,
             )
             .await
             .unwrap();
@@ -3108,43 +2949,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn axum_scored_batches_reject_before_validation_or_chat() {
-        let state = mock_state();
-        let client = mock_client(state.clone()).await;
-        assert!(matches!(
-            client
-                .batch_layout_detect(vec![], VlmBatchPriority::PerItem(vec![None]), Some(true))
-                .await,
-            Err(VlmError::Unsupported(_))
-        ));
-        assert!(matches!(
-            client
-                .batch_content_extract(
-                    vec![],
-                    vec!["mismatch".into()],
-                    VlmBatchPriority::PerItem(vec![]),
-                    Some(true)
-                )
-                .await,
-            Err(VlmError::Unsupported(_))
-        ));
-        assert!(matches!(
-            client
-                .batch_extract_with_layout(
-                    vec![],
-                    vec![vec![block(BlockKind::TEXT)]],
-                    VlmBatchPriority::PerItem(vec![]),
-                    vec![],
-                    Some(true),
-                    None
-                )
-                .await,
-            Err(VlmError::Unsupported(_))
-        ));
-        assert_eq!(state.requests.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
     async fn axum_external_layout_preserves_caller_underscore_metadata() {
         let state = mock_state();
         let client = mock_client(state).await;
@@ -3152,7 +2956,7 @@ mod tests {
         layout.metadata.insert("_caller_key".into(), json!("kept"));
         layout.metadata.insert(POST_PROCESS_ORDER.into(), json!(42));
         let output = client
-            .extract_with_layout(image_input(), vec![layout], None, vec![], None, None)
+            .extract_with_layout(image_input(), vec![layout], None, vec![], None)
             .await
             .unwrap();
         assert_eq!(output.blocks[0].metadata["_caller_key"], "kept");

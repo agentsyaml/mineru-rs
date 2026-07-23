@@ -4,19 +4,14 @@
 #![allow(dead_code)] // P2A defines the private domain consumed by later P2 phases.
 
 mod archive;
-#[cfg(feature = "internal-mineru-api-client")]
-mod classifier;
-#[cfg(feature = "internal-mineru-api-client")]
-mod discovery;
 mod http;
 pub(crate) mod ooxml;
-mod planning;
+pub(crate) mod planning;
 mod remote_preview;
-pub(crate) use planning::unique_stems;
 mod runner;
 mod zip_scan;
 
-use crate::{ProgressCallback, input_prepare::DocumentKind};
+use crate::input_prepare::DocumentKind;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -90,29 +85,6 @@ pub fn normalize_remote_language(value: &str) -> Result<String, String> {
 #[doc(hidden)]
 pub fn parse_remote_api_env(get: impl Fn(&str) -> Option<String>) -> Result<RemoteApiEnv, String> {
     parse_remote_env(get).map(Into::into)
-}
-#[doc(hidden)]
-pub async fn run_remote_api_documents(
-    documents: Vec<RemoteApiDocument>,
-    output: PathBuf,
-    api_url: String,
-    options: RemoteApiOptions,
-    env: RemoteApiEnv,
-    events: Option<ProgressCallback>,
-) -> Result<Vec<RemoteApiFailure>, String> {
-    runner::run_documents(documents, &output, &api_url, options, env, events).await
-}
-pub(crate) async fn run_remote_api_documents_with_workers(
-    documents: Vec<RemoteApiDocument>,
-    output: PathBuf,
-    api_url: String,
-    options: RemoteApiOptions,
-    env: RemoteApiEnv,
-    events: Option<ProgressCallback>,
-    office: crate::OfficeWorkers,
-) -> Result<Vec<RemoteApiFailure>, String> {
-    runner::run_documents_with_workers(documents, &output, &api_url, options, env, events, office)
-        .await
 }
 pub(crate) async fn run_remote_api_documents_scoped_with_workers(
     documents: Vec<RemoteApiDocument>,

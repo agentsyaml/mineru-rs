@@ -1,5 +1,0 @@
-OTSL: <fcel>A & B<lcel><nl><fcel>[ABCD] \\(x\\)
-HTML: <table><tr><td colspan="2">A &amp; B</td></tr><tr><td><img src="data:image/png;base64,x"/> <eq>x</eq></td></tr></table>
-TOP_LEVEL_FORMULA: x (normalized before markdown adds its display delimiter)
-ABSORBED_IMAGE: removed
-LIST_ITEM: text: item

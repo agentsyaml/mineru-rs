@@ -507,7 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_office_preparation_has_no_warning() {
-        let workers = OfficeWorkers::with_executable("unused".into()).unwrap();
+        let workers = OfficeWorkers::with_executable("unused".into());
         let (prepared, warning) = prepare_with_warning(
             Bytes::from_static(b"%PDF-1.4"),
             DocumentKind::Pdf,

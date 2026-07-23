@@ -519,7 +519,7 @@ async fn blocking_sse_requires_terminal_done_and_parses_wire_faithfully() {
 }
 
 #[tokio::test]
-async fn batches_preserve_order_fail_fast_and_scores_are_unsupported() {
+async fn batches_preserve_order_and_fail_fast() {
     let hits = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
         "/v1/chat/completions",
@@ -581,38 +581,6 @@ async fn batches_preserve_order_fail_fast_and_scores_are_unsupported() {
     assert!(failed.next().await.unwrap().is_err());
     assert!(failed.next().await.is_none());
     assert_eq!(c.batch_predict(vec![]).await.unwrap(), Vec::<String>::new());
-    assert!(matches!(
-        c.predict_scored(VlmRequest::default()).await,
-        Err(VlmError::Unsupported(_))
-    ));
-    assert!(matches!(
-        c.batch_predict_scored(vec![]).await,
-        Err(VlmError::Unsupported(_))
-    ));
-    assert!(matches!(
-        c.aio_predict_scored(VlmRequest::default()).await,
-        Err(VlmError::Unsupported(_))
-    ));
-    assert!(matches!(
-        c.aio_batch_predict_scored(vec![], None).await,
-        Err(VlmError::Unsupported(_))
-    ));
-    assert!(matches!(
-        c.score(VlmRequest::default(), "x".into()).await,
-        Err(VlmError::Unsupported(_))
-    ));
-    assert!(matches!(
-        c.batch_score(vec![], vec![]).await,
-        Err(VlmError::Unsupported(_))
-    ));
-    assert!(matches!(
-        c.aio_score(VlmRequest::default(), "x".into()).await,
-        Err(VlmError::Unsupported(_))
-    ));
-    assert!(matches!(
-        c.aio_batch_score(vec![], vec![], None).await,
-        Err(VlmError::Unsupported(_))
-    ));
 }
 
 #[tokio::test]

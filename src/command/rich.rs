@@ -35,6 +35,13 @@ enum Terminal {
     Failed,
 }
 
+#[derive(Clone, Copy)]
+enum Activity {
+    Completed,
+    Warning,
+    Failed,
+}
+
 pub(super) struct Renderer {
     state: Mutex<State>,
     level: plain::LogLevel,
@@ -44,6 +51,7 @@ struct State {
     multi: MultiProgress,
     overview: ProgressBar,
     active: BTreeMap<CommandScope, ProgressBar>,
+    activity: Option<ProgressBar>,
     terminal: BTreeMap<CommandScope, Terminal>,
     planned_documents: usize,
     planned_tasks: usize,
@@ -72,7 +80,8 @@ impl Renderer {
         let overview = if show_progress {
             let overview = multi.add(ProgressBar::new_spinner());
             overview.set_style(spinner_style(color));
-            overview.set_message("planning");
+            overview.set_prefix("MinerU");
+            overview.set_message("Preparing parsing plan");
             if steady {
                 overview.enable_steady_tick(Duration::from_millis(100));
             }
@@ -85,6 +94,7 @@ impl Renderer {
                 multi,
                 overview,
                 active: BTreeMap::new(),
+                activity: None,
                 terminal: BTreeMap::new(),
                 planned_documents: 0,
                 planned_tasks: 0,
@@ -122,6 +132,7 @@ impl Renderer {
             } => {
                 state.planned_documents = documents;
                 state.planned_tasks = api_tasks;
+                plan_overview(&state);
                 update_overview(&state);
             }
             CommandEvent::Progress { scope, event } => {
@@ -146,9 +157,13 @@ impl Renderer {
             return;
         }
         state.warnings = state.warnings.saturating_add(1);
-        let _ = state
-            .multi
-            .println(format!("warning: {}: {}", clean(source), clean(message)));
+        print_status(
+            &state,
+            "! Warning",
+            "1;33",
+            &format!("{} · {}", clean(source), clean(message)),
+        );
+        update_activity(&mut state, Activity::Warning, &clean(source));
         update_overview(&state);
     }
 
@@ -158,7 +173,7 @@ impl Renderer {
         }
         let state = self.lock();
         if !state.finished {
-            let _ = state.multi.println(format!("failed: {}", clean(message)));
+            print_status(&state, "✗ Failed", "1;31", &clean(message));
         }
     }
 
@@ -189,15 +204,19 @@ fn handle_progress(state: &mut State, scope: CommandScope, event: ProgressEvent,
         return;
     }
     match event {
-        ProgressEvent::DocumentCompleted { .. } | ProgressEvent::ApiCompleted { .. } => {
-            terminal(state, scope, Terminal::Completed, None);
+        ProgressEvent::DocumentCompleted { document } => {
+            terminal(state, scope, Terminal::Completed, &document, None);
+        }
+        ProgressEvent::ApiCompleted { label } => {
+            terminal(state, scope, Terminal::Completed, &label, None);
         }
         ProgressEvent::DocumentFailed { document, message } => {
             terminal(
                 state,
                 scope,
                 Terminal::Failed,
-                visible.then(|| format!("{}: {}", clean(&document), clean(&message))),
+                &document,
+                visible.then_some(message.as_str()),
             );
         }
         ProgressEvent::ApiFailed { label, message } => {
@@ -205,7 +224,8 @@ fn handle_progress(state: &mut State, scope: CommandScope, event: ProgressEvent,
                 state,
                 scope,
                 Terminal::Failed,
-                visible.then(|| format!("{}: {}", clean(&label), clean(&message))),
+                &label,
+                visible.then_some(message.as_str()),
             );
         }
         ProgressEvent::OfficeWarning { document, message } => {
@@ -213,12 +233,16 @@ fn handle_progress(state: &mut State, scope: CommandScope, event: ProgressEvent,
                 return;
             }
             state.warnings = state.warnings.saturating_add(1);
-            let _ = state.multi.println(format!(
-                "warning: {}: {}",
-                clean(&document),
-                clean(&message)
-            ));
-            update_item(state, scope, &document, "warning", None);
+            print_status(
+                state,
+                "! Warning",
+                "1;33",
+                &format!("{} · {}", clean(&document), clean(&message)),
+            );
+            update_activity(state, Activity::Warning, &clean(&document));
+            if state.show_progress {
+                update_item(state, scope, &document, "warning", None);
+            }
             update_overview(state);
         }
         ProgressEvent::ApiWarning { label, message } => {
@@ -226,20 +250,26 @@ fn handle_progress(state: &mut State, scope: CommandScope, event: ProgressEvent,
                 return;
             }
             state.warnings = state.warnings.saturating_add(1);
-            let _ = state
-                .multi
-                .println(format!("warning: {}: {}", clean(&label), clean(&message)));
-            update_item(state, scope, &label, "warning", None);
+            print_status(
+                state,
+                "! Warning",
+                "1;33",
+                &format!("{} · {}", clean(&label), clean(&message)),
+            );
+            update_activity(state, Activity::Warning, &clean(&label));
+            if state.show_progress {
+                update_item(state, scope, &label, "warning", None);
+            }
             update_overview(state);
         }
         ProgressEvent::DocumentStarted { document } => {
             if visible {
-                update_item(state, scope, &document, "started", None)
+                update_item(state, scope, &document, "starting", None)
             }
         }
         ProgressEvent::DocumentPrepared { document } => {
             if visible {
-                update_item(state, scope, &document, "prepared", None)
+                update_item(state, scope, &document, "prepared · parsing", None)
             }
         }
         ProgressEvent::DocumentPageCompleted {
@@ -249,7 +279,13 @@ fn handle_progress(state: &mut State, scope: CommandScope, event: ProgressEvent,
             ..
         } => {
             if visible {
-                update_item(state, scope, &document, "pages", Some((completed, total)))
+                update_item(
+                    state,
+                    scope,
+                    &document,
+                    "parsing pages",
+                    Some((completed, total)),
+                )
             }
         }
         ProgressEvent::ApiSubmitted { label } => {
@@ -257,9 +293,16 @@ fn handle_progress(state: &mut State, scope: CommandScope, event: ProgressEvent,
                 update_item(state, scope, &label, "submitted", None)
             }
         }
-        ProgressEvent::ApiPending { label, .. } => {
+        ProgressEvent::ApiPending {
+            label,
+            queued_ahead,
+        } => {
             if visible {
-                update_item(state, scope, &label, "pending", None)
+                let stage = match queued_ahead {
+                    Some(count) => format!("waiting · {count} ahead"),
+                    None => "waiting".into(),
+                };
+                update_item(state, scope, &label, &stage, None)
             }
         }
         ProgressEvent::ApiProcessing { label } => {
@@ -269,12 +312,12 @@ fn handle_progress(state: &mut State, scope: CommandScope, event: ProgressEvent,
         }
         ProgressEvent::ApiDownloading { label } => {
             if visible {
-                update_item(state, scope, &label, "downloading", None)
+                update_item(state, scope, &label, "downloading results", None)
             }
         }
         ProgressEvent::ApiExtracting { label } => {
             if visible {
-                update_item(state, scope, &label, "extracting", None)
+                update_item(state, scope, &label, "extracting output", None)
             }
         }
         _ => {}
@@ -296,7 +339,7 @@ fn update_item(
             .count();
         let bar = state.multi.insert(position, ProgressBar::new_spinner());
         bar.set_style(spinner_style(state.color));
-        bar.set_prefix(scope_name(scope));
+        bar.set_prefix(scope_kind(scope));
         if state.steady {
             bar.enable_steady_tick(Duration::from_millis(100));
         }
@@ -305,13 +348,20 @@ fn update_item(
     let bar = state.active.get(&scope).expect("active item inserted");
     if let Some((completed, total)) = pages {
         bar.set_style(bar_style(state.color));
+        bar.set_prefix(clean(label));
         bar.set_length(total as u64);
         bar.set_position(completed.min(total) as u64);
     }
-    bar.set_message(format!("{}: {stage}", clean(label)));
+    bar.set_message(format!("{} · {stage}", clean(label)));
 }
 
-fn terminal(state: &mut State, scope: CommandScope, result: Terminal, message: Option<String>) {
+fn terminal(
+    state: &mut State,
+    scope: CommandScope,
+    result: Terminal,
+    label: &str,
+    message: Option<&str>,
+) {
     if state.terminal.contains_key(&scope) {
         return;
     }
@@ -322,29 +372,69 @@ fn terminal(state: &mut State, scope: CommandScope, result: Terminal, message: O
         state.multi.remove(&bar);
     }
     match result {
-        Terminal::Completed => state.completed = state.completed.saturating_add(1),
+        Terminal::Completed => {
+            state.completed = state.completed.saturating_add(1);
+            update_activity(
+                state,
+                Activity::Completed,
+                &format!("{} · {}", scope_kind(scope), clean(label)),
+            );
+        }
         Terminal::Failed => {
             state.failed = state.failed.saturating_add(1);
             if let Some(message) = message {
-                let _ = state.multi.println(format!(
-                    "failed: {}: {}",
-                    scope_name(scope),
-                    clean(&message)
-                ));
+                print_status(
+                    state,
+                    "✗ Failed",
+                    "1;31",
+                    &format!("{} · {}", clean(label), clean(message)),
+                );
             }
+            update_activity(
+                state,
+                Activity::Failed,
+                &format!("{} · {}", scope_kind(scope), clean(label)),
+            );
         }
     }
     update_overview(state);
+}
+
+fn plan_overview(state: &State) {
+    if !state.show_progress {
+        return;
+    }
+    let total = state.planned_documents.saturating_add(state.planned_tasks);
+    if total == 0 {
+        state.overview.set_message("No parsing work planned");
+        return;
+    }
+    state.overview.disable_steady_tick();
+    state.overview.set_style(overall_style(state.color));
+    state.overview.set_length(total as u64);
+    state
+        .overview
+        .set_prefix(match (state.planned_documents, state.planned_tasks) {
+            (documents, 0) => format!(
+                "MinerU · {documents} doc{}",
+                if documents == 1 { "" } else { "s" }
+            ),
+            (0, tasks) => format!("MinerU · {tasks} task{}", if tasks == 1 { "" } else { "s" }),
+            _ => format!("MinerU · {total} items"),
+        });
 }
 
 fn update_overview(state: &State) {
     if !state.show_progress {
         return;
     }
-    state.overview.set_message(format!(
-        "documents={} tasks={} completed={} failed={} warnings={}",
-        state.planned_documents, state.planned_tasks, state.completed, state.failed, state.warnings
-    ));
+    let total = state.planned_documents.saturating_add(state.planned_tasks);
+    if total == 0 {
+        return;
+    }
+    state
+        .overview
+        .set_position(state.completed.saturating_add(state.failed).min(total) as u64);
 }
 
 fn finish(state: &mut State, success: bool, visible: bool) {
@@ -355,12 +445,22 @@ fn finish(state: &mut State, success: bool, visible: bool) {
     clear_overview(state);
     let _ = state.multi.clear();
     if visible {
-        let symbol = if success { "✓" } else { "✗" };
-        let status = if success { "completed" } else { "failed" };
-        let _ = state.multi.println(format!(
-            "{symbol} run {status}: completed={} failed={} warnings={}",
-            state.completed, state.failed, state.warnings
-        ));
+        print_status(
+            state,
+            if success {
+                "✓ Parsing complete"
+            } else {
+                "✗ Parsing failed"
+            },
+            if success { "1;32" } else { "1;31" },
+            &format!(
+                "{} completed · {} failed · {} warning{}",
+                state.completed,
+                state.failed,
+                state.warnings,
+                if state.warnings == 1 { "" } else { "s" }
+            ),
+        );
     }
     state.finished = true;
 }
@@ -381,6 +481,10 @@ fn cleanup_active(state: &mut State) {
         bar.finish_and_clear();
         state.multi.remove(&bar);
     }
+    if let Some(activity) = state.activity.take() {
+        activity.finish_and_clear();
+        state.multi.remove(&activity);
+    }
 }
 
 fn clear_overview(state: &State) {
@@ -393,9 +497,9 @@ fn clear_overview(state: &State) {
 
 fn spinner_style(color: bool) -> ProgressStyle {
     ProgressStyle::with_template(if color {
-        "{spinner:.cyan} {prefix:.bold} {elapsed_precise} {msg}"
+        "{spinner:.cyan} {prefix:.bold}  {elapsed_precise}  {wide_msg}"
     } else {
-        "{spinner} {prefix} {elapsed_precise} {msg}"
+        "{spinner} {prefix}  {elapsed_precise}  {wide_msg}"
     })
     .unwrap()
     .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
@@ -403,19 +507,66 @@ fn spinner_style(color: bool) -> ProgressStyle {
 
 fn bar_style(color: bool) -> ProgressStyle {
     ProgressStyle::with_template(if color {
-        "{prefix:.bold} [{bar:20.cyan/blue}] {pos}/{len} {elapsed_precise} {msg}"
+        "{prefix:.bold}  [{wide_bar:.cyan/blue}] {pos}/{len} {percent:>3}%"
     } else {
-        "{prefix} [{bar:20}] {pos}/{len} {elapsed_precise} {msg}"
+        "{prefix}  [{wide_bar}] {pos}/{len} {percent:>3}%"
     })
     .unwrap()
     .progress_chars("█▓░")
 }
 
-fn scope_name(scope: CommandScope) -> String {
+fn overall_style(color: bool) -> ProgressStyle {
+    ProgressStyle::with_template(if color {
+        "{prefix:.bold.cyan} {wide_bar:.cyan/blue} {pos}/{len} {percent:>3}%"
+    } else {
+        "{prefix} {wide_bar} {pos}/{len} {percent:>3}%"
+    })
+    .unwrap()
+    .progress_chars("━╸─")
+}
+
+fn scope_kind(scope: CommandScope) -> &'static str {
     match scope {
-        CommandScope::Document(id) => format!("document#{}", id.0),
-        CommandScope::ApiTask(id) => format!("task#{}", id.0),
+        CommandScope::Document(_) => "Document",
+        CommandScope::ApiTask(_) => "API",
     }
+}
+
+fn update_activity(state: &mut State, activity: Activity, message: &str) {
+    if !state.show_progress {
+        return;
+    }
+    let bar = state.activity.get_or_insert_with(|| {
+        let bar = state.multi.add(ProgressBar::new(0));
+        bar.set_style(activity_style(activity, state.color));
+        bar
+    });
+    bar.set_style(activity_style(activity, state.color));
+    bar.set_prefix(match activity {
+        Activity::Completed => "✓ Completed",
+        Activity::Warning => "! Warning",
+        Activity::Failed => "✗ Failed",
+    });
+    bar.set_message(message.to_owned());
+}
+
+fn activity_style(activity: Activity, color: bool) -> ProgressStyle {
+    let template = match (activity, color) {
+        (Activity::Completed, true) => "  {prefix:.bold.green}  {wide_msg}",
+        (Activity::Warning, true) => "  {prefix:.bold.yellow}  {wide_msg}",
+        (Activity::Failed, true) => "  {prefix:.bold.red}  {wide_msg}",
+        _ => "  {prefix}  {wide_msg}",
+    };
+    ProgressStyle::with_template(template).unwrap()
+}
+
+fn print_status(state: &State, status: &str, ansi: &str, message: &str) {
+    let status = if state.color {
+        format!("\x1b[{ansi}m{status}\x1b[0m")
+    } else {
+        status.to_owned()
+    };
+    let _ = state.multi.println(format!("{status}  {message}"));
 }
 
 fn clean(value: &str) -> String {
@@ -442,8 +593,14 @@ mod tests {
         clears: usize,
     }
 
-    #[derive(Clone, Default)]
-    struct TestTerm(Arc<Mutex<Screen>>);
+    #[derive(Clone)]
+    struct TestTerm(Arc<Mutex<Screen>>, u16);
+
+    impl Default for TestTerm {
+        fn default() -> Self {
+            Self(Arc::default(), 32)
+        }
+    }
 
     impl fmt::Debug for TestTerm {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -452,6 +609,10 @@ mod tests {
     }
 
     impl TestTerm {
+        fn with_width(width: u16) -> Self {
+            Self(Arc::default(), width)
+        }
+
         fn update(screen: &mut Screen) {
             screen.max_rows = screen
                 .max_rows
@@ -472,7 +633,7 @@ mod tests {
 
     impl TermLike for TestTerm {
         fn width(&self) -> u16 {
-            32
+            self.1
         }
 
         fn height(&self) -> u16 {
@@ -607,9 +768,143 @@ mod tests {
         let text = term.text();
         assert!(!text.contains('\x1b'));
         assert!(!text.contains("\x1b[31m") && !text.contains("\x1b[2J"));
-        assert!(text.contains("\\u{1B}") && text.contains("run failed"));
+        assert!(
+            text.contains("\\u{1B}") && text.contains("Parsing failed"),
+            "{text}"
+        );
         assert!(!text.contains("run completed"));
-        assert!(term.0.lock().unwrap().max_rows <= 3);
+        assert!(term.0.lock().unwrap().max_rows <= 4);
+    }
+
+    #[test]
+    fn renders_determinate_document_progress_and_success() {
+        let term = TestTerm::with_width(80);
+        let renderer = renderer(term.clone());
+        renderer.handle(CommandEvent::RunPlanned {
+            documents: 1,
+            api_tasks: 0,
+        });
+        for event in [
+            ProgressEvent::DocumentStarted {
+                document: "report.pdf".into(),
+            },
+            ProgressEvent::DocumentPrepared {
+                document: "report.pdf".into(),
+            },
+            ProgressEvent::DocumentPageCompleted {
+                document: "report.pdf".into(),
+                page_index: 0,
+                completed: 1,
+                total: 2,
+            },
+        ] {
+            renderer.handle(CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(1)),
+                event,
+            });
+        }
+        let progress = term.text();
+        for expected in [
+            "MinerU · 1 doc",
+            "report.pdf · starting",
+            "prepared · parsing",
+            "1/2",
+            "50%",
+            "█",
+        ] {
+            assert!(
+                progress.contains(expected),
+                "missing {expected:?}: {progress}"
+            );
+        }
+
+        renderer.handle(CommandEvent::Progress {
+            scope: CommandScope::Document(DocumentId(1)),
+            event: ProgressEvent::DocumentCompleted {
+                document: "report.pdf".into(),
+            },
+        });
+        renderer.handle(CommandEvent::RunCompleted);
+        let final_output = term.text();
+        assert!(final_output.contains("✓ Completed  Document · report.pdf"));
+        assert!(final_output.contains("1/1 100%"));
+        assert!(final_output.contains("✓ Parsing complete  1 completed · 0 failed · 0 warnings"));
+    }
+
+    #[test]
+    fn api_phases_and_warning_remain_informative() {
+        let term = TestTerm::with_width(96);
+        let renderer = renderer(term.clone());
+        let scope = CommandScope::ApiTask(ApiTaskId(1));
+        renderer.handle(CommandEvent::RunPlanned {
+            documents: 0,
+            api_tasks: 1,
+        });
+        for event in [
+            ProgressEvent::ApiSubmitted {
+                label: "task#1 [quarterly-report]".into(),
+            },
+            ProgressEvent::ApiPending {
+                label: "task#1 [quarterly-report]".into(),
+                queued_ahead: Some(3),
+            },
+            ProgressEvent::ApiProcessing {
+                label: "task#1 [quarterly-report]".into(),
+            },
+            ProgressEvent::ApiDownloading {
+                label: "task#1 [quarterly-report]".into(),
+            },
+            ProgressEvent::ApiExtracting {
+                label: "task#1 [quarterly-report]".into(),
+            },
+            ProgressEvent::ApiWarning {
+                label: "task#1 [quarterly-report]".into(),
+                message: "preview unavailable".into(),
+            },
+        ] {
+            renderer.handle(CommandEvent::Progress { scope, event });
+        }
+        let text = term.text();
+        for expected in [
+            "MinerU · 1 task",
+            "submitted",
+            "waiting · 3 ahead",
+            "processing",
+            "downloading results",
+            "extracting output",
+            "! Warning  task#1 [quarterly-report] · preview unavailable",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}: {text}");
+        }
+    }
+
+    #[test]
+    fn narrow_live_rows_are_clipped_instead_of_wrapped() {
+        let term = TestTerm::with_width(24);
+        let renderer = renderer(term.clone());
+        renderer.handle(CommandEvent::RunPlanned {
+            documents: 1,
+            api_tasks: 0,
+        });
+        renderer.handle(CommandEvent::Progress {
+            scope: CommandScope::Document(DocumentId(1)),
+            event: ProgressEvent::DocumentStarted {
+                document: "a-very-long-document-name.pdf".into(),
+            },
+        });
+        let text = term.text();
+        assert!(
+            !text.contains("a-very-long-document-name.pdf"),
+            "the narrow live row should be clipped rather than wrapped: {text}"
+        );
+        let screen = term.0.lock().unwrap();
+        assert!(
+            screen
+                .history
+                .iter()
+                .flat_map(|write| write.lines())
+                .all(|line| { line.chars().count() <= usize::from(term.1) })
+        );
     }
 
     #[test]

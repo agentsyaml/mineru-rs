@@ -53,6 +53,17 @@ TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 NPM_DEV_DEPENDENCIES = {"@napi-rs/cli": "^3.2.0"}
 PYPI_USER_AGENT = "mineru-rs-release-verifier/1"
+CRATE_FIXTURES = {
+    "tests/fixtures/pdf/minimal.pdf",
+    "tests/fixtures/vlm/layout.txt",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_middle.json",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list.json",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list_v2.json",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5.md",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg",
+    "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg",
+}
 
 
 def fail(message: str) -> typing.NoReturn:
@@ -244,8 +255,8 @@ def expected_crate_files(source: Path) -> set[str]:
     ).returncode == 0
     if has_revision:
         expected.add(".cargo_vcs_info.json")
-    for base in (source / "src", source / "tests/fixtures"):
-        expected.update(p.relative_to(source).as_posix() for p in base.rglob("*") if p.is_file())
+    expected.update(p.relative_to(source).as_posix() for p in (source / "src").rglob("*") if p.is_file())
+    expected.update(CRATE_FIXTURES)
     return expected
 
 
@@ -277,7 +288,7 @@ def validate_crate(path: Path, version: str, source: Path) -> tuple[str, dict[st
         fail(f"normalized Cargo.toml binaries differ: {sorted(bins)}")
     if set(package.get("include", [])) != {
         "Cargo.toml", "Cargo.lock", "src/**", "README.md", "LICENSE-MIT", "LICENSE-APACHE",
-        "docs/usage.md", "docs/compatibility.md", "tests/fixtures/**",
+        "docs/usage.md", "docs/compatibility.md", "!tests/fixtures/input/README.md", *CRATE_FIXTURES,
     }:
         fail("normalized Cargo.toml include policy differs")
     return root, files

@@ -1,5 +1,5 @@
 use crate::{
-    Asset, AssetKind, OfficialDocument, OfficialOutputManifest, PageResult, VlmError, VlmResult,
+    Asset, AssetKind, OfficialOutputManifest, PageResult, VlmError, VlmResult,
     official_builders::{
         OfficialBuildArtifacts, OfficialPreparedPage, finalize_official_document_until,
     },
@@ -307,10 +307,6 @@ impl OfficialOutputStage {
         Ok(())
     }
 
-    pub(crate) fn prepare_commit(&mut self) -> VlmResult<()> {
-        Ok(())
-    }
-
     pub(crate) fn commit(mut self) -> VlmResult<OfficialOutputManifest> {
         let manifest = OfficialOutputManifest {
             root: self.root.clone(),
@@ -602,140 +598,9 @@ impl Drop for OfficialOutputStage {
     }
 }
 
-pub fn write_official_outputs(
-    root: &Path,
-    stem: &str,
-    document: &OfficialDocument,
-) -> VlmResult<OfficialOutputManifest> {
-    let stem = canonical_stem(stem)?;
-    let assets = validate_assets(&document.document.assets, &stem)?;
-    let model = crate::vlm_types::model_output_wire(&document.model_output)?;
-
-    let tree = OutputTree::open(root, &stem, OfficialOutputTarget::Vlm)?;
-    let (staging_parent_name, staging_parent, stage) = create_private_stage(&tree.directory)?;
-    let result = write_stage_in(&stage, &stem, document, &model, &assets);
-    if let Err(error) = result {
-        remove_private_stage(&tree.directory, &staging_parent_name, &staging_parent);
-        return Err(error);
-    }
-
-    let backup = match install_stage_in(
-        &staging_parent,
-        std::ffi::OsStr::new("stage"),
-        &tree.directory,
-        std::ffi::OsStr::new(OfficialOutputTarget::Vlm.name()),
-    ) {
-        Ok(backup) => backup,
-        Err(error) => {
-            remove_private_stage(&tree.directory, &staging_parent_name, &staging_parent);
-            return Err(error);
-        }
-    };
-    if let Some(backup) = backup {
-        remove_backup(backup);
-    }
-    remove_private_stage(&tree.directory, &staging_parent_name, &staging_parent);
-    Ok(OfficialOutputManifest {
-        root: root.to_path_buf(),
-        stem,
-        vlm_dir: tree.target,
-    })
-}
-
-fn write_stage_in(
-    directory: &Dir,
-    stem: &str,
-    document: &OfficialDocument,
-    model: &serde_json::Value,
-    assets: &[(PathBuf, &Asset)],
-) -> VlmResult<()> {
-    write_json_in(
-        directory,
-        &format!("{stem}_middle.json"),
-        &document.document.middle_json,
-    )?;
-    write_json_in(directory, &format!("{stem}_model.json"), model)?;
-    write_json_in(
-        directory,
-        &format!("{stem}_content_list.json"),
-        &document.document.content_list,
-    )?;
-    write_json_in(
-        directory,
-        &format!("{stem}_content_list_v2.json"),
-        &document.content_list_v2,
-    )?;
-    write_bytes_in(
-        directory,
-        &format!("{stem}.md"),
-        document.document.markdown.as_bytes(),
-    )?;
-    for (path, asset) in assets {
-        let parent = open_or_create_relative(
-            directory,
-            path.parent().expect("validated asset path has parent"),
-        )?;
-        write_bytes_in(
-            &parent,
-            path.file_name().expect("validated asset has a file name"),
-            &asset.data,
-        )?;
-    }
-    let preview = document
-        .document
-        .assets
-        .iter()
-        .find(|asset| matches!(&asset.kind, AssetKind::Other(kind) if kind == "layout_preview"))
-        .expect("validated preview");
-    write_bytes_in(directory, &format!("{stem}_layout.pdf"), &preview.data)
-}
-
-fn write_json_in(directory: &Dir, name: &str, value: &serde_json::Value) -> VlmResult<()> {
-    let bytes = serde_json::to_vec(value).map_err(|error| VlmError::Protocol {
-        operation: "official output serialization",
-        message: error.to_string(),
-    })?;
-    write_bytes_in(directory, name, &bytes)
-}
-
 fn write_bytes_in(directory: &Dir, name: impl AsRef<Path>, bytes: &[u8]) -> VlmResult<()> {
     let mut file = directory.create(name).map_err(io)?;
     file.write_all(bytes).map_err(io)
-}
-
-fn validate_assets<'a>(assets: &'a [Asset], stem: &str) -> VlmResult<Vec<(PathBuf, &'a Asset)>> {
-    let mut paths = HashSet::new();
-    let mut output = Vec::new();
-    let mut previews = 0;
-    let reserved = [
-        format!("{stem}_middle.json"),
-        format!("{stem}_model.json"),
-        format!("{stem}_content_list.json"),
-        format!("{stem}_content_list_v2.json"),
-        format!("{stem}.md"),
-        format!("{stem}_layout.pdf"),
-    ];
-    for asset in assets {
-        if matches!(&asset.kind, AssetKind::Other(kind) if kind == "layout_preview") {
-            previews += 1;
-            if asset.media_type != "application/pdf" || asset.data.is_empty() {
-                return invalid("layout preview must be a nonempty application/pdf asset");
-            }
-            continue;
-        }
-        let path = validate_asset(asset, stem)?;
-        let alias = path.to_string_lossy().to_ascii_lowercase();
-        if reserved.iter().any(|name| alias.eq_ignore_ascii_case(name))
-            || !paths.insert(PathBuf::from(alias))
-        {
-            return invalid("official assets must have unique normalized images/... paths");
-        }
-        output.push((path, asset));
-    }
-    if previews != 1 {
-        return invalid("exactly one layout preview asset is required");
-    }
-    Ok(output)
 }
 
 fn validate_asset(asset: &Asset, stem: &str) -> VlmResult<PathBuf> {
@@ -1218,6 +1083,61 @@ mod tests {
             .is_err()
         );
         assert!(!temp.path().join("document/vlm").exists());
+    }
+
+    #[test]
+    fn stage_begin_creates_a_missing_nested_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("missing/nested/root");
+        let stage = OfficialOutputStage::begin(
+            &root,
+            "document",
+            OfficialOutputTarget::Vlm,
+            usize::MAX,
+            usize::MAX,
+            None,
+        )
+        .unwrap();
+
+        assert!(root.join("document").is_dir());
+        stage.cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_begin_rejects_symlinked_roots_and_stems() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let linked_root = temp.path().join("linked-root");
+        symlink(outside.path(), &linked_root).unwrap();
+        assert!(
+            OfficialOutputStage::begin(
+                &linked_root,
+                "document",
+                OfficialOutputTarget::Vlm,
+                usize::MAX,
+                usize::MAX,
+                None,
+            )
+            .is_err()
+        );
+
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        symlink(outside.path(), root.join("document")).unwrap();
+        assert!(
+            OfficialOutputStage::begin(
+                &root,
+                "document",
+                OfficialOutputTarget::Vlm,
+                usize::MAX,
+                usize::MAX,
+                None,
+            )
+            .is_err()
+        );
     }
 }
 

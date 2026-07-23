@@ -83,11 +83,11 @@ impl OfficeWorkers {
             } else {
                 "mineru-office-convert"
             });
-        Self::with_executable(executable)
+        Ok(Self::with_executable(executable))
     }
     #[doc(hidden)]
-    pub fn with_executable(executable: PathBuf) -> Result<Self, OfficeConvertError> {
-        Ok(Self {
+    pub fn with_executable(executable: PathBuf) -> Self {
+        Self {
             executable,
             prefix: Vec::new(),
             state: Arc::new(Mutex::new(State {
@@ -100,7 +100,7 @@ impl OfficeWorkers {
             probe: Arc::new(TestProbe::default()),
             #[cfg(test)]
             ready: None,
-        })
+        }
     }
     #[cfg(test)]
     pub(crate) fn with_test_executable(executable: PathBuf) -> Self {
@@ -527,7 +527,7 @@ mod tests {
         );
         assert!(w.convert("ok", vec![], Duration::ZERO).await.is_err());
         let unavailable =
-            OfficeWorkers::with_executable(PathBuf::from("definitely-not-an-executable")).unwrap();
+            OfficeWorkers::with_executable(PathBuf::from("definitely-not-an-executable"));
         assert!(convert(&unavailable, "ok").await.is_err());
         w.drain().await;
         assert!(matches!(
@@ -891,8 +891,6 @@ enum ReadCapError {
 }
 struct Stderr {
     bytes: Vec<u8>,
-    #[allow(dead_code)]
-    truncated: bool,
 }
 async fn read_stdout_cap(
     reader: &mut (impl AsyncRead + Unpin),
@@ -917,17 +915,12 @@ async fn read_stderr_cap(
     cap: usize,
 ) -> Result<Stderr, ReadCapError> {
     let mut bytes = Vec::new();
-    let mut total = 0usize;
     let mut buf = [0; 8192];
     loop {
         let n = reader.read(&mut buf).await.map_err(|_| ReadCapError::Io)?;
         if n == 0 {
-            return Ok(Stderr {
-                bytes,
-                truncated: total > cap,
-            });
+            return Ok(Stderr { bytes });
         }
-        total = total.checked_add(n).ok_or(ReadCapError::Io)?;
         let keep = cap.saturating_sub(bytes.len()).min(n);
         bytes.extend_from_slice(&buf[..keep]);
     }

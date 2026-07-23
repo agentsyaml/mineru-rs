@@ -48,16 +48,11 @@ fn candidate(stem: &str, suffix: &str) -> String {
         format!("{}{suffix}", truncate_utf8(stem, 200 - suffix.len()))
     }
 }
-#[cfg(feature = "internal-mineru-api-client")]
-fn fold_key(value: &str) -> String {
-    caseless::default_case_fold_str(value)
-}
 /// P2D gate: this std-only lowercase key differs from Python's full Unicode casefold.
-#[cfg(not(feature = "internal-mineru-api-client"))]
 fn fold_key(value: &str) -> String {
     value.to_lowercase()
 }
-pub fn unique_stems(stems: &[String]) -> Vec<String> {
+pub(crate) fn unique_stems(stems: &[String]) -> Vec<String> {
     let normalized: Vec<_> = stems.iter().map(|s| truncate_utf8(s, 200)).collect();
     let raw: std::collections::HashSet<_> = normalized.iter().map(|s| fold_key(s)).collect();
     let mut counts = std::collections::HashMap::<String, usize>::new();
@@ -186,34 +181,7 @@ mod tests {
         assert_eq!(unique_stems(&input), vec!["a", "A_3", "a_2", "a_4"]);
         let long = "é".repeat(101);
         assert_eq!(unique_stems(&[long])[0].len(), 200);
-        #[cfg(not(feature = "internal-mineru-api-client"))]
         assert_eq!(unique_stems(&["ß".into(), "ss".into()]), vec!["ß", "ss"]); // Known std lowercase gap.
-        #[cfg(feature = "internal-mineru-api-client")]
-        assert_eq!(
-            unique_stems(&["Straße".into(), "STRASSE".into()]),
-            vec!["Straße", "STRASSE_2"]
-        );
-        #[cfg(feature = "internal-mineru-api-client")]
-        assert_eq!(fold_key("İ"), "i\u{307}");
-        #[cfg(feature = "internal-mineru-api-client")]
-        assert_eq!(
-            unique_stems(&["İ".into(), "i\u{307}".into(), "i".into()]),
-            vec!["İ", "i\u{307}_2", "i"]
-        );
-        #[cfg(feature = "internal-mineru-api-client")]
-        assert_eq!(fold_key("Σ"), fold_key("σ"));
-        #[cfg(feature = "internal-mineru-api-client")]
-        assert_eq!(fold_key("σ"), fold_key("ς"));
-        #[cfg(feature = "internal-mineru-api-client")]
-        assert_eq!(
-            unique_stems(&["Σ".into(), "σ_2".into(), "σ".into(), "ς".into()]),
-            vec!["Σ", "σ_2", "σ_3", "ς_4"]
-        );
-        #[cfg(feature = "internal-mineru-api-client")]
-        assert_eq!(
-            unique_stems(&["a".into(), "A_2".into(), "A".into()]),
-            vec!["a", "A_2", "A_3"]
-        );
     }
     #[test]
     fn pipeline_plans_and_other_backends_do_not_pack() {

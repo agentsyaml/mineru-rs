@@ -70,10 +70,6 @@ pub struct VlmHttpConfig {
     pub max_concurrency: usize,
     pub http_timeout: Duration,
     pub connect_timeout: Duration,
-    /// Deprecated compatibility no-op. Active request concurrency is controlled by
-    /// `max_concurrency`; per-host idle pooling is controlled by `max_keepalive_connections`.
-    #[deprecated(note = "compatibility no-op; use max_concurrency or max_keepalive_connections")]
-    pub max_connections: Option<usize>,
     pub max_keepalive_connections: usize,
     pub keepalive_expiry: Duration,
     pub debug: bool,
@@ -104,7 +100,6 @@ impl Default for VlmHttpConfig {
     }
 }
 impl VlmHttpConfig {
-    #[allow(deprecated)]
     pub(crate) fn from_env(get: impl Fn(&str) -> Option<String>) -> Self {
         let model_name = env_nonempty_with(&get, "MINERU_VL_MODEL_NAME");
         let raw_server = env_nonempty_with(&get, "MINERU_VL_SERVER");
@@ -125,7 +120,6 @@ impl VlmHttpConfig {
             max_concurrency: 100,
             http_timeout: Duration::from_secs(600),
             connect_timeout: Duration::from_secs(10),
-            max_connections: None,
             max_keepalive_connections: 20,
             keepalive_expiry: Duration::from_secs(5),
             debug: env_debug_with(&get).unwrap_or(false),

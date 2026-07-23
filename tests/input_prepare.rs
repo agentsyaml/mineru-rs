@@ -522,8 +522,7 @@ async fn exact_image_and_pdf_limits_hold_at_the_boundary() {
 #[ignore = "real Office conversion e2e"]
 async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
     let workers =
-        OfficeWorkers::with_executable(PathBuf::from(env!("CARGO_BIN_EXE_mineru-office-convert")))
-            .unwrap();
+        OfficeWorkers::with_executable(PathBuf::from(env!("CARGO_BIN_EXE_mineru-office-convert")));
     for (bytes, kind) in [
         (office_fixtures::docx(), DocumentKind::Docx),
         (office_fixtures::pptx(), DocumentKind::Pptx),
@@ -582,8 +581,7 @@ async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
         .await
         .is_err()
     );
-    let bad_workers =
-        OfficeWorkers::with_executable(PathBuf::from("definitely-not-a-helper")).unwrap();
+    let bad_workers = OfficeWorkers::with_executable(PathBuf::from("definitely-not-a-helper"));
     let error = prepare(
         office_fixtures::docx(),
         DocumentKind::Pptx,
@@ -625,8 +623,7 @@ async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
     workers.drain().await;
 
     let abort_workers =
-        OfficeWorkers::with_executable(PathBuf::from(env!("CARGO_BIN_EXE_mineru-office-convert")))
-            .unwrap();
+        OfficeWorkers::with_executable(PathBuf::from(env!("CARGO_BIN_EXE_mineru-office-convert")));
     let task_workers = abort_workers.clone();
     let task = tokio::spawn(async move {
         prepare(
@@ -647,8 +644,7 @@ async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {
         .unwrap();
 
     let deadline_workers =
-        OfficeWorkers::with_executable(PathBuf::from(env!("CARGO_BIN_EXE_mineru-office-convert")))
-            .unwrap();
+        OfficeWorkers::with_executable(PathBuf::from(env!("CARGO_BIN_EXE_mineru-office-convert")));
     let _ = prepare(
         office_fixtures::docx(),
         DocumentKind::Docx,
