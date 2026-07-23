@@ -744,7 +744,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn scoped_events_deduplicate_snapshots_and_survive_callback_panic() {
         use crate::command::{ApiTaskId, CommandEvent, CommandScope};
 
@@ -758,7 +758,11 @@ mod tests {
                 json!({"status":"healthy","protocol_version":2,"max_concurrent_requests":1,"processing_window_size":1}),
             )
         }
-        async fn task(headers: HeaderMap) -> impl IntoResponse {
+        async fn task(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
+            assert!(
+                body.windows(b"filename=\"doc.png\"".len())
+                    .any(|part| part == b"filename=\"doc.png\"")
+            );
             let base = format!("http://{}", headers["host"].to_str().unwrap());
             (
                 StatusCode::ACCEPTED,
@@ -798,6 +802,7 @@ mod tests {
         );
         let root = tempfile::tempdir().unwrap();
         let input = root.path().join("doc.png");
+        let output = root.path().join("out");
         std::fs::write(&input, b"x").unwrap();
         let commands = Arc::new(Mutex::new(Vec::new()));
         let callback = {
@@ -825,7 +830,7 @@ mod tests {
                 effective_pages: 1,
                 order: 0,
             }],
-            &root.path().join("out"),
+            &output,
             &base,
             super::super::RemoteApiOptions::default(),
             super::super::RemoteApiEnv {
@@ -841,6 +846,7 @@ mod tests {
 
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(state.status.load(Ordering::SeqCst), 4);
+        assert!(output.join("doc/vlm/doc_layout.pdf").is_file());
         let progress = commands
             .lock()
             .unwrap()
