@@ -5,12 +5,15 @@ use crate::{
     ProgressEvent, RasterWorkers, VlmHeader, VlmHttpConfig, canonical_stem,
     input_prepare::{DocumentKind, prepare_with_warning},
 };
+#[cfg(unix)]
+use cap_fs_ext::MetadataExt;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
 };
 use std::{
+    ffi::OsString,
     io::{IsTerminal, Read, Write},
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
@@ -88,6 +91,7 @@ fn clean(v: Option<String>, name: &str) -> Result<Option<String>, DirectError> {
     })
     .transpose()
 }
+#[cfg(unix)]
 fn absolute(path: &Path) -> Result<PathBuf, DirectError> {
     let path = if path.is_absolute() {
         path.to_owned()
@@ -97,7 +101,7 @@ fn absolute(path: &Path) -> Result<PathBuf, DirectError> {
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {
-            Component::RootDir => out.push("/"),
+            Component::RootDir => out.push(c.as_os_str()),
             Component::Normal(x) => out.push(x),
             Component::CurDir => {}
             Component::ParentDir => return Err(err("paths must not contain parent traversal")),
@@ -111,6 +115,95 @@ fn absolute(path: &Path) -> Result<PathBuf, DirectError> {
         }
     }
     Ok(out)
+}
+#[cfg(windows)]
+fn absolute(path: &Path) -> Result<PathBuf, DirectError> {
+    use std::path::Prefix;
+
+    if let Some(Component::Prefix(prefix)) = path.components().next() {
+        match prefix.kind() {
+            Prefix::Disk(_) | Prefix::UNC(_, _) if !path.is_absolute() => {
+                return Err(err("drive-relative paths are unsupported"));
+            }
+            Prefix::Disk(_) | Prefix::UNC(_, _) => {}
+            _ => return Err(err("device namespace paths are unsupported")),
+        }
+    }
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(_) | Prefix::UNC(_, _) => out.push(c.as_os_str()),
+                _ => return Err(err("device namespace paths are unsupported")),
+            },
+            Component::RootDir => out.push(c.as_os_str()),
+            Component::Normal(x) => out.push(x),
+            Component::CurDir => {}
+            Component::ParentDir => return Err(err("paths must not contain parent traversal")),
+        }
+    }
+    if !out.is_absolute() {
+        return Err(err("unsupported path"));
+    }
+    Ok(out)
+}
+#[cfg(not(any(unix, windows)))]
+fn absolute(_path: &Path) -> Result<PathBuf, DirectError> {
+    Err(err("direct paths are unsupported on this platform"))
+}
+
+#[cfg(unix)]
+fn anchor_and_names(path: &Path) -> Result<(PathBuf, Vec<OsString>), DirectError> {
+    let mut components = path.components();
+    let Some(Component::RootDir) = components.next() else {
+        return Err(err("path is not absolute"));
+    };
+    let names = components
+        .map(|c| match c {
+            Component::Normal(name) => Ok(name.to_owned()),
+            _ => Err(err("invalid absolute path")),
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((PathBuf::from("/"), names))
+}
+#[cfg(windows)]
+fn anchor_and_names(path: &Path) -> Result<(PathBuf, Vec<OsString>), DirectError> {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Err(err("path has no filesystem prefix"));
+    };
+    match prefix.kind() {
+        Prefix::Disk(_) | Prefix::UNC(_, _) => {}
+        _ => return Err(err("device namespace paths are unsupported")),
+    }
+    let mut anchor = PathBuf::from(prefix.as_os_str());
+    match (prefix.kind(), components.next()) {
+        (Prefix::Disk(_), Some(root @ Component::RootDir))
+        | (Prefix::UNC(_, _), Some(root @ Component::RootDir)) => {
+            anchor.push(root.as_os_str());
+        }
+        (Prefix::UNC(_, _), None) => {}
+        (Prefix::Disk(_), _) => return Err(err("drive-relative paths are unsupported")),
+        _ => return Err(err("invalid absolute path")),
+    }
+    let names = components
+        .map(|c| match c {
+            Component::Normal(name) => Ok(name.to_owned()),
+            _ => Err(err("invalid absolute path")),
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((anchor, names))
+}
+#[cfg(not(any(unix, windows)))]
+fn anchor_and_names(_path: &Path) -> Result<(PathBuf, Vec<OsString>), DirectError> {
+    Err(err("direct paths are unsupported on this platform"))
 }
 fn kind_for(path: &Path) -> Option<DocumentKind> {
     DocumentKind::from_suffix(path.extension()?.to_str()?)
@@ -181,32 +274,20 @@ pub(super) fn allocate_input_stems(
     Ok(crate::mineru_api::planning::unique_stems(&raw_stems))
 }
 fn open_dir(path: &Path) -> Result<Dir, DirectError> {
-    let mut dir = Dir::open_ambient_dir("/", ambient_authority())?;
-    for c in path.components().skip(1) {
-        let Component::Normal(x) = c else {
-            return Err(err("invalid directory path"));
-        };
-        dir = dir.open_dir_nofollow(x)?;
+    let (anchor, names) = anchor_and_names(path)?;
+    let mut dir = Dir::open_ambient_dir(anchor, ambient_authority())?;
+    for name in names {
+        dir = dir.open_dir_nofollow(name)?;
     }
     Ok(dir)
 }
 fn snapshot(path: &Path, cap: usize) -> Result<bytes::Bytes, DirectError> {
     let path = absolute(path)?;
-    let names: Vec<_> = path
-        .components()
-        .skip(1)
-        .map(|c| {
-            if let Component::Normal(x) = c {
-                Ok(x.to_owned())
-            } else {
-                Err(err("invalid input path"))
-            }
-        })
-        .collect::<Result<_, _>>()?;
+    let (anchor, names) = anchor_and_names(&path)?;
     let (leaf, parents) = names
         .split_last()
         .ok_or_else(|| err("input path has no file"))?;
-    let mut dir = Dir::open_ambient_dir("/", ambient_authority())?;
+    let mut dir = Dir::open_ambient_dir(anchor, ambient_authority())?;
     for p in parents {
         dir = dir.open_dir_nofollow(p)?;
     }
@@ -227,10 +308,48 @@ fn snapshot(path: &Path, cap: usize) -> Result<bytes::Bytes, DirectError> {
 }
 #[cfg(unix)]
 fn same_dir(a: &Dir, b: &Dir) -> std::io::Result<bool> {
-    use cap_primitives::fs::MetadataExt;
-    let a = a.metadata(".")?;
-    let b = b.metadata(".")?;
+    let a = a.dir_metadata()?;
+    let b = b.dir_metadata()?;
     Ok(a.dev() == b.dev() && a.ino() == b.ino())
+}
+#[cfg(windows)]
+fn same_dir(a: &Dir, b: &Dir) -> std::io::Result<bool> {
+    use std::{
+        mem::{MaybeUninit, size_of},
+        os::windows::io::AsRawHandle,
+    };
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx},
+    };
+
+    fn identity(dir: &Dir) -> std::io::Result<(u64, [u8; 16])> {
+        let mut info = MaybeUninit::<FILE_ID_INFO>::uninit();
+        // SAFETY: `info` is sized for FileIdInfo and initialized only on API success.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                dir.as_raw_handle() as HANDLE,
+                FileIdInfo,
+                info.as_mut_ptr().cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a successful call initialized the complete FILE_ID_INFO buffer.
+        let info = unsafe { info.assume_init() };
+        Ok((info.VolumeSerialNumber, info.FileId.Identifier))
+    }
+
+    Ok(identity(a)? == identity(b)?)
+}
+#[cfg(not(any(unix, windows)))]
+fn same_dir(_a: &Dir, _b: &Dir) -> std::io::Result<bool> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "directory identity is unsupported on this platform",
+    ))
 }
 fn output_chain(
     root: &Path,
@@ -239,20 +358,15 @@ fn output_chain(
     target: &str,
 ) -> Result<PathBuf, DirectError> {
     let root = absolute(root)?;
-    let mut current = Dir::open_ambient_dir("/", ambient_authority())?;
+    let (anchor, mut names) = anchor_and_names(&root)?;
+    let mut current = Dir::open_ambient_dir(anchor, ambient_authority())?;
+    if let Some(input) = input {
+        if same_dir(&current, input)? {
+            return Err(err("output directory must not be inside input directory"));
+        }
+    }
     let mut exists = true;
-    let names: Vec<_> = root
-        .components()
-        .skip(1)
-        .map(|c| {
-            if let Component::Normal(x) = c {
-                Ok(x.to_owned())
-            } else {
-                Err(err("invalid output path"))
-            }
-        })
-        .chain([Ok(stem.into()), Ok(target.into())])
-        .collect::<Result<_, _>>()?;
+    names.extend([stem.into(), target.into()]);
     for name in names {
         if exists {
             for entry in current.read_dir(".")? {
@@ -274,14 +388,9 @@ fn output_chain(
                     }
                     let next = current.open_dir_nofollow(&name)?;
                     if let Some(input) = input {
-                        #[cfg(unix)]
                         if same_dir(&next, input)? {
                             return Err(err("output directory must not be inside input directory"));
                         }
-                        #[cfg(not(unix))]
-                        return Err(err(
-                            "directory input containment is unsupported on this platform",
-                        ));
                     }
                     current = next;
                 }
@@ -957,6 +1066,80 @@ mod tests {
         assert_eq!(snapshot(&pdf, 5).unwrap().as_ref(), b"12345");
     }
 
+    #[test]
+    fn directory_identity_distinguishes_handles() {
+        let temp = tempfile::tempdir().unwrap();
+        let sibling = temp.path().join("sibling");
+        std::fs::create_dir(&sibling).unwrap();
+        let first = open_dir(&absolute(temp.path()).unwrap()).unwrap();
+        let second = open_dir(&absolute(temp.path()).unwrap()).unwrap();
+        let sibling = open_dir(&absolute(&sibling).unwrap()).unwrap();
+        assert!(same_dir(&first, &second).unwrap());
+        assert!(!same_dir(&first, &sibling).unwrap());
+    }
+
+    #[test]
+    fn output_chain_rejects_equal_or_nested_input_but_allows_outside() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input");
+        let nested = input.join("nested");
+        let output = temp.path().join("output");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        let input_dir = open_dir(&absolute(&input).unwrap()).unwrap();
+
+        assert!(output_chain(&output, "a", Some(&input_dir), "vlm").is_ok());
+        assert!(output_chain(&input, "a", Some(&input_dir), "vlm").is_err());
+        assert!(output_chain(&nested, "a", Some(&input_dir), "vlm").is_err());
+    }
+
+    #[test]
+    fn output_chain_rejects_filesystem_anchor_input_before_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = absolute(temp.path()).unwrap();
+        let (anchor, _) = anchor_and_names(&path).unwrap();
+        let anchor_dir = open_dir(&anchor).unwrap();
+        assert!(output_chain(&path, "a", Some(&anchor_dir), "vlm").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_accept_filesystem_roots_only() {
+        assert!(absolute(Path::new(r"C:\input\file.pdf")).is_ok());
+        assert!(absolute(Path::new(r"\\server\share\input\file.pdf")).is_ok());
+        assert!(
+            anchor_and_names(Path::new(r"\\server\share"))
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        assert!(absolute(Path::new(r"C:input\file.pdf")).is_err());
+        assert!(absolute(Path::new(r"\\?\C:\input\file.pdf")).is_err());
+        assert!(absolute(Path::new(r"\\.\device")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn output_chain_rejects_junction_redirect_into_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        let junction = output.join("redirect");
+        std::fs::create_dir(&input).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&input)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed: {status}");
+
+        let rejected = output_chain(&junction, "a", None, "vlm").is_err();
+        std::fs::remove_dir(&junction).unwrap();
+        assert!(rejected);
+    }
+
     #[cfg(unix)]
     #[test]
     fn nofollow_snapshot_and_output_chain_reject_links() {
@@ -973,8 +1156,6 @@ mod tests {
         symlink(&target, &leaf).unwrap();
         assert!(snapshot(&leaf, 10).is_err());
 
-        let input_dir = open_dir(&absolute(&input).unwrap()).unwrap();
-        assert!(output_chain(&input.join("out"), "a", Some(&input_dir), "vlm").is_err());
         let output = temp.path().join("out");
         std::fs::create_dir(&output).unwrap();
         symlink(&input, output.join("a")).unwrap();

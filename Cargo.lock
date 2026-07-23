@@ -2561,6 +2561,7 @@ dependencies = [
  "time",
  "tokio",
  "url",
+ "windows-sys 0.59.0",
  "zip 8.6.0",
 ]
 

@@ -706,19 +706,24 @@ impl OutputTree {
 }
 
 fn open_or_create_root(path: &Path) -> VlmResult<Dir> {
+    #[cfg(windows)]
+    let (start, skip) = windows_root_anchor(path)?;
+    #[cfg(not(windows))]
     let start = if path.is_absolute() {
-        Path::new("/")
+        PathBuf::from("/")
     } else {
-        Path::new(".")
+        PathBuf::from(".")
     };
-    let mut dir = Dir::from_std_file(open_ambient_dir(start, ambient_authority()).map_err(io)?);
     let components: Vec<_> = path.components().collect();
+    #[cfg(not(windows))]
+    let skip = 0;
+    let mut dir = Dir::from_std_file(open_ambient_dir(&start, ambient_authority()).map_err(io)?);
     let macos_private_alias = cfg!(target_os = "macos")
         && matches!(components.as_slice(), [Component::RootDir, Component::Normal(name), ..] if *name == "var" || *name == "tmp");
     if macos_private_alias {
         dir = open_child_nofollow(dir, "private")?;
     }
-    for (index, component) in components.into_iter().enumerate() {
+    for (index, component) in components.into_iter().enumerate().skip(skip) {
         match component {
             Component::RootDir | Component::CurDir => continue,
             Component::ParentDir => {
@@ -744,6 +749,38 @@ fn open_or_create_root(path: &Path) -> VlmResult<Dir> {
         }
     }
     Ok(dir)
+}
+
+#[cfg(windows)]
+fn windows_root_anchor(path: &Path) -> VlmResult<(PathBuf, usize)> {
+    use std::path::Prefix;
+
+    let components: Vec<_> = path.components().collect();
+    let Some(Component::Prefix(prefix)) = components.first() else {
+        if matches!(components.first(), Some(Component::RootDir)) {
+            return Err(VlmError::InvalidInput(
+                "Windows output root must include a drive or UNC share".into(),
+            ));
+        }
+        return Ok((PathBuf::from("."), 0));
+    };
+    match prefix.kind() {
+        Prefix::Disk(_) | Prefix::UNC(_, _) if path.is_absolute() => {
+            let mut anchor = PathBuf::from(prefix.as_os_str());
+            anchor.push(std::path::MAIN_SEPARATOR_STR);
+            let skip = 1 + usize::from(matches!(components.get(1), Some(Component::RootDir)));
+            Ok((anchor, skip))
+        }
+        Prefix::Disk(_) | Prefix::UNC(_, _) => Err(VlmError::InvalidInput(
+            "drive-relative output roots are unsupported".into(),
+        )),
+        Prefix::DeviceNS(_) => Err(VlmError::InvalidInput(
+            "Windows device namespace output roots are unsupported".into(),
+        )),
+        Prefix::Verbatim(_) | Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _) => Err(
+            VlmError::InvalidInput("Windows verbatim output roots are unsupported".into()),
+        ),
+    }
 }
 
 fn open_or_create_relative(parent: &Dir, path: &Path) -> VlmResult<Dir> {
@@ -1025,6 +1062,61 @@ mod tests {
     };
     use bytes::Bytes;
     use std::path::Path;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_root_anchors_are_separated_from_relative_traversal() {
+        use super::windows_root_anchor;
+        use std::path::PathBuf;
+
+        assert_eq!(
+            windows_root_anchor(Path::new(r"C:\output\nested")).unwrap(),
+            (PathBuf::from(r"C:\"), 2)
+        );
+        assert_eq!(
+            windows_root_anchor(Path::new(r"\\server\share\output")).unwrap(),
+            (PathBuf::from(r"\\server\share\"), 2)
+        );
+        assert!(windows_root_anchor(Path::new(r"C:output")).is_err());
+        assert!(windows_root_anchor(Path::new(r"\\.\C:\output")).is_err());
+        assert!(windows_root_anchor(Path::new(r"\\?\C:\output")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_begin_rejects_junction_in_root_ancestor() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let junction = temp.path().join("junction");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(outside.path())
+            .status()
+            .expect("run mklink");
+        assert!(status.success(), "mklink /J failed: {status}");
+
+        let rejected = match OfficialOutputStage::begin(
+            &junction.join("nested/root"),
+            "document",
+            OfficialOutputTarget::Vlm,
+            usize::MAX,
+            usize::MAX,
+            None,
+        ) {
+            Err(_) => true,
+            Ok(stage) => {
+                stage.cleanup();
+                false
+            }
+        };
+        assert!(
+            !outside.path().join("nested").exists(),
+            "output traversal mutated the junction target"
+        );
+        std::fs::remove_dir(&junction).expect("remove junction");
+        assert!(rejected, "output root traversed a directory junction");
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

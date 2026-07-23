@@ -89,6 +89,9 @@ url = { version = "2", features = ["serde"] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = { version = "=0.41.0", default-features = false, features = ["encoding"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 
 # ponytail: workspace only hosts isolated native binding subcrates; root package

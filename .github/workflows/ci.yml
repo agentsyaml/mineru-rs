@@ -179,6 +179,24 @@ jobs:
       - name: Dry-run crates.io publication
         run: cargo +1.89.0 publish -p mineru --dry-run --locked
 
+  windows-path-safety-msrv:
+    name: Windows path safety, Rust 1.89.0
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.89.0
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup target add --toolchain 1.89.0 aarch64-pc-windows-msvc
+      - name: Test Windows path safety
+        run: |
+          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc command::direct::tests -- --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_output::tests -- --test-threads=1
+      - name: Check ARM64 Windows tests
+        run: cargo +1.89.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
+
   rust-all-features:
     name: Rust stable, all features
     runs-on: macos-15
