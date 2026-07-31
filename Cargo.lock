@@ -1629,6 +1629,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hayro-write"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8720044580387e8941159a28e5ca5d361a63d65b385adddc614fd862bab8f583"
+dependencies = [
+ "flate2",
+ "hayro-syntax 0.5.0",
+ "kurbo 0.12.0",
+ "log",
+ "pdf-writer",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2239,7 +2252,7 @@ dependencies = [
  "flate2",
  "float-cmp 0.10.0",
  "gif 0.13.3",
- "hayro-write",
+ "hayro-write 0.3.0",
  "image-webp",
  "imagesize 0.14.0",
  "indexmap",
@@ -2529,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "mineru"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "base64",
@@ -2542,6 +2555,7 @@ dependencies = [
  "futures-util",
  "hayro 0.5.0",
  "hayro-jpeg2000",
+ "hayro-write 0.4.0",
  "html-escape",
  "httpdate",
  "image",
@@ -2549,6 +2563,7 @@ dependencies = [
  "lopdf",
  "md5",
  "office2pdf",
+ "pdf-writer",
  "quick-xml 0.41.0",
  "regex",
  "reqwest",
@@ -2567,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "mineru-node"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "mineru",
  "napi",
@@ -2577,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "mineru-python"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "mineru",
  "pyo3",

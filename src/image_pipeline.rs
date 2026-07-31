@@ -1,8 +1,14 @@
 use crate::{BlockKind, ContentBlock, Error, NormalizedBbox, Result, Rotation};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use image::{DynamicImage, ImageFormat, Rgb, RgbImage, imageops::FilterType};
+use image::{
+    ExtendedColorType, ImageEncoder, Rgb, RgbImage,
+    codecs::{
+        jpeg::JpegEncoder,
+        png::{CompressionType, FilterType as PngFilterType, PngEncoder},
+    },
+    imageops::FilterType,
+};
 use serde_json::{Map, Value};
-use std::io::Cursor;
 
 pub(crate) fn page_png(image: &RgbImage) -> Result<String> {
     let normalized = image::imageops::resize(image, 1036, 1036, FilterType::CatmullRom);
@@ -85,8 +91,13 @@ pub(crate) fn data_url(image: &RgbImage) -> Result<String> {
 
 pub(crate) fn png_bytes(image: &RgbImage) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    DynamicImage::ImageRgb8(image.clone())
-        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+    PngEncoder::new_with_quality(&mut bytes, CompressionType::Fast, PngFilterType::Adaptive)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            ExtendedColorType::Rgb8,
+        )
         .map_err(|e| Error::Image(e.to_string()))?;
     Ok(bytes)
 }
@@ -97,8 +108,13 @@ fn png_data_url(bytes: &[u8]) -> String {
 
 pub(crate) fn jpeg_data_url(image: &RgbImage) -> Result<String> {
     let mut bytes = Vec::new();
-    DynamicImage::ImageRgb8(image.clone())
-        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Jpeg)
+    JpegEncoder::new_with_quality(&mut bytes, 75)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            ExtendedColorType::Rgb8,
+        )
         .map_err(|e| Error::Image(e.to_string()))?;
     Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes)))
 }
@@ -319,6 +335,50 @@ fn paint_token(image: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, text: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{DynamicImage, ImageFormat};
+    use std::io::Cursor;
+
+    fn legacy_bytes(image: &RgbImage, format: ImageFormat) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgb8(image.clone())
+            .write_to(&mut Cursor::new(&mut bytes), format)
+            .map_err(|e| Error::Image(e.to_string()))?;
+        Ok(bytes)
+    }
+
+    fn patterned_image(width: u32, height: u32) -> RgbImage {
+        RgbImage::from_fn(width, height, |x, y| {
+            Rgb([
+                (x.wrapping_mul(17) + y.wrapping_mul(31)) as u8,
+                (x.wrapping_mul(47) ^ y.wrapping_mul(13)) as u8,
+                (x.wrapping_mul(7) + y.wrapping_mul(61) + 3) as u8,
+            ])
+        })
+    }
+
+    #[test]
+    fn direct_png_matches_legacy_write_to() {
+        for image in [
+            patterned_image(1, 1),
+            patterned_image(17, 11),
+            patterned_image(1036, 1036),
+        ] {
+            assert_eq!(
+                png_bytes(&image).unwrap(),
+                legacy_bytes(&image, ImageFormat::Png).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn direct_jpeg_matches_legacy_write_to() {
+        for image in [patterned_image(1, 1), patterned_image(17, 11)] {
+            let bytes = STANDARD
+                .decode(jpeg_data_url(&image).unwrap().rsplit(',').next().unwrap())
+                .unwrap();
+            assert_eq!(bytes, legacy_bytes(&image, ImageFormat::Jpeg).unwrap());
+        }
+    }
 
     #[test]
     fn png_data_url_uses_the_canonical_png_bytes() {

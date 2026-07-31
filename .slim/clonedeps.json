@@ -1,0 +1,33 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-07-31T00:00:00.000Z",
+  "dependencies": [
+    {
+      "name": "hayro",
+      "resolvedVersion": "0.5.0",
+      "repoUrl": "https://github.com/LaurenzV/hayro.git",
+      "ref": "hayro-v0.5.0",
+      "path": ".slim/clonedeps/repos/LaurenzV__hayro",
+      "packagePath": "hayro",
+      "reason": "Direct PDF parser and renderer used by ParsedPdf"
+    },
+    {
+      "name": "hayro-syntax",
+      "resolvedVersion": "0.5.0",
+      "repoUrl": "https://github.com/LaurenzV/hayro.git",
+      "ref": "hayro-v0.5.0",
+      "path": ".slim/clonedeps/repos/LaurenzV__hayro",
+      "packagePath": "hayro-syntax",
+      "reason": "Shared Pdf and page types required by selected-page extraction"
+    },
+    {
+      "name": "hayro-write",
+      "resolvedVersion": "0.4.0",
+      "repoUrl": "https://github.com/LaurenzV/hayro.git",
+      "ref": "hayro-v0.5.0",
+      "path": ".slim/clonedeps/repos/LaurenzV__hayro",
+      "packagePath": "hayro-write",
+      "reason": "Matching-generation vector selected-page extraction implementation"
+    }
+  ]
+}

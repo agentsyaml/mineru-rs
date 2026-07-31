@@ -16,6 +16,7 @@ Issues = "https://github.com/agentsyaml/mineru-rs/issues"
 
 [project.scripts]
 mineru = "mineru_rs._cli:main"
+mineru-rs = "mineru_rs._cli:main"
 
 [tool.maturin]
 manifest-path = "Cargo.toml"

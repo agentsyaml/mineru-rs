@@ -42,6 +42,7 @@ impl Default for Timing {
 
 pub(crate) struct MineruApiClient {
     base: String,
+    origin: OriginFingerprint,
     client: Client,
     timing: Timing,
 }
@@ -51,13 +52,31 @@ impl MineruApiClient {
         if base.is_empty() {
             return Err("API URL is empty".into());
         }
+        let authority = raw_authority(&base).ok_or_else(|| "invalid API URL".to_string())?;
+        if authority.has_userinfo {
+            return Err("invalid API URL".into());
+        }
+        let parsed = url::Url::parse(&base).map_err(|_| "invalid API URL".to_string())?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host().is_none()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err("invalid API URL".into());
+        }
+        let request_port = parsed.port().map(|port| port.to_string());
+        let redirect_origin = parsed.clone();
         let client = Client::builder()
-            .redirect(Policy::limited(20))
+            .redirect(redirect_policy(redirect_origin))
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|_| "unable to construct API client".to_string())?;
         Ok(Self {
             base,
+            origin: OriginFingerprint {
+                parsed,
+                request_port,
+            },
             client,
             timing: Timing::default(),
         })
@@ -137,7 +156,7 @@ impl MineruApiClient {
                     sanitize_vlm_error_bytes(&body, BODY_CAP)
                 )
             })?;
-            submit_response(&value)
+            canonicalize_submit_response(&self.origin, submit_response(&value)?)
         })
         .await
     }
@@ -148,6 +167,7 @@ impl MineruApiClient {
         env: RemoteEnv,
         mut callback: Option<&mut (dyn FnMut(StatusSnapshot) + Send)>,
     ) -> Result<(), String> {
+        let status_url = validate_task_url(&self.origin.parsed, status_url, "status_url")?;
         let timeout = Duration::try_from_secs_f64(env.result_timeout_seconds)
             .map_err(|_| "task result deadline is invalid".to_string())?;
         let deadline = tokio::time::Instant::now()
@@ -158,7 +178,7 @@ impl MineruApiClient {
         }
         tokio::time::timeout_at(deadline, async {
             loop {
-                let value = match self.poll_attempt(status_url).await {
+                let value = match self.poll_attempt(status_url.as_str()).await {
                     Ok(value) => value,
                     Err(e) if e == "response acquisition timed out" => {
                         self.sleep().await;
@@ -198,9 +218,10 @@ impl MineruApiClient {
         env: RemoteEnv,
         limits: ArchiveLimits,
     ) -> Result<DownloadedZip, String> {
+        let result_url = validate_task_url(&self.origin.parsed, result_url, "result_url")?;
         let timeout = Duration::try_from_secs_f64(env.download_timeout_seconds)
             .map_err(|_| "result download timeout is invalid".to_string())?;
-        archive::download(&self.client, result_url, task, timeout, limits).await
+        archive::download(&self.client, result_url.as_str(), task, timeout, limits).await
     }
 
     async fn sleep(&self) {
@@ -259,6 +280,120 @@ fn checked_body_len(body_len: usize, chunk_len: usize) -> Result<usize, String> 
     body_len
         .checked_add(chunk_len)
         .ok_or_else(|| "response body exceeds limit".into())
+}
+
+struct OriginFingerprint {
+    parsed: url::Url,
+    request_port: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct RawAuthority<'a> {
+    has_userinfo: bool,
+    explicit_port: Option<&'a str>,
+}
+
+fn raw_authority(value: &str) -> Option<RawAuthority<'_>> {
+    let authority = value.split_once("://")?.1.split(['/', '?', '#']).next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_port)| host_port);
+    let explicit_port = if host_port.starts_with('[') {
+        let closing_bracket = host_port.find(']')?;
+        host_port[closing_bracket + 1..].strip_prefix(':')
+    } else {
+        host_port.rsplit_once(':').map(|(_, port)| port)
+    };
+    Some(RawAuthority {
+        has_userinfo: authority.contains('@'),
+        explicit_port,
+    })
+}
+
+fn redirect_policy(origin: url::Url) -> Policy {
+    Policy::custom(move |attempt| {
+        let target = attempt.url();
+        if has_userinfo(target) || !same_origin(&origin, target) {
+            attempt.error("cross-origin redirect blocked")
+        } else if attempt.previous().len() > 20 {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+fn has_userinfo(url: &url::Url) -> bool {
+    !url.username().is_empty()
+        || url.password().is_some()
+        || raw_authority(url.as_str()).is_some_and(|authority| authority.has_userinfo)
+}
+
+fn validate_task_url(base: &url::Url, value: &str, name: &str) -> Result<url::Url, String> {
+    let url = parse_task_url(value, name)?;
+    if !same_origin(base, &url) {
+        return Err(invalid_task_url(name));
+    }
+    Ok(url)
+}
+
+fn parse_task_url(value: &str, name: &str) -> Result<url::Url, String> {
+    let authority = raw_authority(value).ok_or_else(|| invalid_task_url(name))?;
+    let url = url::Url::parse(value).map_err(|_| invalid_task_url(name))?;
+    if authority.has_userinfo || !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return Err(invalid_task_url(name));
+    }
+    Ok(url)
+}
+
+fn invalid_task_url(name: &str) -> String {
+    format!("invalid submission payload: {name} must be an absolute same-origin URL")
+}
+
+fn canonicalize_submit_response(
+    origin: &OriginFingerprint,
+    mut response: SubmitResponse,
+) -> Result<SubmitResponse, String> {
+    response.status_url =
+        canonicalize_submitted_task_url(origin, &response.status_url, "status_url")?;
+    response.result_url =
+        canonicalize_submitted_task_url(origin, &response.result_url, "result_url")?;
+    Ok(response)
+}
+
+fn canonicalize_submitted_task_url(
+    origin: &OriginFingerprint,
+    value: &str,
+    name: &str,
+) -> Result<String, String> {
+    let url = parse_task_url(value, name)?;
+    if same_origin(&origin.parsed, &url) {
+        return Ok(value.to_owned());
+    }
+    let returned_port = raw_authority(value).and_then(|authority| authority.explicit_port);
+    if origin.parsed.scheme() != "https"
+        || url.scheme() != "http"
+        || origin.parsed.host() != url.host()
+        || origin.request_port.as_deref() != returned_port
+    {
+        return Err(invalid_task_url(name));
+    }
+    let scheme_end = value.find(':').ok_or_else(|| invalid_task_url(name))?;
+    let upgraded = format!("https{}", &value[scheme_end..]);
+    let upgraded_url = parse_task_url(&upgraded, name)?;
+    if !same_origin(&origin.parsed, &upgraded_url) {
+        return Err(invalid_task_url(name));
+    }
+    Ok(upgraded)
+}
+
+fn same_origin(base: &url::Url, url: &url::Url) -> bool {
+    url.scheme() == base.scheme()
+        && url.host() == base.host()
+        && url.port_or_known_default() == base.port_or_known_default()
 }
 
 fn safe_json(value: &Value) -> String {
@@ -320,7 +455,7 @@ mod tests {
         Json, Router,
         body::Body,
         extract::Path as AxumPath,
-        http::StatusCode,
+        http::{HeaderMap, StatusCode},
         response::{IntoResponse, Redirect},
         routing::{get, post},
     };
@@ -338,15 +473,31 @@ mod tests {
         tokio::spawn(axum::serve(listener, app).into_future());
         format!("http://{address}")
     }
-    async fn submit_json(body: Value) -> Result<SubmitResponse, String> {
-        let base = server(Router::new().route(
-            "/tasks",
-            post(move || {
-                let body = body.clone();
-                async move { (StatusCode::ACCEPTED, Json(body)) }
-            }),
-        ))
-        .await;
+    async fn submit_json(mut body: Value) -> Result<SubmitResponse, String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        for (name, path) in [("status_url", "/status"), ("result_url", "/result")] {
+            if body
+                .get(name)
+                .and_then(Value::as_str)
+                .is_some_and(|v| !v.is_empty())
+            {
+                body[name] = json!(format!("{base}{path}"));
+            }
+        }
+        tokio::spawn(
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/tasks",
+                    post(move || {
+                        let body = body.clone();
+                        async move { (StatusCode::ACCEPTED, Json(body)) }
+                    }),
+                ),
+            )
+            .into_future(),
+        );
         MineruApiClient::new(&base)
             .unwrap()
             .submit(&RemoteOptions::default(), &[])
@@ -442,28 +593,20 @@ mod tests {
         }))
         .await
         .unwrap();
-        assert_eq!(
-            (
-                response.task_id,
-                response.status_url,
-                response.result_url,
-                response.file_names,
-                response.queued_ahead
-            ),
-            (
-                "id".into(),
-                "s".into(),
-                "r".into(),
-                vec!["a".into(), "b".into()],
-                Some(-2)
-            )
+        assert_eq!(response.task_id, "id");
+        assert!(
+            response.status_url.starts_with("http://") && response.status_url.ends_with("/status")
         );
-        let response = submit_json(json!({"task_id":"", "status_url":"", "result_url":""}))
-            .await
-            .unwrap();
-        assert_eq!(
-            (response.task_id, response.status_url, response.result_url),
-            ("".into(), "".into(), "".into())
+        assert!(
+            response.result_url.starts_with("http://") && response.result_url.ends_with("/result")
+        );
+        assert_eq!(response.file_names, vec!["a", "b"]);
+        assert_eq!(response.queued_ahead, Some(-2));
+        assert!(
+            submit_json(json!({"task_id":"", "status_url":"", "result_url":""}))
+                .await
+                .unwrap_err()
+                .contains("status_url")
         );
     }
     #[tokio::test]
@@ -502,6 +645,343 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("task submission HTTP 500") && !error.contains("secret"));
+    }
+
+    #[test]
+    fn uppercase_http_schemes_are_parsed_and_normalized() {
+        for (uppercase, lowercase) in [
+            ("HTTP://example.test", "http://example.test"),
+            ("HTTPS://example.test", "https://example.test"),
+        ] {
+            let client = MineruApiClient::new(uppercase).unwrap();
+            let lowercase_client = MineruApiClient::new(lowercase).unwrap();
+            assert_eq!(client.origin.parsed, lowercase_client.origin.parsed);
+
+            let task_url = format!("{uppercase}/status");
+            let parsed_task =
+                validate_task_url(&client.origin.parsed, &task_url, "status_url").unwrap();
+            assert_eq!(parsed_task.scheme(), client.origin.parsed.scheme());
+            assert_eq!(
+                canonicalize_submitted_task_url(&client.origin, &task_url, "status_url").unwrap(),
+                task_url
+            );
+        }
+
+        let client = MineruApiClient::new("HTTPS://example.test").unwrap();
+        assert_eq!(
+            canonicalize_submitted_task_url(
+                &client.origin,
+                "HTTP://example.test/status",
+                "status_url"
+            )
+            .unwrap(),
+            "https://example.test/status"
+        );
+    }
+
+    #[test]
+    fn task_urls_require_absolute_matching_origin_but_allow_other_paths() {
+        let base = url::Url::parse("https://Example.test/api").unwrap();
+        assert!(
+            validate_task_url(&base, "https://example.test:443/elsewhere", "status_url").is_ok()
+        );
+        for value in [
+            "/relative",
+            "not a URL",
+            "http://example.test/status",
+            "https://example.test:444/status",
+            "https://other.test/status",
+        ] {
+            let error = validate_task_url(&base, value, "status_url").unwrap_err();
+            assert_eq!(
+                error,
+                "invalid submission payload: status_url must be an absolute same-origin URL"
+            );
+            assert!(error.len() < 128);
+        }
+    }
+
+    #[test]
+    fn submitted_http_task_urls_are_upgraded_for_matching_https_origin() {
+        let client = MineruApiClient::new("https://Example.test/api/v1").unwrap();
+        let response = canonicalize_submit_response(
+            &client.origin,
+            submit_response(&json!({
+                "task_id":"id",
+                "status_url":"http://example.test/tasks/a%2Fb?next=%2Fkeep#status-fragment",
+                "result_url":"http://EXAMPLE.test/other/result.zip?download=1#result-fragment"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            response.status_url,
+            "https://example.test/tasks/a%2Fb?next=%2Fkeep#status-fragment"
+        );
+        assert_eq!(
+            response.result_url,
+            "https://EXAMPLE.test/other/result.zip?download=1#result-fragment"
+        );
+        assert!(
+            validate_task_url(&client.origin.parsed, &response.status_url, "status_url").is_ok()
+        );
+        assert!(
+            validate_task_url(
+                &client.origin.parsed,
+                "http://example.test/tasks/status",
+                "status_url"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn submitted_task_url_scheme_compatibility_is_https_only() {
+        let client = MineruApiClient::new("http://example.test/api").unwrap();
+        let value = "http://EXAMPLE.test:80/arbitrary/path?x=1#fragment";
+        assert_eq!(
+            canonicalize_submitted_task_url(&client.origin, value, "status_url").unwrap(),
+            value
+        );
+        assert!(
+            canonicalize_submitted_task_url(
+                &client.origin,
+                "https://example.test/status",
+                "status_url"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn submitted_https_upgrade_matches_canonical_request_port() {
+        for (base, returned) in [
+            ("https://example.test", "http://example.test/status"),
+            ("https://example.test:443", "http://example.test/status"),
+            ("https://example.test:0443", "http://example.test/status"),
+            ("https://example.test:", "http://example.test/status"),
+            (
+                "https://example.test:8443",
+                "http://example.test:8443/status",
+            ),
+            (
+                "https://example.test:08443",
+                "http://example.test:8443/status",
+            ),
+            ("https://example.test:80", "http://example.test:80/status"),
+            ("https://[2001:db8::1]", "http://[2001:db8::1]/status"),
+            ("https://[2001:db8::1]:443", "http://[2001:db8::1]/status"),
+            ("https://[2001:db8::1]:0443", "http://[2001:db8::1]/status"),
+            ("https://[2001:db8::1]:", "http://[2001:db8::1]/status"),
+            (
+                "https://[2001:db8::1]:8443",
+                "http://[2001:db8::1]:8443/status",
+            ),
+            (
+                "https://[2001:db8::1]:08443",
+                "http://[2001:db8::1]:8443/status",
+            ),
+        ] {
+            let client = MineruApiClient::new(base).unwrap();
+            let upgraded =
+                canonicalize_submitted_task_url(&client.origin, returned, "status_url").unwrap();
+            assert_eq!(upgraded, returned.replacen("http://", "https://", 1));
+            assert!(same_origin(
+                &client.origin.parsed,
+                &url::Url::parse(&upgraded).unwrap()
+            ));
+            assert!(validate_task_url(&client.origin.parsed, &upgraded, "status_url").is_ok());
+            assert!(
+                validate_task_url(&client.origin.parsed, returned, "status_url").is_err(),
+                "direct validation unexpectedly accepted {base} -> {returned}"
+            );
+        }
+
+        for base in [
+            "https://example.test",
+            "https://example.test:443",
+            "https://example.test:0443",
+            "https://example.test:",
+        ] {
+            let client = MineruApiClient::new(base).unwrap();
+            for returned in [
+                "http://example.test:443/status",
+                "http://example.test:0443/status",
+                "http://example.test:80/status",
+                "http://example.test:/status",
+            ] {
+                assert!(
+                    canonicalize_submitted_task_url(&client.origin, returned, "status_url")
+                        .is_err(),
+                    "unexpectedly accepted {base} -> {returned}"
+                );
+            }
+        }
+        for (base, returned) in [
+            ("https://example.test:8443", "http://example.test/status"),
+            (
+                "https://example.test:8443",
+                "http://example.test:08443/status",
+            ),
+            (
+                "https://example.test:8443",
+                "http://example.test:8444/status",
+            ),
+            ("https://example.test:8443", "http://example.test:/status"),
+            ("https://example.test", "http://example.test:8443/status"),
+            ("https://[2001:db8::1]:8443", "http://[2001:db8::1]/status"),
+            (
+                "https://[2001:db8::1]:8443",
+                "http://[2001:db8::1]:08443/status",
+            ),
+        ] {
+            let client = MineruApiClient::new(base).unwrap();
+            assert!(
+                canonicalize_submitted_task_url(&client.origin, returned, "status_url").is_err(),
+                "unexpectedly accepted {base} -> {returned}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_and_configured_urls_reject_userinfo_query_and_fragment() {
+        let client = MineruApiClient::new("https://example.test/api/prefix").unwrap();
+        for value in [
+            "https://@example.test/status",
+            "http://@example.test/status",
+            "http://user@example.test/status",
+            "http://user:password@example.test/status",
+        ] {
+            let error =
+                canonicalize_submitted_task_url(&client.origin, value, "status_url").unwrap_err();
+            assert_eq!(error, invalid_task_url("status_url"));
+            assert!(!error.contains(value));
+        }
+        for base in [
+            "https://@example.test/api",
+            "https://user@example.test/api",
+            "https://user:password@example.test/api",
+            "https://example.test/api?query=1",
+            "https://example.test/api#fragment",
+        ] {
+            assert_eq!(
+                MineruApiClient::new(base).err(),
+                Some("invalid API URL".into()),
+                "unexpectedly accepted {base}"
+            );
+        }
+    }
+
+    #[test]
+    fn submitted_cross_host_http_and_https_urls_are_rejected() {
+        let client = MineruApiClient::new("https://example.test/api").unwrap();
+        for value in ["http://other.test/status", "https://other.test/status"] {
+            assert_eq!(
+                canonicalize_submitted_task_url(&client.origin, value, "status_url"),
+                Err(invalid_task_url("status_url"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_task_urls_never_receive_follow_up_credentials_or_requests() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let attacker = server(
+            Router::new()
+                .route(
+                    "/status",
+                    get(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        async { Json(json!({"status":"completed"})) }
+                    }),
+                )
+                .route(
+                    "/result",
+                    get({
+                        let calls = calls.clone();
+                        move || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            async { ([("content-type", "application/zip")], "PK") }
+                        }
+                    }),
+                ),
+        )
+        .await;
+        let payload_attacker = attacker.clone();
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let base = server(Router::new().route(
+            "/tasks",
+            post(move |headers: HeaderMap| {
+                let attacker = payload_attacker.clone();
+                let call = submissions.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let base = format!("http://{}", headers["host"].to_str().unwrap());
+                    let attacker_url = if matches!(call, 1 | 3) {
+                        attacker.replacen("http://", "https://", 1)
+                    } else {
+                        attacker
+                    };
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(json!({
+                            "task_id":"id",
+                            "status_url":if call < 2 { format!("{attacker_url}/status") } else { format!("{base}/another-status-path") },
+                            "result_url":format!("{attacker_url}/result")
+                        })),
+                    )
+                }
+            }),
+        ))
+        .await;
+        let client = MineruApiClient::new(&base).unwrap();
+        assert_eq!(
+            client.submit(&RemoteOptions::default(), &[]).await,
+            Err(
+                "invalid submission payload: status_url must be an absolute same-origin URL".into()
+            )
+        );
+        assert_eq!(
+            client.submit(&RemoteOptions::default(), &[]).await,
+            Err(
+                "invalid submission payload: status_url must be an absolute same-origin URL".into()
+            )
+        );
+        assert_eq!(
+            client.submit(&RemoteOptions::default(), &[]).await,
+            Err(
+                "invalid submission payload: result_url must be an absolute same-origin URL".into()
+            )
+        );
+        assert_eq!(
+            client.submit(&RemoteOptions::default(), &[]).await,
+            Err(
+                "invalid submission payload: result_url must be an absolute same-origin URL".into()
+            )
+        );
+        let env = RemoteEnv {
+            max_concurrent_requests: 1,
+            result_timeout_seconds: 1.,
+            download_timeout_seconds: 1.,
+        };
+        assert!(
+            client
+                .poll(&format!("{attacker}/status"), env, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .download_result_zip(
+                    &format!("{attacker}/result"),
+                    "task",
+                    env,
+                    ArchiveLimits::default()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
     async fn submit_normalizes_optional_http_fields() {
@@ -550,11 +1030,12 @@ mod tests {
     async fn submit_whole_operation_timeout_covers_response_after_fast_upload() {
         let base = server(Router::new().route(
             "/tasks",
-            post(|| async {
+            post(|headers: HeaderMap| async move {
                 tokio::time::sleep(Duration::from_millis(50)).await;
+                let base = format!("http://{}", headers["host"].to_str().unwrap());
                 (
                     StatusCode::ACCEPTED,
-                    Json(json!({"task_id":"id", "status_url":"s", "result_url":"r"})),
+                    Json(json!({"task_id":"id", "status_url":format!("{base}/status"), "result_url":format!("{base}/result")})),
                 )
             }),
         ))
@@ -578,11 +1059,12 @@ mod tests {
     async fn submit_waits_past_acquisition_for_response_within_whole_operation_deadline() {
         let base = server(Router::new().route(
             "/tasks",
-            post(|| async {
+            post(|headers: HeaderMap| async move {
                 tokio::time::sleep(Duration::from_millis(15)).await;
+                let base = format!("http://{}", headers["host"].to_str().unwrap());
                 (
                     StatusCode::ACCEPTED,
-                    Json(json!({"task_id":"id", "status_url":"s", "result_url":"r"})),
+                    Json(json!({"task_id":"id", "status_url":format!("{base}/status"), "result_url":format!("{base}/result")})),
                 )
             }),
         ))
@@ -815,6 +1297,137 @@ mod tests {
             Err("request connection failed".into())
         );
     }
+
+    #[tokio::test]
+    async fn redirects_reject_userinfo_and_https_downgrade_before_target_request() {
+        let userinfo_calls = Arc::new(AtomicUsize::new(0));
+        let observed = userinfo_calls.clone();
+        let base = server(
+            Router::new()
+                .route(
+                    "/health",
+                    get(|headers: HeaderMap| async move {
+                        Redirect::temporary(&format!(
+                            "http://user@{}/target",
+                            headers["host"].to_str().unwrap()
+                        ))
+                    }),
+                )
+                .route(
+                    "/target",
+                    get(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        async { StatusCode::NO_CONTENT }
+                    }),
+                ),
+        )
+        .await;
+        assert!(MineruApiClient::new(&base).unwrap().health().await.is_err());
+        assert_eq!(userinfo_calls.load(Ordering::SeqCst), 0);
+
+        let downgrade_calls = Arc::new(AtomicUsize::new(0));
+        let observed = downgrade_calls.clone();
+        let target = server(Router::new().route(
+            "/target",
+            get(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::NO_CONTENT }
+            }),
+        ))
+        .await;
+        let redirect_target = target.clone();
+        let source = server(Router::new().route(
+            "/start",
+            get(move || {
+                let redirect_target = redirect_target.clone();
+                async move { Redirect::temporary(&format!("{redirect_target}/target")) }
+            }),
+        ))
+        .await;
+        let https_origin = url::Url::parse(&target.replacen("http://", "https://", 1)).unwrap();
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(redirect_policy(https_origin))
+            .build()
+            .unwrap();
+        assert!(client.get(format!("{source}/start")).send().await.is_err());
+        assert_eq!(downgrade_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn shared_redirect_policy_blocks_cross_origin_before_following() {
+        async fn count(
+            axum::extract::State(calls): axum::extract::State<Arc<AtomicUsize>>,
+        ) -> StatusCode {
+            calls.fetch_add(1, Ordering::SeqCst);
+            StatusCode::NO_CONTENT
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let attacker = server(
+            Router::new()
+                .route("/health", get(count))
+                .route("/status", get(count))
+                .route("/result", get(count))
+                .with_state(calls.clone()),
+        )
+        .await;
+        let health_target = attacker.clone();
+        let status_target = attacker.clone();
+        let result_target = attacker.clone();
+        let base = server(
+            Router::new()
+                .route(
+                    "/health",
+                    get(move || {
+                        let target = format!("{health_target}/health");
+                        async move { Redirect::temporary(&target) }
+                    }),
+                )
+                .route(
+                    "/status",
+                    get(move || {
+                        let target = format!("{status_target}/status");
+                        async move { Redirect::temporary(&target) }
+                    }),
+                )
+                .route(
+                    "/result",
+                    get(move || {
+                        let target = format!("{result_target}/result");
+                        async move { Redirect::temporary(&target) }
+                    }),
+                ),
+        )
+        .await;
+        let client = MineruApiClient::new(&base).unwrap();
+        let health_error = client.health().await.unwrap_err();
+        assert_eq!(health_error, "request connection failed");
+        let env = RemoteEnv {
+            max_concurrent_requests: 1,
+            result_timeout_seconds: 1.,
+            download_timeout_seconds: 1.,
+        };
+        let status_error = client
+            .poll(&format!("{base}/status"), env, None)
+            .await
+            .unwrap_err();
+        assert_eq!(status_error, "task status request failed");
+        let result_error = client
+            .download_result_zip(
+                &format!("{base}/result"),
+                "task",
+                env,
+                ArchiveLimits::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(result_error, r#""task" result download failed"#);
+        for error in [health_error, status_error, result_error] {
+            assert!(!error.contains(&attacker));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
     #[tokio::test]
     async fn health_rejects_malformed_oversized_and_sanitized_bodies_and_times_out() {
         for body in ["token=secret not-json".to_owned(), "x".repeat(BODY_CAP + 1)] {
@@ -1012,17 +1625,18 @@ mod tests {
     #[tokio::test]
     async fn poll_connection_errors_and_deadline_expiration_are_preserved() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let refused = format!("http://{}/status", listener.local_addr().unwrap());
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let refused = format!("{base}/status");
         drop(listener);
-        let base = "http://127.0.0.1:1";
-        let client = MineruApiClient::with_timing(
-            base,
+        let mut client = MineruApiClient::with_timing(
+            &base,
             Timing {
                 acquisition: Duration::from_millis(50),
                 send: Duration::from_millis(50),
                 interval: Duration::from_millis(20),
             },
         );
+        client.client = Client::builder().no_proxy().build().unwrap();
         let started = tokio::time::Instant::now();
         assert_eq!(
             client
@@ -1050,7 +1664,7 @@ mod tests {
                 }),
             ))
             .await;
-            let client = MineruApiClient::with_timing(
+            let mut client = MineruApiClient::with_timing(
                 &base,
                 Timing {
                     acquisition: Duration::from_millis(5),
@@ -1058,6 +1672,7 @@ mod tests {
                     interval: Duration::from_millis(20),
                 },
             );
+            client.client = Client::builder().no_proxy().build().unwrap();
             assert_eq!(
                 client
                     .poll(
@@ -1091,6 +1706,10 @@ mod tests {
                     post(
                         |State(state): State<Arc<Mutex<Vec<(String, Vec<u8>)>>>>,
                          request: Request| async move {
+                            let base = format!(
+                                "http://{}",
+                                request.headers().get("host").unwrap().to_str().unwrap()
+                            );
                             let content_type = request
                                 .headers()
                                 .get("content-type")
@@ -1105,7 +1724,7 @@ mod tests {
                             state.lock().unwrap().push((content_type, body));
                             (
                                 StatusCode::ACCEPTED,
-                                Json(json!({"task_id":"","status_url":"","result_url":""})),
+                                Json(json!({"task_id":"","status_url":format!("{base}/status"),"result_url":format!("{base}/result")})),
                             )
                         },
                     ),

@@ -206,13 +206,25 @@ fn clean(value: String) -> String {
 fn format_event(event: ProgressEvent) -> (Severity, &'static str, String, Option<String>, bool) {
     use ProgressEvent::*;
     match event {
-        ServerStarted { address } => (
-            Severity::Info,
-            "server started",
-            clean(address),
-            None,
-            false,
-        ),
+        ServerStarted { address } => {
+            if address.parse::<std::net::SocketAddr>().is_ok() {
+                (
+                    Severity::Info,
+                    "server started",
+                    format!("http://{address}"),
+                    Some(format!("health=http://{address}/health")),
+                    false,
+                )
+            } else {
+                (
+                    Severity::Info,
+                    "server started",
+                    clean(address),
+                    None,
+                    false,
+                )
+            }
+        }
         ServerStopped => (
             Severity::Info,
             "server stopped",
@@ -379,5 +391,27 @@ mod command_tests {
             },
         });
         assert_eq!(&*buffer.0.lock().unwrap(), b"document started: doc\n");
+    }
+
+    #[test]
+    fn server_started_prints_copyable_ipv4_and_ipv6_urls() {
+        for (address, expected) in [
+            (
+                "127.0.0.1:8000",
+                "server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health\n",
+            ),
+            (
+                "[::1]:8000",
+                "server started: http://[::1]:8000: health=http://[::1]:8000/health\n",
+            ),
+        ] {
+            let buffer = Buffer::default();
+            EventSink::new(buffer.clone(), false, LogLevel::Info).event(
+                ProgressEvent::ServerStarted {
+                    address: address.into(),
+                },
+            );
+            assert_eq!(buffer.0.lock().unwrap().as_slice(), expected.as_bytes());
+        }
     }
 }

@@ -475,28 +475,24 @@ fn fix_inline_macro_spacing(value: &str) -> String {
 
 fn move_blank_underscores(value: &str) -> String {
     let inline = Regex::new(r"(?s)\\\((.*?)\\\)").expect("fixed inline math regex is valid");
+    let blank = Regex::new(r"_{3,}").expect("fixed blank regex is valid");
     inline
         .replace_all(value, |captures: &regex::Captures<'_>| {
             let inner = captures.get(1).expect("inline math has a body").as_str();
-            let bytes = inner.as_bytes();
-            let mut blanks = Vec::new();
-            let mut index = 0;
-            while index < bytes.len() {
-                if bytes[index] != b'_' {
-                    index += 1;
-                    continue;
-                }
-                let start = index;
-                while index < bytes.len() && bytes[index] == b'_' {
-                    index += 1;
-                }
-                if index - start >= 3
-                    && (start == 0 || bytes[start - 1].is_ascii_whitespace())
-                    && (index == bytes.len() || bytes[index].is_ascii_whitespace())
-                {
-                    blanks.push((start, index));
-                }
-            }
+            let blanks: Vec<_> = blank
+                .find_iter(inner)
+                .filter(|found| {
+                    inner[..found.start()]
+                        .chars()
+                        .next_back()
+                        .is_none_or(char::is_whitespace)
+                        && inner[found.end()..]
+                            .chars()
+                            .next()
+                            .is_none_or(char::is_whitespace)
+                })
+                .map(|found| (found.start(), found.end()))
+                .collect();
             if blanks.is_empty()
                 || inner[..blanks[0].0].trim().is_empty()
                 || inner[blanks.last().expect("nonempty blanks").1..]
@@ -840,6 +836,10 @@ mod tests {
         assert_eq!(
             clean_text(r"Keep \(\int\) intact."),
             r"Keep \(\int\) intact."
+        );
+        assert_eq!(
+            clean_text(r"中文😀 \(甲 ___ 乙🚀\) 结束"),
+            r"中文😀 \(甲\) ___ \(乙🚀\) 结束"
         );
     }
 

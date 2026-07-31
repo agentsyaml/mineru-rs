@@ -118,6 +118,126 @@ export MINERU_VL_API_KEY="<your-key>"
 
 直接模式下 `--method`、`--effort`、`--lang` 的非默认值会产生警告并被忽略。`--client-side-output-generation=true` 在 API 模式下会被拒绝。
 
+---
+
+## API 服务端
+
+`mineru-api` 与 `mineru-vlm-api` 是同一个服务的两个可执行名，行为完全一致。服务本身不做本地推理，它接收文档、调用外部 VLM 服务，再把结果归档返回。
+
+### 启动
+
+服务需要一个可用的 VLM 服务地址与模型，由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME`、`MINERU_VL_API_KEY` 提供：
+
+```sh
+export MINERU_VL_SERVER="https://<server>"
+export MINERU_VL_MODEL_NAME="<model-id>"
+export MINERU_VL_API_KEY='<your-key>'
+
+./target/release/mineru-api --port 8000
+```
+
+启动成功后 stderr 会输出可直接复制的服务地址与健康检查地址：
+
+```text
+server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
+```
+
+### 命令行参数
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--host <IP>` | `127.0.0.1` | 监听地址。非 loopback 地址需同时设置 `MINERU_API_PUBLIC_BIND_EXPOSED`，否则启动失败。 |
+| `--port <端口>` | `8000` | 监听端口。 |
+| `--output-root <目录>` | `./output` | 任务输出与临时文件根目录。 |
+| `--concurrency <n>` | 非 macOS `3`，macOS `1` | 同时处理的任务数。 |
+| `--shutdown-on-stdin-eof` | 关闭 | stdin 关闭时优雅退出，适合由父进程托管。 |
+
+`--output-root`、`--concurrency`、`--shutdown-on-stdin-eof` 覆盖对应环境变量；省略时保留环境变量值或上表默认值。显式传入 `--concurrency` 时 macOS 也不再强制为 1。
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `MINERU_API_OUTPUT_ROOT` | `./output` | 输出根目录。 |
+| `MINERU_API_MAX_CONCURRENT_REQUESTS` | 非 macOS `3`，macOS `1` | 并发任务数；非正值或非法值直接启动失败。 |
+| `MINERU_API_TASK_RETENTION_SECONDS` | `86400` | 终态任务记录保留时长。 |
+| `MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS` | `300` | 清理扫描间隔。 |
+| `MINERU_API_PUBLIC_BIND_EXPOSED` | 关闭 | 允许监听非 loopback 地址。 |
+| `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` | 关闭 | 公开监听时允许处理 POST 解析请求。 |
+| `MINERU_API_SHUTDOWN_ON_STDIN_EOF` | 关闭 | 等价于 `--shutdown-on-stdin-eof`。 |
+| `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
+| `MINERU_PDF_RENDER_THREADS` | `3` | 渲染 worker 数。 |
+| `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
+| `MINERU_FORMULA_ENABLE` | 开启 | 公式识别默认值。 |
+| `MINERU_TABLE_ENABLE` | 开启 | 表格识别默认值。 |
+
+布尔变量接受 `1`、`true`、`yes`、`on`（不区分大小写），其他值视为关闭。除并发外的非法数值会回落到默认值。
+
+### HTTP 接口
+
+`GET /health` 返回服务容量与在册任务数：
+
+```sh
+curl "http://127.0.0.1:8000/health"
+```
+
+```json
+{"status":"healthy","protocol_version":2,"max_concurrent_requests":3,"processing_window_size":64,"task_count":0}
+```
+
+异步模式：`POST /tasks` 提交后立即返回 `202` 与任务快照，再轮询状态、取回结果归档。
+
+```sh
+curl -X POST "http://127.0.0.1:8000/tasks" \
+  -F "files=@input.pdf" \
+  -F "backend=vlm-http-client"
+```
+
+```json
+{"task_id":"local-0","status":"pending","backend":"vlm-http-client","file_names":["input.pdf"],"queued_ahead":0,"status_url":"http://127.0.0.1:8000/tasks/local-0","result_url":"http://127.0.0.1:8000/tasks/local-0/result","message":"Task submitted successfully"}
+```
+
+```sh
+curl "http://127.0.0.1:8000/tasks/local-0"
+curl -o result.zip "http://127.0.0.1:8000/tasks/local-0/result"
+```
+
+状态为 `pending`、`processing`、`completed` 或 `failed`。结果未就绪时 `GET /tasks/{id}/result` 返回 `202`，任务失败返回 `409`，未知任务返回 `404`。
+
+同步模式：`POST /file_parse` 在同一请求内完成解析并直接流式返回结果归档，不产生可查询的任务记录。
+
+```sh
+curl -X POST "http://127.0.0.1:8000/file_parse" \
+  -F "files=@input.pdf" \
+  -F "backend=vlm-http-client" \
+  -o result.zip
+```
+
+选择建议：批量、长文档或需要进度可见性时用 `/tasks`；单个小文档、脚本内一次性调用用 `/file_parse`。
+
+表单接受 `files` 文件部分，以及 `lang_list`、`backend`、`effort`、`parse_method`、`formula_enable`、`table_enable`、`image_analysis`、`start_page_id`、`end_page_id`、`server_url` 和 `return_md`、`return_middle_json`、`return_model_output`、`return_content_list`、`return_images`、`return_original_file` 文本字段。字段重复、字段过多或取值非法都会被拒绝。
+
+常见状态码：
+
+| 状态码 | 含义 |
+| --- | --- |
+| `400` | multipart 非法、字段重复或过多、取值不受支持、请求 Host 非法，或公开监听下未启用解析。 |
+| `408` | 请求超出 deadline。 |
+| `413` | 请求体、文件或文本字段超过限制。 |
+| `422` | 文件类型不受支持或文件名非法。 |
+| `503` | 任务容量已满，或服务正在关闭。 |
+| `409` | 任务失败或 worker 异常终止。 |
+
+上传、排队与处理共用同一个请求 deadline，取自总解析超时（默认 24 小时），与 `MINERU_PDF_RENDER_TIMEOUT` 的单次渲染超时是两回事，服务端没有单独的环境变量可调。超时统一返回 `408` 并释放并发额度与临时目录，慢速上传不会长期占用 slot。
+
+### 安全
+
+- 默认只监听 loopback。绑定非 loopback 地址必须显式设置 `MINERU_API_PUBLIC_BIND_EXPOSED`；公开监听后还需 `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` 才会处理解析请求。
+- 服务**不提供认证，也不做任务所有权隔离**：任务 ID 为顺序的 `local-N`，任何能访问服务的一方都可读取任意任务状态与结果。公网部署必须置于带认证的反向代理之后。
+- 对内置的 `mineru --api-url https://...` 客户端，反向代理必须保留客户端实际发送的规范 `Host` authority：即使 `--api-url` 写有 `:443`、`:0443` 或空端口，URL/reqwest 也会省略 HTTPS 默认端口；非默认端口则规范为十进制，代理不得自行增删或改写该规范端口。后端因不存在可信代理边界而刻意忽略 `Forwarded` 和 `X-Forwarded-*`。仅在提交响应边界，若后端返回匹配该规范 authority 的 HTTP 任务链接，客户端才会在本地升级为 HTTPS 并重新执行严格同源校验；直接轮询/下载和重定向不使用此兼容规则，跨主机/端口、userinfo 和降级仍会 fail closed。若代理改写 `Host`/端口或公网路径前缀，此窄兼容规则不适用；这类部署需要外部 canonical base 配置，但目前不提供。
+- 请求级 `server_url` 覆盖不会携带服务端的 API key，也不会转发任何 `Authorization` 头。
+- 异步任务返回的 `status_url` / `result_url` 必须与所配置的 API 同源；重定向逐跳校验同源，异源目标不会发出请求。
+
 ## 输出
 
 成功时，指定目录包含：

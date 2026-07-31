@@ -48,6 +48,7 @@ const TEXT_TOTAL_CAP: usize = 256 * 1024;
 const RECORD_CAP: usize = 32;
 const RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
+const REQUEST_DEADLINE_EXPIRED: &str = "request deadline expired";
 
 #[derive(Clone)]
 struct App {
@@ -353,6 +354,7 @@ struct Record {
 struct JobInput {
     root: TempDir,
     _slot: OwnedSemaphorePermit,
+    deadline: Instant,
     stem: String,
     canonical_filename: String,
     kind: DocumentKind,
@@ -767,6 +769,10 @@ async fn submit(
     RequestAuthority(authority): RequestAuthority,
     form: Result<Multipart, MultipartRejection>,
 ) -> Response {
+    let Some(deadline) = Instant::now().checked_add(app.route.total_deadline) else {
+        rejected(&app.events, REQUEST_DEADLINE_EXPIRED);
+        return error(StatusCode::REQUEST_TIMEOUT, REQUEST_DEADLINE_EXPIRED);
+    };
     let mut form = match form {
         Ok(form) => form,
         Err(rejection) => {
@@ -779,7 +785,7 @@ async fn submit(
         rejected(&app.events, "task capacity is full");
         return error(StatusCode::SERVICE_UNAVAILABLE, "task capacity is full");
     };
-    let parsed = parse_form(&mut form, &app.output_root, app.limits, slot).await;
+    let parsed = parse_form_until(&mut form, &app.output_root, app.limits, slot, deadline).await;
     match parsed {
         Ok(input) => {
             let sequence = app.ids.fetch_add(1, Ordering::Relaxed);
@@ -844,6 +850,10 @@ async fn file_parse(
     _: PublicPostPolicy,
     form: Result<Multipart, MultipartRejection>,
 ) -> Response {
+    let Some(deadline) = Instant::now().checked_add(app.route.total_deadline) else {
+        rejected(&app.events, REQUEST_DEADLINE_EXPIRED);
+        return error(StatusCode::REQUEST_TIMEOUT, REQUEST_DEADLINE_EXPIRED);
+    };
     let mut form = match form {
         Ok(form) => form,
         Err(rejection) => {
@@ -856,13 +866,14 @@ async fn file_parse(
         rejected(&app.events, "task capacity is full");
         return error(StatusCode::SERVICE_UNAVAILABLE, "task capacity is full");
     };
-    let input = match parse_form(&mut form, &app.output_root, app.limits, slot).await {
-        Ok(input) => Arc::new(input),
-        Err((code, message)) => {
-            rejected(&app.events, message);
-            return error(code, message);
-        }
-    };
+    let input =
+        match parse_form_until(&mut form, &app.output_root, app.limits, slot, deadline).await {
+            Ok(input) => Arc::new(input),
+            Err((code, message)) => {
+                rejected(&app.events, message);
+                return error(code, message);
+            }
+        };
     let (sender, receiver) = oneshot::channel();
     let label = input.stem.clone();
     let guard = SyncWorkerGuard::new(
@@ -893,11 +904,26 @@ async fn file_parse(
         Err(_) => error(StatusCode::CONFLICT, "task worker terminated unexpectedly"),
     }
 }
+async fn parse_form_until(
+    form: &mut Multipart,
+    output_root: &FsPath,
+    limits: RequestLimits,
+    slot: OwnedSemaphorePermit,
+    deadline: Instant,
+) -> Result<JobInput, (StatusCode, &'static str)> {
+    tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        parse_form(form, output_root, limits, slot, deadline),
+    )
+    .await
+    .map_err(|_| (StatusCode::REQUEST_TIMEOUT, REQUEST_DEADLINE_EXPIRED))?
+}
 async fn parse_form(
     form: &mut Multipart,
     output_root: &FsPath,
     limits: RequestLimits,
     slot: OwnedSemaphorePermit,
+    deadline: Instant,
 ) -> Result<JobInput, (StatusCode, &'static str)> {
     let root = TempDir::new_in(output_root).map_err(|_| {
         (
@@ -1088,6 +1114,7 @@ async fn parse_form(
     Ok(JobInput {
         root,
         _slot: slot,
+        deadline,
         canonical_filename: format!("{}.{}", stem, kind.suffix()),
         stem,
         kind,
@@ -1151,11 +1178,23 @@ async fn worker(
     label: String,
     events: Option<ProgressCallback>,
 ) {
-    let permit = match app.gate.clone().acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => {
+    let permit = match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(record.input.deadline),
+        app.gate.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
             finish_worker(record, label, events, async {
                 Err("task gate closed".to_owned())
+            })
+            .await;
+            return;
+        }
+        Err(_) => {
+            finish_worker(record, label, events, async {
+                Err(REQUEST_DEADLINE_EXPIRED.to_owned())
             })
             .await;
             return;
@@ -1168,9 +1207,7 @@ async fn worker(
         *record_state(&record) = TaskState::Processing {
             started_at: started_at.clone(),
         };
-        let deadline = Instant::now()
-            .checked_add(app.route.total_deadline)
-            .ok_or_else(|| "task deadline overflow".to_owned())?;
+        let deadline = record.input.deadline;
         Ok::<_, String>((
             run_task(&app, &record.input, deadline, task_work_lease).await?,
             started_at,
@@ -1185,24 +1222,35 @@ async fn sync_worker(app: WorkerContext, guard: SyncWorkerGuard) {
         .as_ref()
         .expect("armed guard owns input")
         .clone();
-    let permit = match app.gate.clone().acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => {
+    let permit = match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(input.deadline),
+        app.gate.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
             finish_sync_worker(guard, async { Err("task gate closed".to_owned()) }).await;
+            return;
+        }
+        Err(_) => {
+            finish_sync_worker(guard, async { Err(REQUEST_DEADLINE_EXPIRED.to_owned()) }).await;
             return;
         }
     };
     let root_lease = crate::TaskWorkLease::from_permit(permit);
     let task_work_lease = root_lease.clone();
     finish_sync_worker(guard, async move {
-        let deadline = Instant::now()
-            .checked_add(app.route.total_deadline)
-            .ok_or_else(|| "task deadline overflow".to_owned())?;
+        let deadline = input.deadline;
         match run_task(&app, &input, deadline, task_work_lease).await {
             Ok(result) => Ok(result),
             Err(error) => {
                 cleanup_input(&input).await;
-                Err(error)
+                if Instant::now() >= deadline {
+                    Err(REQUEST_DEADLINE_EXPIRED.to_owned())
+                } else {
+                    Err(error)
+                }
             }
         }
     })
@@ -1216,7 +1264,11 @@ where
     match std::panic::AssertUnwindSafe(future).catch_unwind().await {
         Ok(Ok(result)) => guard.success(result),
         Ok(Err(error)) => guard.failure((
-            StatusCode::CONFLICT,
+            if error == REQUEST_DEADLINE_EXPIRED {
+                StatusCode::REQUEST_TIMEOUT
+            } else {
+                StatusCode::CONFLICT
+            },
             crate::error::sanitize_vlm_error_bytes(error.as_bytes(), 4096),
         )),
         Err(_) => {
@@ -1578,6 +1630,10 @@ fn task_vlm_config(
     if let Some(url) = server_url.filter(|url| !url.is_empty()) {
         config.server_url = Some(url.parse().map_err(|_| ())?);
         config.invalid_server_url = false;
+        config.api_key = None;
+        config
+            .headers
+            .retain(|header| !header.name().eq_ignore_ascii_case("authorization"));
     }
     Ok(config)
 }
@@ -2882,6 +2938,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multipart_deadline_returns_408_and_releases_tempdir_and_slot() {
+        let mut route = OfficialPdfOptions::default();
+        route.total_deadline = Duration::from_millis(50);
+        let service = test_service_route(
+            limits(),
+            1,
+            1,
+            route,
+            VlmHttpConfig {
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let body = stream::once(async {
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"--stall\r\nContent-Disposition: form-data; name=\"files\"; filename=\"input.pdf\"\r\n\r\npartial",
+            ))
+        })
+        .chain(stream::pending());
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            reqwest::Client::new()
+                .post(format!("{}/tasks", service.base))
+                .header("content-type", "multipart/form-data; boundary=stall")
+                .body(reqwest::Body::wrap_stream(body))
+                .send(),
+        )
+        .await
+        .expect("stalled multipart exceeded route deadline")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(
+            response.text().await.unwrap(),
+            r#"{"detail":"request deadline expired"}"#
+        );
+        assert_eq!(std::fs::read_dir(&service.output).unwrap().count(), 0);
+
+        let response = post(&service, Form::new().text("backend", "vlm-http-client")).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(std::fs::read_dir(&service.output).unwrap().count(), 0);
+        service.stop().await;
+    }
+
+    #[tokio::test]
+    async fn sync_queue_uses_job_deadline_and_releases_input() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_owned();
+        let slots = Arc::new(Semaphore::new(1));
+        let input = Arc::new(JobInput {
+            root,
+            _slot: slots.clone().acquire_owned().await.unwrap(),
+            deadline: Instant::now() + Duration::from_millis(20),
+            stem: "input".into(),
+            canonical_filename: "input.pdf".into(),
+            kind: DocumentKind::Pdf,
+            upload: path.join("upload.pdf"),
+            options: Submit::default(),
+        });
+        let context = WorkerContext {
+            gate: Arc::new(Semaphore::new(0)),
+            route: OfficialPdfOptions::default(),
+            env_formula: None,
+            env_table: None,
+            office_workers: OfficeWorkers::new().unwrap(),
+            raster_workers: RasterWorkers::default(),
+            events: None,
+            test_http: None,
+        };
+        let (sender, receiver) = oneshot::channel();
+        sync_worker(
+            context,
+            SyncWorkerGuard::new(input, SyncCompletion::new(sender)),
+        )
+        .await;
+        assert!(matches!(
+            receiver.await.unwrap(),
+            Err((StatusCode::REQUEST_TIMEOUT, message)) if message == REQUEST_DEADLINE_EXPIRED
+        ));
+        assert!(!path.exists());
+        assert!(slots.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
     async fn malformed_pdf_fails_asynchronously_before_model_or_publication() {
         let model = mock(false, false).await;
         let service = test_service(pdf_limits(), 1).await;
@@ -3632,6 +3773,7 @@ mod tests {
                 kind: DocumentKind::Pdf,
                 options: Submit::default(),
                 _slot: slot.acquire_owned().await.unwrap(),
+                deadline: far_deadline(),
                 root,
             },
             state: Mutex::new(TaskState::Pending),
@@ -3919,6 +4061,7 @@ mod tests {
             keepalive: Some(Arc::new(JobInput {
                 root,
                 _slot: slots.clone().acquire_owned().await.unwrap(),
+                deadline: far_deadline(),
                 stem: "input".into(),
                 canonical_filename: "input.pdf".into(),
                 kind: DocumentKind::Pdf,
@@ -4020,6 +4163,7 @@ mod tests {
         let input = Arc::new(JobInput {
             root,
             _slot: slots.clone().acquire_owned().await.unwrap(),
+            deadline: far_deadline(),
             stem: "input".into(),
             canonical_filename: "input.pdf".into(),
             kind: DocumentKind::Pdf,
@@ -4044,6 +4188,7 @@ mod tests {
         let input = Arc::new(JobInput {
             root,
             _slot: slots.clone().acquire_owned().await.unwrap(),
+            deadline: far_deadline(),
             stem: "input".into(),
             canonical_filename: "input.pdf".into(),
             kind: DocumentKind::Pdf,
@@ -4094,6 +4239,7 @@ mod tests {
         let input = Arc::new(JobInput {
             root,
             _slot: slots.clone().acquire_owned().await.unwrap(),
+            deadline: far_deadline(),
             stem: "input".into(),
             canonical_filename: "input.pdf".into(),
             kind: DocumentKind::Pdf,
@@ -4124,6 +4270,7 @@ mod tests {
         let input = Arc::new(JobInput {
             root,
             _slot: slots.clone().acquire_owned().await.unwrap(),
+            deadline: far_deadline(),
             stem: "input".into(),
             canonical_filename: "input.pdf".into(),
             kind: DocumentKind::Pdf,
@@ -4157,6 +4304,7 @@ mod tests {
             let input = Arc::new(JobInput {
                 root,
                 _slot: slots.clone().acquire_owned().await.unwrap(),
+                deadline: far_deadline(),
                 stem: "input".into(),
                 canonical_filename: "input.pdf".into(),
                 kind: DocumentKind::Pdf,
@@ -4366,6 +4514,7 @@ mod tests {
         let input = Arc::new(JobInput {
             root,
             _slot: slots.clone().acquire_owned().await.unwrap(),
+            deadline: far_deadline(),
             stem: "input".into(),
             canonical_filename: "input.pdf".into(),
             kind: DocumentKind::Pdf,
@@ -4523,7 +4672,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "full VLM API lifecycle integration e2e"]
-    async fn deadline_excludes_queue_wait_and_bounds_connect() {
+    async fn deadline_includes_queue_wait_and_bounds_connect() {
         let deadline = Duration::from_secs(4);
         let mut route = OfficialPdfOptions::default();
         route.total_deadline = deadline;
@@ -4566,9 +4715,10 @@ mod tests {
         .unwrap();
         wait_status(first["status_url"].as_str().unwrap(), "failed").await;
         assert!(second_at.elapsed() >= deadline.saturating_sub(Duration::from_millis(400)));
+        wait_status(second["status_url"].as_str().unwrap(), "failed").await;
+        assert!(second_at.elapsed() < deadline + Duration::from_secs(2));
         model.state.block.store(false, Ordering::SeqCst);
         model.state.release.notify_waiters();
-        wait_status(second["status_url"].as_str().unwrap(), "completed").await;
         assert!(std::fs::read_dir(&service.output).unwrap().any(|entry| {
             let path = entry.unwrap().path();
             !path.join("result.zip").exists()
@@ -4855,17 +5005,72 @@ mod tests {
     }
 
     #[test]
-    fn task_server_url_overrides_invalid_default() {
+    fn task_server_url_overrides_invalid_default_without_inherited_credentials() {
         let config = VlmHttpConfig {
             invalid_server_url: true,
+            api_key: Some("api-key-secret".into()),
+            headers: vec![
+                crate::VlmHeader::new("Authorization", "Bearer header-secret").unwrap(),
+                crate::VlmHeader::new("X-Trace", "kept").unwrap(),
+                crate::VlmHeader::new("AUTHORIZATION", "Basic second-secret").unwrap(),
+            ],
             ..Default::default()
         };
         let config = task_vlm_config(config, Some("http://127.0.0.1:8000")).unwrap();
         assert!(!config.invalid_server_url);
+        assert_eq!(config.authorization(), None);
+        assert_eq!(config.api_key, None);
+        assert_eq!(config.headers.len(), 1);
+        assert_eq!(config.headers[0].name(), "X-Trace");
+        assert_eq!(config.headers[0].value(), "kept");
         assert_eq!(
             config.server_url.unwrap().as_str(),
             "http://127.0.0.1:8000/"
         );
+    }
+
+    #[tokio::test]
+    async fn task_server_override_sends_non_auth_headers_but_no_credentials() {
+        let seen = Arc::new(Mutex::new(None));
+        let captured = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/v1/models",
+                    get(move |headers: axum::http::HeaderMap| {
+                        *captured.lock().unwrap() = Some(headers);
+                        async { Json(json!({"data":[{"id":"mock"}]})) }
+                    }),
+                ),
+            )
+            .into_future(),
+        );
+        let config = task_vlm_config(
+            VlmHttpConfig {
+                api_key: Some("api-key-secret".into()),
+                headers: vec![
+                    crate::VlmHeader::new("Authorization", "Bearer header-secret").unwrap(),
+                    crate::VlmHeader::new("X-Trace", "kept").unwrap(),
+                ],
+                ..Default::default()
+            },
+            Some(&url),
+        )
+        .unwrap();
+        MinerUVlmClient::connect_for_task(
+            config,
+            MinerUVlmConfig::default(),
+            crate::TaskWorkLease::default(),
+        )
+        .await
+        .unwrap();
+        let headers = seen.lock().unwrap().take().unwrap();
+        assert!(headers.get(header::AUTHORIZATION).is_none());
+        assert_eq!(headers["x-trace"], "kept");
+        server.abort();
     }
 
     #[tokio::test]

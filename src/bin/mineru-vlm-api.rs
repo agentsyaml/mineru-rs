@@ -19,6 +19,12 @@ struct Args {
     host: IpAddr,
     #[arg(long, default_value_t = 8000)]
     port: u16,
+    #[arg(long)]
+    output_root: Option<PathBuf>,
+    #[arg(long)]
+    concurrency: Option<usize>,
+    #[arg(long)]
+    shutdown_on_stdin_eof: bool,
 }
 
 fn main() -> ExitCode {
@@ -33,7 +39,9 @@ fn main() -> ExitCode {
     let is_tty = stderr().is_terminal();
     let sink = Arc::new(EventSink::new(stderr(), is_tty, level));
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let env = snapshot_startup_env(cfg!(target_os = "macos"), |name| std::env::var_os(name))?;
+        let env = startup_config(&args, cfg!(target_os = "macos"), |name| {
+            std::env::var_os(name)
+        })?;
         if !args.host.is_loopback() && !env.public_bind_exposed {
             return Err("--host must be a loopback IP address".into());
         }
@@ -211,6 +219,34 @@ fn snapshot_startup_env(
     })
 }
 
+fn startup_config(
+    args: &Args,
+    darwin: bool,
+    mut lookup: impl FnMut(&str) -> Option<OsString>,
+) -> Result<StartupEnv, String> {
+    let cli_concurrency = args.concurrency;
+    let mut env = snapshot_startup_env(darwin && cli_concurrency.is_none(), |name| {
+        if name == "MINERU_API_MAX_CONCURRENT_REQUESTS" && cli_concurrency.is_some() {
+            None
+        } else {
+            lookup(name)
+        }
+    })?;
+    if let Some(output_root) = &args.output_root {
+        env.output_root = output_root.clone();
+    }
+    if let Some(concurrency) = cli_concurrency {
+        if concurrency == 0 {
+            return Err("concurrency must be positive".into());
+        }
+        env.concurrency = concurrency;
+    }
+    if args.shutdown_on_stdin_eof {
+        env.shutdown_on_stdin_eof = true;
+    }
+    Ok(env)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +258,60 @@ mod tests {
             .map(|&(k, v)| (k, OsString::from(v)))
             .collect();
         snapshot_startup_env(false, |name| values.get(name).cloned()).unwrap()
+    }
+
+    fn args(values: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("mineru-vlm-api").chain(values.iter().copied()))
+            .unwrap()
+    }
+
+    #[test]
+    fn cli_service_values_override_env_and_omissions_preserve_it() {
+        let values: HashMap<_, _> = [
+            ("MINERU_API_OUTPUT_ROOT", OsString::from("env-output")),
+            (
+                "MINERU_API_MAX_CONCURRENT_REQUESTS",
+                OsString::from("invalid-but-overridden"),
+            ),
+            ("MINERU_API_SHUTDOWN_ON_STDIN_EOF", OsString::from("false")),
+        ]
+        .into_iter()
+        .collect();
+        let cli = args(&[
+            "--output-root",
+            "cli-output",
+            "--concurrency",
+            "7",
+            "--shutdown-on-stdin-eof",
+        ]);
+        let configured = startup_config(&cli, true, |name| values.get(name).cloned()).unwrap();
+        assert_eq!(configured.output_root, PathBuf::from("cli-output"));
+        assert_eq!(configured.concurrency, 7);
+        assert!(configured.shutdown_on_stdin_eof);
+
+        let values: HashMap<_, _> = [
+            ("MINERU_API_OUTPUT_ROOT", OsString::from("env-output")),
+            ("MINERU_API_MAX_CONCURRENT_REQUESTS", OsString::from("5")),
+            ("MINERU_API_SHUTDOWN_ON_STDIN_EOF", OsString::from("true")),
+        ]
+        .into_iter()
+        .collect();
+        let configured =
+            startup_config(&args(&[]), false, |name| values.get(name).cloned()).unwrap();
+        assert_eq!(configured.output_root, PathBuf::from("env-output"));
+        assert_eq!(configured.concurrency, 5);
+        assert!(configured.shutdown_on_stdin_eof);
+    }
+
+    #[test]
+    fn concurrency_zero_rejected_at_startup_config() {
+        let cli = args(&["--concurrency", "0"]);
+        assert!(startup_config(&cli, false, |_| None).is_err());
+        let cli = args(&["--concurrency", "7"]);
+        assert_eq!(
+            startup_config(&cli, false, |_| None).unwrap().concurrency,
+            7
+        );
     }
 
     #[test]

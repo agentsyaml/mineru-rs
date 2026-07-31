@@ -52,6 +52,12 @@ Wheels support CPython 3.9 and newer:
 pip install mineru-rs
 ```
 
+The wheel installs two equivalent console commands, `mineru` and `mineru-rs`,
+both entering `mineru_rs._cli:main`. The `mineru-rs` name makes
+`uvx mineru-rs --help` work without a local checkout. Prefer `mineru-rs` when
+the upstream Python `mineru` package is also installed, since both provide a
+`mineru` entry point and the one earlier on `PATH` wins.
+
 ```python
 import mineru_rs
 
@@ -69,6 +75,11 @@ PyPy.
 ```sh
 npm install @alexsun-top/mineru
 ```
+
+The root package installs two equivalent binaries, `mineru` and `mineru-rs`,
+both pointing at `bin/mineru.js`, so `node_modules/.bin/mineru-rs` is available
+after install. The six platform packages intentionally ship no binary. Prefer
+`mineru-rs` if another `mineru` command is already on `PATH`.
 
 ```js
 const mineru = require('@alexsun-top/mineru')

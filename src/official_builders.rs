@@ -206,6 +206,7 @@ fn validate_page(page: &OfficialBuildPage, previous_index: Option<usize>) -> Vlm
 
 fn crop(
     page: &OfficialBuildPage,
+    page_rgb_md5: &md5::Digest,
     tag: &str,
     kind: AssetKind,
     point: [i32; 4],
@@ -231,7 +232,7 @@ fn crop(
     let seed = format!(
         "{}/{:X}_{}_{}_{}_{}_{}",
         tag.to_ascii_lowercase(),
-        md5::compute(page.rgb.as_raw()),
+        page_rgb_md5,
         page.slice_page_idx,
         point[0],
         point[1],
@@ -779,6 +780,7 @@ fn code_content(content: &str) -> String {
 
 fn raw_block(
     page: &OfficialBuildPage,
+    page_rgb_md5: Option<&md5::Digest>,
     raw: &ModelBlock,
     index: usize,
     assets: &mut BTreeMap<String, Asset>,
@@ -864,6 +866,7 @@ fn raw_block(
             }];
             block.image_path = Some(crop(
                 page,
+                page_rgb_md5.expect("visual page has an RGB digest"),
                 "table",
                 AssetKind::Table,
                 bbox,
@@ -889,6 +892,7 @@ fn raw_block(
             }];
             block.image_path = Some(crop(
                 page,
+                page_rgb_md5.expect("visual page has an RGB digest"),
                 "image",
                 AssetKind::Image,
                 bbox,
@@ -907,6 +911,7 @@ fn raw_block(
             }];
             block.image_path = Some(crop(
                 page,
+                page_rgb_md5.expect("visual page has an RGB digest"),
                 "chart",
                 AssetKind::Chart,
                 bbox,
@@ -929,6 +934,7 @@ fn raw_block(
             }];
             block.image_path = Some(crop(
                 page,
+                page_rgb_md5.expect("visual page has an RGB digest"),
                 "interline_equation",
                 AssetKind::Equation,
                 bbox,
@@ -3455,11 +3461,30 @@ fn compose_page(
     assets: &mut BTreeMap<String, Asset>,
     max_asset_bytes: usize,
 ) -> VlmResult<(Vec<Node>, Vec<Block>)> {
+    let page_rgb_md5 = page
+        .snapshot
+        .iter()
+        .any(|raw| {
+            matches!(
+                raw.block_type.as_str(),
+                "table" | "image" | "image_block" | "chart" | "equation"
+            )
+        })
+        .then(|| md5::compute(page.rgb.as_raw()));
     let mut blocks: Vec<Block> = page
         .snapshot
         .iter()
         .enumerate()
-        .map(|(index, raw)| raw_block(page, raw, index, assets, max_asset_bytes))
+        .map(|(index, raw)| {
+            raw_block(
+                page,
+                page_rgb_md5.as_ref(),
+                raw,
+                index,
+                assets,
+                max_asset_bytes,
+            )
+        })
         .collect::<VlmResult<_>>()?;
     caption_fallbacks(&mut blocks);
     let discarded = blocks
@@ -4093,7 +4118,7 @@ mod tests {
     }
 
     #[test]
-    fn crop_seeds_are_lowercase_for_every_visual_kind() {
+    fn multiple_visual_crops_keep_deterministic_paths_for_every_kind() {
         let image = RgbImage::from_pixel(100, 100, image::Rgb([3, 4, 5]));
         let built = build_official_artifacts(
             vec![OfficialBuildPage {
@@ -4114,6 +4139,19 @@ mod tests {
             true,
         )
         .unwrap();
+        assert_eq!(
+            built
+                .assets
+                .iter()
+                .map(|asset| asset.relative_path.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "images/0ca5e31131400f1e4425edfec914535f4c2d3311a836541ba90edc2eca5dc596.jpg",
+                "images/16e03126a13d642b4105251f738c6166f7816ff4ad04b351fadd3db96092ec9e.jpg",
+                "images/32490c689287b942bd7b439c0aae5943d94461adc294fdc7f6c8b6616077369c.jpg",
+                "images/670f4a507f6a391856b75f7ef99759233776301558d86e089fd8e6617864e3b3.jpg",
+            ]
+        );
         for (tag, bbox) in [
             ("image", [10, 10, 20, 20]),
             ("table", [30, 10, 40, 20]),

@@ -145,14 +145,28 @@ cargo +1.89.0 package --locked -p mineru --list
 cargo +1.89.0 publish --locked -p mineru --dry-run
 
 python3.9 -m venv /tmp/mineru-release-venv
-/tmp/mineru-release-venv/bin/pip install maturin pytest
+/tmp/mineru-release-venv/bin/pip install maturin
 /tmp/mineru-release-venv/bin/maturin build --release --locked --manifest-path bindings/python/Cargo.toml
 /tmp/mineru-release-venv/bin/pip install --force-reinstall target/wheels/mineru_rs-*.whl
-/tmp/mineru-release-venv/bin/pytest bindings/python/tests
+/tmp/mineru-release-venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
 
-(cd bindings/node && npm ci && npm run build && npm test)
+(cd bindings/node && npm ci && npm run build)
+# Stage the current-target addon and mineru-office-convert exactly as in CI's
+# node-binding job, install that package under node_modules, then run:
+(cd bindings/node && npm test)
+
+python3 .github/scripts/verify_release.py self-test
+python3 .github/scripts/attach_release_assets.py self-test
+
+/tmp/mineru-release-venv/bin/mineru --help
+/tmp/mineru-release-venv/bin/mineru-rs --help
+(cd bindings/node && ./node_modules/.bin/mineru --help && ./node_modules/.bin/mineru-rs --help)
 git diff --check
 ```
+
+Both launcher names must work for each binding. The wheel installs `mineru` and
+`mineru-rs`; the npm root package installs the same two names, and the six npm
+platform packages install none.
 
 Inspect Cargo metadata to confirm the three packages are `mineru`,
 `mineru-python`, and `mineru-node`, the root library target is `mineru`, exactly
@@ -167,6 +181,25 @@ GitHub Release. The release workflow is triggered only by that published
 release. It builds and verifies everything before separate protected jobs
 publish crates.io, PyPI wheels, the six npm native packages, and finally the
 npm root package. Creating a tag alone does not publish anything.
+
+## Release asset attachment
+
+After every existing verification passes, `attach-assets` attaches the verified
+crate, all five wheels, all seven npm tarballs, and a `SHA256SUMS` file covering
+exactly those artifacts to the published GitHub Release. It re-runs the crate,
+wheel, and npm checks against the sealed artifacts before uploading anything.
+
+The job holds `contents: write` and nothing else. Uploads are bound to
+`github.event.release.id`, and the job fails unless that release's `tag_name`
+matches the tag the workflow verified. Attachment runs alongside the publishing
+jobs and does not change their dependencies or ordering.
+
+Re-running a release is idempotent: an asset whose name and SHA-256 already
+match is skipped, and a same-name asset with a different digest fails the job
+instead of being replaced. Nothing uses `--clobber`, and the job never modifies
+`latest`, any dist-tag, or the release body and metadata. `SHA256SUMS` is
+generated in a separate staging directory so the crate, wheel, and npm
+directories continue to match their exact expected payloads.
 
 This document specifies commands; it does not assert that bootstrap, preflight,
 trusted-publisher setup, or publication has been performed.

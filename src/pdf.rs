@@ -1,11 +1,21 @@
 use crate::{Error, Limits, PdfInput, Result, TaskWorkLease};
 use bytes::Bytes;
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{RenderSettings, hayro_interpret::InterpreterSettings, hayro_syntax::Pdf, render};
+use hayro::{
+    RenderSettings,
+    hayro_interpret::InterpreterSettings,
+    hayro_syntax::{
+        Pdf,
+        object::{Dict as HayroDict, Number, Object as HayroObject, ObjectIdentifier},
+    },
+    render,
+};
+use hayro_write::ExtractionQuery;
 use image::RgbImage;
 use lopdf::Document as LoPdf;
+use pdf_writer::Ref;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs::File,
     io::Read,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -13,6 +23,7 @@ use std::{
 };
 
 const SCALE: f32 = 200.0 / 72.0;
+const LOPDF_ENCRYPTED_WITHOUT_PASSWORD: &str = "PDF is encrypted and requires a password. Use Document::load_metadata_with_password() instead.";
 
 pub(crate) struct RenderedPage {
     pub index: usize,
@@ -27,6 +38,12 @@ pub(crate) struct ParsedPdf {
     pdf: Pdf,
     // lopdf's page tree is authoritative: Hayro may omit blank leaf pages.
     source_pages: usize,
+}
+
+pub(crate) struct SelectedPreview {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) page_indices: Vec<usize>,
+    pub(crate) user_units: Vec<Option<f32>>,
 }
 
 pub(crate) fn read_input(input: PdfInput, limits: &Limits) -> Result<Bytes> {
@@ -62,12 +79,15 @@ pub(crate) async fn parse(
 
 pub(crate) fn parse_document(bytes: impl Into<Bytes>, limits: &Limits) -> Result<Arc<ParsedPdf>> {
     let bytes = Arc::new(bytes.into());
-    let source = LoPdf::load_mem(bytes.as_ref().as_ref())
-        .map_err(|e| Error::Pdf(format!("unsupported or invalid PDF: {e}")))?;
-    if source.is_encrypted() {
-        return Err(Error::Pdf("encrypted PDFs are unsupported".into()));
-    }
-    let source_pages = source.get_pages().len();
+    let metadata = LoPdf::load_metadata_mem(bytes.as_ref().as_ref()).map_err(|e| match e {
+        lopdf::Error::InvalidPassword
+        | lopdf::Error::Decryption(_)
+        | lopdf::Error::Unimplemented(LOPDF_ENCRYPTED_WITHOUT_PASSWORD) => {
+            Error::Pdf("encrypted PDFs are unsupported".into())
+        }
+        _ => Error::Pdf(format!("unsupported or invalid PDF: {e}")),
+    })?;
+    let source_pages = metadata.page_count as usize;
     check_limit("pages", limits.max_pages as u64, source_pages as u64)?;
     let data: Arc<dyn AsRef<[u8]> + Send + Sync> = bytes.clone();
     let pdf = Pdf::new(data).map_err(|e| match e {
@@ -97,6 +117,133 @@ pub(crate) fn page_count(document: &ParsedPdf) -> usize {
 
 pub(crate) fn source_bytes(document: &ParsedPdf) -> Arc<Bytes> {
     Arc::clone(&document._bytes)
+}
+
+fn inherited_user_unit(page: &hayro::hayro_syntax::page::Page<'_>) -> Result<Option<f32>> {
+    let mut dict = page.raw().clone();
+    let mut seen = HashSet::<ObjectIdentifier>::new();
+    loop {
+        if let Some(id) = dict.obj_id()
+            && !seen.insert(id)
+        {
+            return Err(Error::Pdf("cyclic page parent".into()));
+        }
+        if dict.contains_key(b"UserUnit".as_slice()) {
+            let value = dict
+                .get::<Number>(b"UserUnit".as_slice())
+                .ok_or_else(|| Error::Pdf("invalid UserUnit".into()))?
+                .as_f32();
+            if !value.is_finite() || value <= 0.0 {
+                return Err(Error::Pdf("invalid UserUnit".into()));
+            }
+            return Ok(Some(value));
+        }
+        let parent_ref = dict
+            .get_ref(b"Parent".as_slice())
+            .map(ObjectIdentifier::from);
+        let parent = parent_ref
+            .and_then(|id| page.xref().get::<HayroDict<'_>>(id))
+            .or_else(|| dict.get::<HayroDict<'_>>(b"Parent".as_slice()));
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        if parent.obj_id().is_none()
+            && let Some(id) = parent_ref
+            && !seen.insert(id)
+        {
+            return Err(Error::Pdf("cyclic page parent".into()));
+        }
+        dict = parent;
+    }
+}
+
+fn validate_page_contents(page: &hayro::hayro_syntax::page::Page<'_>) -> Result<()> {
+    let dict = page.raw();
+    if !dict.contains_key(b"Contents".as_slice()) {
+        return Ok(());
+    }
+    match dict.get::<HayroObject<'_>>(b"Contents".as_slice()) {
+        Some(HayroObject::Stream(_)) => Ok(()),
+        Some(HayroObject::Array(streams)) => {
+            if streams
+                .iter::<HayroObject<'_>>()
+                .all(|stream| matches!(stream, HayroObject::Stream(_)))
+            {
+                Ok(())
+            } else {
+                Err(Error::Pdf(
+                    "page Contents array contains a non-stream".into(),
+                ))
+            }
+        }
+        _ => Err(Error::Pdf(
+            "page Contents must be a stream or stream array".into(),
+        )),
+    }
+}
+
+pub(crate) fn extract_selected_pages_for_preview(
+    document: &ParsedPdf,
+    page_indices: &[usize],
+) -> Result<SelectedPreview> {
+    let user_units = page_indices
+        .iter()
+        .map(|index| {
+            let page =
+                document.pdf.pages().get(*index).ok_or_else(|| {
+                    Error::Pdf(format!("preview page {index} is outside the PDF"))
+                })?;
+            validate_page_contents(page)?;
+            inherited_user_unit(page)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let count = i32::try_from(page_indices.len())
+        .map_err(|_| Error::Pdf("selected PDF page count is too large".into()))?;
+    let mut output = pdf_writer::Pdf::new();
+    let mut next_ref = Ref::new(1);
+    let catalog_id = next_ref.bump();
+    let queries = page_indices
+        .iter()
+        .copied()
+        .map(ExtractionQuery::new_page)
+        .collect::<Vec<_>>();
+    let extracted = hayro_write::extract(&document.pdf, Box::new(|| next_ref.bump()), &queries)
+        .map_err(|error| Error::Pdf(format!("cannot extract selected PDF: {error:?}")))?;
+    if extracted.root_refs.len() != page_indices.len() {
+        return Err(Error::Pdf(
+            "selected PDF extraction root count mismatch".into(),
+        ));
+    }
+    let roots = extracted
+        .root_refs
+        .into_iter()
+        .map(|root| {
+            root.map_err(|error| Error::Pdf(format!("cannot extract selected PDF: {error:?}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    output
+        .catalog(catalog_id)
+        .pages(extracted.page_tree_parent_ref);
+    output
+        .pages(extracted.page_tree_parent_ref)
+        .kids(roots)
+        .count(count);
+    output.extend(&extracted.chunk);
+    Ok(SelectedPreview {
+        bytes: output.finish(),
+        page_indices: page_indices.to_vec(),
+        user_units,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn page_stream_for_preview_test(document: &ParsedPdf, index: usize) -> Result<&[u8]> {
+    let page = document
+        .pdf
+        .pages()
+        .get(index)
+        .ok_or_else(|| Error::Pdf(format!("page {index} is outside the PDF")))?;
+    Ok(page.page_stream().unwrap_or(b""))
 }
 
 pub(crate) async fn render_window(
@@ -313,11 +460,161 @@ fn check_limit(resource: &'static str, limit: u64, actual: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SCALE, admitted_window, page_dimensions, parse_document, premultiplied_rgba_over_white,
-        read_input, source_bytes,
+        SCALE, admitted_window, extract_selected_pages_for_preview, page_dimensions,
+        parse_document, premultiplied_rgba_over_white, read_input, source_bytes,
     };
     use crate::{Limits, PageResult, PdfInput, preview};
     use bytes::Bytes;
+    use lopdf::{Dictionary, Document, Object, Stream, dictionary};
+
+    fn in_memory_pdf(actual_pages: usize, declared_pages: i64) -> Vec<u8> {
+        let mut document = Document::with_version("1.5");
+        let pages = document.new_object_id();
+        let mut kids = Vec::with_capacity(actual_pages);
+        for _ in 0..actual_pages {
+            let page = document.new_object_id();
+            let contents = document.add_object(Stream::new(Dictionary::new(), b"q\nQ\n".to_vec()));
+            document.objects.insert(
+                page,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages,
+                    "MediaBox" => vec![0.into(), 0.into(), 200.into(), 300.into()],
+                    "Resources" => Dictionary::new(),
+                    "Contents" => contents,
+                }),
+            );
+            kids.push(page.into());
+        }
+        document.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => declared_pages,
+            }),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn ordered_pdf() -> Vec<u8> {
+        let mut document = Document::with_version("1.7");
+        let pages = document.new_object_id();
+        let mut kids = Vec::new();
+        for index in 0..3 {
+            let page = document.new_object_id();
+            let contents = document.add_object(Stream::new(
+                Dictionary::new(),
+                format!("BT /F1 12 Tf 10 10 Td (PAGE_{index}) Tj ET").into_bytes(),
+            ));
+            document.objects.insert(
+                page,
+                dictionary! {
+                    "Type" => "Page", "Parent" => pages, "Contents" => contents,
+                    "MediaBox" => vec![0.into(), 0.into(), 200.into(), 300.into()],
+                    "UserUnit" => index as f32 + 1.0,
+                }
+                .into(),
+            );
+            kids.push(page.into());
+        }
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => kids, "Count" => 3,
+                "Resources" => dictionary! {
+                    "Font" => dictionary! {
+                        "F1" => dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+                    },
+                },
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn metadata_page_count_enforces_page_limit_before_rendering() {
+        let limits = Limits {
+            max_pages: 1,
+            ..Limits::default()
+        };
+        let error = match parse_document(in_memory_pdf(2, 2), &limits) {
+            Err(error) => error,
+            Ok(_) => panic!("page limit should reject metadata count"),
+        };
+        assert!(matches!(
+            error,
+            crate::Error::LimitExceeded {
+                resource: "pages",
+                limit: 1,
+                actual: 2,
+            }
+        ));
+    }
+
+    #[test]
+    fn declared_page_count_mismatch_is_rejected() {
+        let error = match parse_document(in_memory_pdf(1, 2), &Limits::default()) {
+            Err(error) => error,
+            Ok(_) => panic!("page count mismatch should be rejected"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("renderer/source page mapping mismatch")
+        );
+    }
+
+    #[test]
+    fn selected_preview_extraction_preserves_query_order_and_user_units() {
+        let document = parse_document(ordered_pdf(), &Limits::default()).unwrap();
+        let selected = extract_selected_pages_for_preview(&document, &[2, 0]).unwrap();
+        assert_eq!(selected.page_indices, vec![2, 0]);
+        assert_eq!(selected.user_units, vec![Some(3.0), Some(1.0)]);
+        let extracted = Document::load_mem(&selected.bytes).unwrap();
+        assert!(extracted.extract_text(&[1]).unwrap().contains("PAGE_2"));
+        assert!(extracted.extract_text(&[2]).unwrap().contains("PAGE_0"));
+    }
+
+    #[test]
+    fn encrypted_metadata_maps_to_the_project_error_before_extraction() {
+        let mut document = Document::load_mem(&in_memory_pdf(1, 1)).unwrap();
+        document.trailer.set(
+            "ID",
+            vec![
+                Object::String(vec![1; 16], lopdf::StringFormat::Literal),
+                Object::String(vec![2; 16], lopdf::StringFormat::Literal),
+            ],
+        );
+        let state = lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V1 {
+            document: &document,
+            owner_password: "owner",
+            user_password: "user",
+            permissions: lopdf::Permissions::default(),
+        })
+        .unwrap();
+        document.encrypt(&state).unwrap();
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+
+        let error = match parse_document(bytes, &Limits::default()) {
+            Err(error) => error,
+            Ok(_) => panic!("encrypted PDF should be rejected before selected extraction"),
+        };
+        assert!(matches!(
+            error,
+            crate::Error::Pdf(message) if message == "encrypted PDFs are unsupported"
+        ));
+    }
 
     #[test]
     fn premultiplied_alpha_is_composited_over_white() {

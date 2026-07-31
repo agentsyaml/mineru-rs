@@ -782,11 +782,15 @@ impl MinerUVlmPreprocessor {
     }
 }
 
+// ponytail: this fixed cap bounds derived official page memory; make it configurable only if profiling proves throughput needs it.
+const OFFICIAL_PAGE_CONCURRENCY: usize = 2;
+
 #[derive(Debug, Clone)]
 pub struct MinerUVlmClient {
     http: VlmHttpClient,
     preprocessor: MinerUVlmPreprocessor,
     layout_semaphore: Arc<Semaphore>,
+    official_page_semaphore: Arc<Semaphore>,
 }
 impl MinerUVlmClient {
     pub async fn parse_and_write_official_pdf(
@@ -899,6 +903,15 @@ impl MinerUVlmClient {
         encoded_budget: Arc<ByteBudget>,
         deadline: Instant,
     ) -> VlmResult<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)> {
+        let _page_permit = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.official_page_semaphore.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| VlmError::Timeout {
+            operation: "official PDF",
+        })?
+        .map_err(|_| protocol("official PDF", "page semaphore closed"))?;
         let preprocessor = self.preprocessor.clone();
         let layout_image = Arc::clone(&image);
         let max_pixels = self.http.max_decoded_pixels();
@@ -1141,11 +1154,15 @@ impl MinerUVlmClient {
         config: MinerUVlmConfig,
         task_work_lease: TaskWorkLease,
     ) -> VlmResult<Self> {
+        let official_page_semaphore = Arc::new(Semaphore::new(
+            http.max_concurrency.clamp(1, OFFICIAL_PAGE_CONCURRENCY),
+        ));
         let layout_semaphore = Arc::new(Semaphore::new(http.max_concurrency.max(1)));
         Ok(Self {
             http: VlmHttpClient::connect_for_task(http, task_work_lease).await?,
             preprocessor: MinerUVlmPreprocessor { config },
             layout_semaphore,
+            official_page_semaphore,
         })
     }
     pub(crate) fn task_work_lease(&self) -> TaskWorkLease {
@@ -1973,6 +1990,7 @@ mod tests {
     struct WindowState {
         first_two: Arc<Barrier>,
         release: Arc<Notify>,
+        third_layout: Arc<Notify>,
         active: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
         layouts: Arc<AtomicUsize>,
@@ -1980,6 +1998,13 @@ mod tests {
     }
 
     async fn window_client(state: WindowState) -> MinerUVlmClient {
+        window_client_with_concurrency(state, 2).await
+    }
+
+    async fn window_client_with_concurrency(
+        state: WindowState,
+        max_concurrency: usize,
+    ) -> MinerUVlmClient {
         let app = Router::new()
             .route("/v1/chat/completions", post(window_chat))
             .with_state(state);
@@ -1992,7 +2017,7 @@ mod tests {
                 model_name: Some("mock".into()),
                 skip_model_name_checking: true,
                 max_retries: 0,
-                max_concurrency: 2,
+                max_concurrency,
                 ..Default::default()
             },
             MinerUVlmConfig::default(),
@@ -2016,6 +2041,8 @@ mod tests {
                 let _ = released.as_mut().enable();
                 state.first_two.wait().await;
                 released.await;
+            } else if admission == 2 {
+                state.third_layout.notify_one();
             }
             let (left, right) = if let Some(priority) =
                 request.get("priority").and_then(serde_json::Value::as_i64)
@@ -2051,6 +2078,7 @@ mod tests {
             // Two handlers plus the test make admission deterministic.
             first_two: Arc::new(Barrier::new(3)),
             release: Arc::new(Notify::new()),
+            third_layout: Arc::new(Notify::new()),
             active: Arc::new(AtomicUsize::new(0)),
             peak: Arc::new(AtomicUsize::new(0)),
             layouts: Arc::new(AtomicUsize::new(0)),
@@ -2062,10 +2090,18 @@ mod tests {
     struct FailWindowState {
         entered: Arc<Barrier>,
         pending: Arc<Notify>,
+        later: Arc<Notify>,
         failures: Arc<AtomicUsize>,
     }
 
     async fn fail_window_client(state: FailWindowState) -> MinerUVlmClient {
+        fail_window_client_with_concurrency(state, 2).await
+    }
+
+    async fn fail_window_client_with_concurrency(
+        state: FailWindowState,
+        max_concurrency: usize,
+    ) -> MinerUVlmClient {
         let app = Router::new()
             .route("/v1/chat/completions", post(fail_window_chat))
             .with_state(state);
@@ -2078,7 +2114,7 @@ mod tests {
                 model_name: Some("mock".into()),
                 skip_model_name_checking: true,
                 max_retries: 0,
-                max_concurrency: 2,
+                max_concurrency,
                 ..Default::default()
             },
             MinerUVlmConfig::default(),
@@ -2091,12 +2127,17 @@ mod tests {
         State(state): State<FailWindowState>,
         Json(_request): Json<serde_json::Value>,
     ) -> axum::response::Response {
-        state.entered.wait().await;
-        if state.failures.fetch_add(1, Ordering::SeqCst) == 0 {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        let admission = state.failures.fetch_add(1, Ordering::SeqCst);
+        if admission < 2 {
+            state.entered.wait().await;
+            if admission == 0 {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            state.pending.notified().await;
+        } else {
+            state.later.notify_one();
         }
-        state.pending.notified().await;
-        Json(json!({"choices":[]})).into_response()
+        Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]})).into_response()
     }
 
     fn mock_state() -> MockState {
@@ -3103,10 +3144,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_window_uses_request_permits_and_keeps_page_order() {
+    async fn snapshot_window_caps_page_pipelines_and_keeps_page_order() {
         let state = window_state();
-        let client = window_client(state.clone()).await;
-        let owners = (0..3)
+        let client = window_client_with_concurrency(state.clone(), 8).await;
+        let owners = (0..5)
             .map(|n| Arc::new(RgbImage::from_pixel(8, 8, image::Rgb([n, 0, 0]))))
             .collect::<Vec<_>>();
         let pages = owners.iter().map(Arc::clone).collect::<Vec<_>>();
@@ -3136,23 +3177,75 @@ mod tests {
             .unwrap();
         assert_eq!(state.peak.load(Ordering::SeqCst), 2);
         assert_eq!(state.layouts.load(Ordering::SeqCst), 2);
+        assert!(
+            timeout(Duration::from_millis(100), state.third_layout.notified())
+                .await
+                .is_err()
+        );
         state.release.notify_waiters();
-        let pages = timeout(Duration::from_secs(2), task)
+        let pages = timeout(Duration::from_secs(5), task)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
         assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(state.layouts.load(Ordering::SeqCst), 5);
         assert_eq!(
             pages
                 .iter()
                 .map(|page| page.0[0].bbox.unwrap().left)
                 .collect::<Vec<_>>(),
-            vec![0.1, 0.2, 0.3]
+            vec![0.1, 0.2, 0.3, 0.4, 0.5]
         );
         assert_eq!(pages[0].0[0].content.as_deref(), Some("  raw semantic  "));
         assert_eq!(pages[0].1[0].content.as_deref(), Some("raw semantic"));
         assert!(owners.iter().all(|image| Arc::strong_count(image) == 1));
+    }
+
+    #[tokio::test]
+    async fn official_page_permit_acquisition_respects_deadline() {
+        let state = mock_state();
+        let client = mock_client(state.clone()).await;
+        let held = client
+            .official_page_semaphore
+            .clone()
+            .acquire_many_owned(OFFICIAL_PAGE_CONCURRENCY as u32)
+            .await
+            .unwrap();
+        assert_eq!(client.official_page_semaphore.available_permits(), 0);
+
+        let result = timeout(
+            Duration::from_secs(1),
+            client.official_two_step_snapshot_page_core(
+                Arc::new(RgbImage::new(8, 8)),
+                false,
+                true,
+                true,
+                4,
+                2,
+                2,
+                1 << 20,
+                1 << 20,
+                Arc::new(ByteBudget::new(1 << 20)),
+                Arc::new(ByteBudget::new(1 << 20)),
+                Instant::now() + Duration::from_millis(20),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            Err(VlmError::Timeout {
+                operation: "official PDF"
+            })
+        ));
+        assert_eq!(state.requests.load(Ordering::SeqCst), 0);
+        assert_eq!(client.official_page_semaphore.available_permits(), 0);
+        drop(held);
+        assert_eq!(
+            client.official_page_semaphore.available_permits(),
+            OFFICIAL_PAGE_CONCURRENCY
+        );
     }
 
     #[tokio::test]
@@ -3283,11 +3376,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_page_releases_pipeline_permit_for_later_page() {
+        let state = FailWindowState {
+            // Both initial handlers and the test cross together before one handler fails.
+            entered: Arc::new(Barrier::new(3)),
+            pending: Arc::new(Notify::new()),
+            later: Arc::new(Notify::new()),
+            failures: Arc::new(AtomicUsize::new(0)),
+        };
+        let client = fail_window_client_with_concurrency(state.clone(), 8).await;
+        let owners = (0..3)
+            .map(|n| Arc::new(RgbImage::from_pixel(8, 8, image::Rgb([n, 0, 0]))))
+            .collect::<Vec<_>>();
+        let pages = owners.iter().map(Arc::clone).collect::<Vec<_>>();
+        let task = tokio::spawn(async move {
+            let raw = Arc::new(ByteBudget::new(1 << 20));
+            let encoded = Arc::new(ByteBudget::new(1 << 20));
+            futures_util::future::join_all(pages.into_iter().map(|image| {
+                client.official_two_step_snapshot_page_core(
+                    image,
+                    false,
+                    true,
+                    true,
+                    4,
+                    2,
+                    2,
+                    1 << 20,
+                    1 << 20,
+                    raw.clone(),
+                    encoded.clone(),
+                    Instant::now() + Duration::from_secs(10),
+                )
+            }))
+            .await
+        });
+        timeout(Duration::from_secs(5), state.entered.wait())
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), state.later.notified())
+            .await
+            .unwrap();
+        state.pending.notify_one();
+        let results = timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(VlmError::Http { status: 500, .. })))
+                .count(),
+            1
+        );
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
+        assert!(owners.iter().all(|image| Arc::strong_count(image) == 1));
+    }
+
+    #[tokio::test]
     async fn snapshot_window_drops_pending_sibling_after_http_failure() {
         let state = FailWindowState {
             // Both handlers and the test cross together before one handler fails.
             entered: Arc::new(Barrier::new(3)),
             pending: Arc::new(Notify::new()),
+            later: Arc::new(Notify::new()),
             failures: Arc::new(AtomicUsize::new(0)),
         };
         let client = fail_window_client(state.clone()).await;
@@ -3310,15 +3461,15 @@ mod tests {
                     1 << 20,
                     1 << 20,
                     1 << 20,
-                    Instant::now() + Duration::from_secs(2),
+                    Instant::now() + Duration::from_secs(10),
                 )
                 .await
         });
-        timeout(Duration::from_secs(2), state.entered.wait())
+        timeout(Duration::from_secs(5), state.entered.wait())
             .await
             .unwrap();
         assert!(matches!(
-            timeout(Duration::from_secs(1), task)
+            timeout(Duration::from_secs(5), task)
                 .await
                 .unwrap()
                 .unwrap(),

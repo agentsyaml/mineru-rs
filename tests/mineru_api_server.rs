@@ -332,7 +332,9 @@ async fn aliases_help_health_cwd_and_eof() {
         assert_eq!(
             server.diagnostics().lines().collect::<Vec<_>>(),
             vec![
-                format!("server started: 127.0.0.1:{port}"),
+                format!(
+                    "server started: http://127.0.0.1:{port}: health=http://127.0.0.1:{port}/health"
+                ),
                 "server stopped: server".into(),
             ]
         );
@@ -566,7 +568,9 @@ async fn active_worker_drains_before_exit() {
     assert_eq!(
         events,
         vec![
-            format!("server started: 127.0.0.1:{port}"),
+            format!(
+                "server started: http://127.0.0.1:{port}: health=http://127.0.0.1:{port}/health"
+            ),
             "request accepted: local-1".into(),
             "document started: input".into(),
             "document prepared: input".into(),

@@ -561,17 +561,6 @@ async fn parse_and_write_to(
     if let Err(error) = deadline.check() {
         return Err(dispose_stage(stage, error).await);
     }
-    let source = match deadline
-        .blocking(&task_work_lease, move || {
-            deadline.check()?;
-            Ok(pdf::source_bytes(&parsed))
-        })
-        .await
-    {
-        Ok(Ok(source)) => source,
-        Ok(Err(error)) => return Err(dispose_stage(stage, error).await),
-        Err(error) => return Err(dispose_stage(stage, error).await),
-    };
     let preview_limits = limits.clone();
     let preview_stem = stem.clone();
     let formula_enable = options.formula_enable;
@@ -581,8 +570,16 @@ async fn parse_and_write_to(
             let result = (|| {
                 stage.finalize_document(formula_enable, table_enable, deadline.instant())?;
                 let preview_pages = stage.preview_pages()?;
-                let preview = preview::generate_until(
-                    source.as_ref(),
+                let preview_indexes = preview_pages
+                    .iter()
+                    .map(|page| page.page_index)
+                    .collect::<Vec<_>>();
+                deadline.check()?;
+                let selected = pdf::extract_selected_pages_for_preview(&parsed, &preview_indexes)
+                    .map_err(map)?;
+                deadline.check()?;
+                let preview = preview::generate_selected_until(
+                    selected,
                     &preview_pages,
                     &preview_stem,
                     &preview_limits,

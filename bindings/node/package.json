@@ -1,11 +1,12 @@
 {
   "name": "@alexsun-top/mineru",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Native Node.js helpers for MinerU Rust",
   "main": "api.js",
   "types": "api.d.ts",
   "bin": {
-    "mineru": "bin/mineru.js"
+    "mineru": "bin/mineru.js",
+    "mineru-rs": "bin/mineru.js"
   },
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -38,8 +39,8 @@
     ]
   },
   "scripts": {
-    "build": "napi build --release --platform --target aarch64-apple-darwin -- --locked",
-    "test": "node __test__/smoke.test.js"
+    "build": "napi build --release --platform -- --locked",
+    "test": "node __test__/command-aliases.test.js && node __test__/smoke.test.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.2.0"

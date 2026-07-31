@@ -53,6 +53,9 @@ TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 NPM_DEV_DEPENDENCIES = {"@napi-rs/cli": "^3.2.0"}
 PYPI_USER_AGENT = "mineru-rs-release-verifier/1"
+PYTHON_SCRIPTS = {"mineru": "mineru_rs._cli:main", "mineru-rs": "mineru_rs._cli:main"}
+NODE_ROOT_BIN = {"mineru": "bin/mineru.js", "mineru-rs": "bin/mineru.js"}
+WHEEL_ENTRY_POINTS = b"[console_scripts]\nmineru=mineru_rs._cli:main\nmineru-rs=mineru_rs._cli:main\n"
 CRATE_FIXTURES = {
     "tests/fixtures/pdf/minimal.pdf",
     "tests/fixtures/vlm/layout.txt",
@@ -108,7 +111,7 @@ def validate_node_root(npm: dict, lock: dict, version: str) -> None:
         or npm.get("devDependencies") != NPM_DEV_DEPENDENCIES
         or npm.get("main") != "api.js"
         or npm.get("types") != "api.d.ts"
-        or npm.get("bin") != {"mineru": "bin/mineru.js"}
+        or npm.get("bin") != NODE_ROOT_BIN
         or npm.get("files") != NPM_ROOT_FILES
         or any(field in npm for field in ("os", "cpu", "libc", "exports"))
     ):
@@ -186,7 +189,7 @@ def check_identity(args: argparse.Namespace) -> None:
         or project.get("license") != LICENSE
         or project.get("urls", {}).get("Repository") != REPOSITORY
         or project.get("dynamic") != ["version"]
-        or project.get("scripts") != {"mineru": "mineru_rs._cli:main"}
+        or project.get("scripts") != PYTHON_SCRIPTS
         or maturin.get("module-name") != "mineru_rs._native"
         or maturin.get("python-source") != "python"
     ):
@@ -396,7 +399,7 @@ def validate_wheel(path: Path, version: str) -> str:
     }
     if set(files) - package_files != expected_metadata:
         fail(f"wheel metadata payload differs in {path.name}")
-    if files[f"{dist_info}/entry_points.txt"] != b"[console_scripts]\nmineru=mineru_rs._cli:main\n":
+    if files[f"{dist_info}/entry_points.txt"] != WHEEL_ENTRY_POINTS:
         fail(f"wheel console entry point differs in {path.name}")
     if not windows and modes.get(helper) != 0o755:
         fail(f"wheel helper mode is not 0755 in {path.name}")
@@ -618,7 +621,7 @@ def validate_npm(path: Path, version: str, root_manifest: dict) -> str:
         if (
             manifest.get("main") != "api.js"
             or manifest.get("types") != "api.d.ts"
-            or manifest.get("bin") != {"mineru": "bin/mineru.js"}
+            or manifest.get("bin") != NODE_ROOT_BIN
             or manifest.get("files") != NPM_ROOT_FILES
             or manifest.get("optionalDependencies") != expected
             or any(field in manifest for field in ("os", "cpu", "libc", "exports"))
@@ -688,7 +691,7 @@ def self_test(_: argparse.Namespace) -> None:
                 return
             raise AssertionError(message)
 
-        def write_wheel(path: Path, helper_mode: int = 0o755, entry_point: bytes = b"[console_scripts]\nmineru=mineru_rs._cli:main\n") -> None:
+        def write_wheel(path: Path, helper_mode: int = 0o755, entry_point: bytes = WHEEL_ENTRY_POINTS) -> None:
             dist = "mineru_rs-1.2.3.dist-info"
             contents = {
                 "mineru_rs/__init__.py": b"",
@@ -725,7 +728,7 @@ def self_test(_: argparse.Namespace) -> None:
             "repository": {"url": f"git+{REPOSITORY}.git"},
             "main": "api.js",
             "types": "api.d.ts",
-            "bin": {"mineru": "bin/mineru.js"},
+            "bin": NODE_ROOT_BIN,
             "files": NPM_ROOT_FILES,
             "devDependencies": NPM_DEV_DEPENDENCIES,
         }
@@ -740,6 +743,13 @@ def self_test(_: argparse.Namespace) -> None:
             }},
         }
         validate_node_root(identity_npm, identity_lock, version)
+        for alias in NODE_ROOT_BIN:
+            bad_npm = json.loads(json.dumps(identity_npm))
+            del bad_npm["bin"][alias]
+            must_fail(
+                lambda bad_npm=bad_npm: validate_node_root(bad_npm, identity_lock, version),
+                f"root npm package without {alias} alias was accepted",
+            )
         bad_npm = json.loads(json.dumps(identity_npm))
         bad_npm["dependencies"] = {}
         must_fail(lambda: validate_node_root(bad_npm, identity_lock, version), "root runtime dependencies were accepted")
@@ -833,8 +843,12 @@ def self_test(_: argparse.Namespace) -> None:
         assert validate_wheel(wheel_path, "1.2.3") == "macosx_11_0_arm64"
         write_wheel(wheel_path, 0o644)
         must_fail(lambda: validate_wheel(wheel_path, "1.2.3"), "non-executable wheel helper was accepted")
-        write_wheel(wheel_path, entry_point=b"[console_scripts]\nwrong=wrong:main\n")
-        must_fail(lambda: validate_wheel(wheel_path, "1.2.3"), "wrong wheel entry point was accepted")
+        for alias, target in PYTHON_SCRIPTS.items():
+            write_wheel(wheel_path, entry_point=WHEEL_ENTRY_POINTS.replace(f"{alias}={target}\n".encode(), b""))
+            must_fail(
+                lambda: validate_wheel(wheel_path, "1.2.3"),
+                f"wheel without {alias} console alias was accepted",
+            )
 
         npm_dir = Path(tmp) / "npm"
         npm_dir.mkdir()
@@ -844,7 +858,7 @@ def self_test(_: argparse.Namespace) -> None:
             "description": "Native Node.js helpers for MinerU Rust",
             "main": "api.js",
             "types": "api.d.ts",
-            "bin": {"mineru": "bin/mineru.js"},
+            "bin": NODE_ROOT_BIN,
             "license": LICENSE,
             "repository": {"type": "git", "url": f"git+{REPOSITORY}.git"},
             "bugs": {"url": f"{REPOSITORY}/issues"},
@@ -875,6 +889,14 @@ def self_test(_: argparse.Namespace) -> None:
             lambda: validate_npm(bad_root_path, version, root_manifest),
             "non-executable npm root bin was accepted",
         )
+        for alias in NODE_ROOT_BIN:
+            bad_root_manifest = json.loads(json.dumps(root_manifest))
+            del bad_root_manifest["bin"][alias]
+            write_npm_tar(bad_root_path, bad_root_manifest, root_payload, {"bin/mineru.js": 0o755})
+            must_fail(
+                lambda: validate_npm(bad_root_path, version, root_manifest),
+                f"packed npm root without {alias} alias was accepted",
+            )
 
         bad_dir = Path(tmp) / "bad-npm"
         bad_dir.mkdir()

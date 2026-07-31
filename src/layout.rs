@@ -7,12 +7,17 @@ pub(crate) fn parse_layout(input: &str, max_blocks: usize) -> Result<Vec<Content
     let mut blocks = Vec::new();
     // Rust's regex engine has no look-ahead; matching each complete header is
     // equivalent because the trailing content is not part of ContentBlock.
-    let layout = Regex::new(r"<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>(?:(<\|rotate_(up|right|down|left)\|>))?")
+    let layout = Regex::new(r"<\|box_start\|>([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>(?:(<\|rotate_(up|right|down|left)\|>))?")
         .expect("frozen layout regex is valid");
 
     let mut tokens = layout.captures_iter(input).peekable();
     while let Some(token) = tokens.next() {
-        let bbox_values = [1, 2, 3, 4].map(|index| token[index].parse::<f32>().unwrap());
+        let [Ok(x1), Ok(y1), Ok(x2), Ok(y2)] =
+            [1, 2, 3, 4].map(|index| token[index].parse::<f32>())
+        else {
+            continue;
+        };
+        let bbox_values = [x1, y1, x2, y2];
         let (left, right) = if bbox_values[0] <= bbox_values[2] {
             (bbox_values[0], bbox_values[2])
         } else {
@@ -125,6 +130,14 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind.as_str(), BlockKind::TITLE);
         assert_eq!(blocks[0].angle, Some(Rotation::Deg270));
+    }
+
+    #[test]
+    fn unicode_digits_and_surrounding_text_do_not_panic() {
+        let input = "中文😀<|box_start|>١ 0 2 2<|box_end|><|ref_start|>text<|ref_end|>后缀<|box_start|>1 1 2 2<|box_end|><|ref_start|>title<|ref_end|>";
+        let blocks = parse_layout(input, 1).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind.as_str(), BlockKind::TITLE);
     }
 
     #[test]

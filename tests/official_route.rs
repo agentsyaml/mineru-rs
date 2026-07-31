@@ -1,6 +1,11 @@
-use axum::{Json, Router, extract::State as AxumState, http::StatusCode, routing::post};
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, State as AxumState},
+    http::StatusCode,
+    routing::post,
+};
 use bytes::Bytes;
-use lopdf::{Document, Object, Stream, dictionary};
+use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 use mineru::{
     MinerUVlmClient, MinerUVlmConfig, OfficialPdfOptions, PdfInput, ProgressCallback,
     ProgressEvent, VlmHttpConfig,
@@ -14,7 +19,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Barrier, Notify};
+use tokio::sync::{Barrier, Notify, oneshot};
 
 fn tiny_pdf(pages: usize) -> Bytes {
     let mut pdf = Document::with_version("1.5");
@@ -129,6 +134,45 @@ async fn client_with_reply(reply: String) -> MinerUVlmClient {
     )
     .await
     .unwrap()
+}
+
+async fn production_client() -> (
+    MinerUVlmClient,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(|_: Bytes| async { empty_completion() }),
+        )
+        .layer(DefaultBodyLimit::disable());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = MinerUVlmClient::connect(
+        VlmHttpConfig {
+            server_url: Some(format!("http://{address}").parse().unwrap()),
+            model_name: Some("mock".into()),
+            api_key: None,
+            skip_model_name_checking: true,
+            max_retries: 0,
+            max_concurrency: 8,
+            ..Default::default()
+        },
+        MinerUVlmConfig::default(),
+    )
+    .await
+    .unwrap();
+    (client, stop, server)
 }
 
 fn malformed_local_contents() -> Bytes {
@@ -276,6 +320,239 @@ async fn prepared_routes_publish_exact_closed_origins_and_normalize_ranges() {
             original
         );
     }
+}
+
+#[tokio::test]
+#[ignore = "requires retained MINERU_OFFICIAL_ROUTE_BENCH_PDF and MINERU_OFFICIAL_ROUTE_BENCH_OUT paths"]
+async fn real_pdf_selected_200_produces_official_preview() {
+    #[derive(Default)]
+    struct Features {
+        type0_font: bool,
+        transparency_group: bool,
+    }
+
+    fn resolve<'a>(doc: &'a Document, mut object: &'a Object) -> Result<&'a Object, String> {
+        let mut seen = std::collections::HashSet::new();
+        while let Object::Reference(id) = object {
+            if !seen.insert(*id) {
+                return Err(format!("cyclic indirect object {} {} R", id.0, id.1));
+            }
+            object = doc
+                .get_object(*id)
+                .map_err(|error| format!("cannot resolve {} {} R: {error}", id.0, id.1))?;
+        }
+        Ok(object)
+    }
+
+    fn dictionary<'a>(
+        doc: &'a Document,
+        object: &'a Object,
+        label: &str,
+    ) -> Result<&'a Dictionary, String> {
+        resolve(doc, object)?
+            .as_dict()
+            .map_err(|_| format!("{label} is not a dictionary"))
+    }
+
+    fn name_is(doc: &Document, object: &Object, expected: &[u8]) -> bool {
+        resolve(doc, object)
+            .ok()
+            .and_then(|object| object.as_name().ok())
+            == Some(expected)
+    }
+
+    fn valid_type0_font(doc: &Document, object: &Object) -> bool {
+        let Ok(font) = dictionary(doc, object, "font") else {
+            return false;
+        };
+        if !font
+            .get(b"Subtype")
+            .is_ok_and(|subtype| name_is(doc, subtype, b"Type0"))
+            || !font.get(b"ToUnicode").is_ok_and(|to_unicode| {
+                resolve(doc, to_unicode).is_ok_and(|object| matches!(object, Object::Stream(_)))
+            })
+        {
+            return false;
+        }
+        let Ok(descendants) = font
+            .get(b"DescendantFonts")
+            .map_err(|_| ())
+            .and_then(|object| resolve(doc, object).map_err(|_| ()))
+            .and_then(|object| object.as_array().map_err(|_| ()))
+        else {
+            return false;
+        };
+        !descendants.is_empty()
+            && descendants
+                .iter()
+                .all(|descendant| dictionary(doc, descendant, "descendant font").is_ok())
+    }
+
+    fn has_transparency_group(doc: &Document, dictionary: &Dictionary) -> bool {
+        dictionary
+            .get(b"Group")
+            .ok()
+            .and_then(|group| resolve(doc, group).ok())
+            .and_then(|group| group.as_dict().ok())
+            .and_then(|group| group.get(b"S").ok())
+            .is_some_and(|subtype| name_is(doc, subtype, b"Transparency"))
+    }
+
+    fn scan_resources(
+        doc: &Document,
+        resources: &Object,
+        visited: &mut std::collections::HashSet<ObjectId>,
+        features: &mut Features,
+    ) -> Result<(), String> {
+        let resources = dictionary(doc, resources, "Resources")?;
+        if let Ok(fonts) = resources.get(b"Font") {
+            let fonts = dictionary(doc, fonts, "Font resources")?;
+            features.type0_font |= fonts.iter().any(|(_, font)| valid_type0_font(doc, font));
+        }
+        let Ok(xobjects) = resources.get(b"XObject") else {
+            return Ok(());
+        };
+        for (_, object) in dictionary(doc, xobjects, "XObject resources")? {
+            let resolved = resolve(doc, object)?;
+            let Object::Stream(form) = resolved else {
+                continue;
+            };
+            if !form
+                .dict
+                .get(b"Subtype")
+                .is_ok_and(|subtype| name_is(doc, subtype, b"Form"))
+            {
+                continue;
+            }
+            features.transparency_group |= has_transparency_group(doc, &form.dict);
+            if let Object::Reference(id) = object
+                && !visited.insert(*id)
+            {
+                continue;
+            }
+            if let Ok(resources) = form.dict.get(b"Resources") {
+                scan_resources(doc, resources, visited, features)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn required_path(name: &str) -> std::path::PathBuf {
+        std::env::var_os(name)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| panic!("{name} is required for this ignored benchmark"))
+    }
+
+    let input = required_path("MINERU_OFFICIAL_ROUTE_BENCH_PDF");
+    assert!(
+        input.is_absolute() && input.is_file(),
+        "MINERU_OFFICIAL_ROUTE_BENCH_PDF must be an absolute existing PDF file: {}",
+        input.display()
+    );
+    let output = required_path("MINERU_OFFICIAL_ROUTE_BENCH_OUT");
+    assert!(
+        output.is_absolute() && output.is_dir(),
+        "MINERU_OFFICIAL_ROUTE_BENCH_OUT must be an absolute existing retained directory: {}",
+        output.display()
+    );
+    let window = match std::env::var("MINERU_OFFICIAL_ROUTE_BENCH_WINDOW") {
+        Ok(value) => value.parse::<usize>().unwrap_or_else(|_| {
+            panic!("MINERU_OFFICIAL_ROUTE_BENCH_WINDOW must be a positive integer: {value:?}")
+        }),
+        Err(std::env::VarError::NotPresent) => 64,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("MINERU_OFFICIAL_ROUTE_BENCH_WINDOW must be a positive integer")
+        }
+    };
+    assert!(
+        window > 0,
+        "MINERU_OFFICIAL_ROUTE_BENCH_WINDOW must be a positive integer"
+    );
+
+    let (client, stop, server) = production_client().await;
+    let result = client
+        .parse_and_write_official_pdf(
+            PdfInput::Path(input),
+            OfficialPdfOptions {
+                start_page: 0,
+                end_page: Some(199),
+                processing_window_size: window,
+                total_deadline: Duration::from_secs(60 * 60),
+                ..Default::default()
+            },
+            &output,
+            "phase2-real",
+        )
+        .await;
+    let _ = stop.send(());
+    server.await.expect("local VLM server task failed");
+    let manifest = result.expect("official route failed");
+    assert!(manifest.root.is_dir(), "returned manifest root is missing");
+    assert_eq!(manifest.vlm_dir, output.join("phase2-real/vlm"));
+    assert!(manifest.vlm_dir.is_dir(), "returned manifest is missing");
+    let preview_path = output.join("phase2-real/vlm/phase2-real_layout.pdf");
+    assert!(
+        preview_path.is_file(),
+        "durable layout PDF is missing: {}",
+        preview_path.display()
+    );
+
+    let preview = Document::load(&preview_path).expect("final layout PDF is not a valid PDF");
+    let pages = preview.get_pages();
+    assert_eq!(pages.len(), 200, "final layout PDF page count");
+    let mut features = Features::default();
+    let mut visited = std::collections::HashSet::new();
+    for (number, id) in pages {
+        let page = preview
+            .get_object(id)
+            .expect("page object is missing")
+            .as_dict()
+            .expect("page object is not a dictionary");
+        let resources = page
+            .get(b"Resources")
+            .unwrap_or_else(|_| panic!("page {number} has no Resources"));
+        let resource_dict = dictionary(&preview, resources, "page Resources")
+            .unwrap_or_else(|error| panic!("page {number}: {error}"));
+        let fonts = resource_dict
+            .get(b"Font")
+            .ok()
+            .and_then(|fonts| dictionary(&preview, fonts, "page Font resources").ok());
+        assert!(
+            fonts.is_some_and(|fonts| fonts.iter().any(|(name, font)| {
+                name.starts_with(b"MinerUPreviewHelvetica")
+                    && dictionary(&preview, font, "overlay font").is_ok_and(|font| {
+                        font.get(b"BaseFont")
+                            .is_ok_and(|base| name_is(&preview, base, b"Helvetica"))
+                    })
+            })),
+            "page {number} is missing its MinerUPreviewHelvetica font resource"
+        );
+        let states = resource_dict
+            .get(b"ExtGState")
+            .ok()
+            .and_then(|states| dictionary(&preview, states, "page ExtGState resources").ok());
+        assert!(
+            states.is_some_and(|states| states
+                .iter()
+                .any(|(name, _)| name.starts_with(b"MinerUPreviewAlpha"))),
+            "page {number} is missing its MinerUPreviewAlpha resource"
+        );
+        features.transparency_group |= has_transparency_group(&preview, page);
+        scan_resources(&preview, resources, &mut visited, &mut features)
+            .unwrap_or_else(|error| panic!("page {number} resource scan failed: {error}"));
+    }
+    let mut missing = Vec::new();
+    if !features.type0_font {
+        missing.push("a valid Type0 font/ToUnicode/DescendantFonts chain");
+    }
+    if !features.transparency_group {
+        missing.push("a Form/page /Group with /S /Transparency");
+    }
+    assert!(
+        missing.is_empty(),
+        "selected 200-page layout PDF is missing required source features: {}",
+        missing.join(", ")
+    );
 }
 
 #[tokio::test]

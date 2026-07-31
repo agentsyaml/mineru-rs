@@ -1,7 +1,10 @@
 # Local agent working state
-.slim/
 .slim/deepwork/
 .ignore
+
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps
 
 # Rust
 target/

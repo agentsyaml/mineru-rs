@@ -179,9 +179,9 @@ jobs:
         run: |
           python .github/scripts/verify_release.py wheel --directory dist --version "${{ needs.identity.outputs.version }}" --count 1 --platform "${{ matrix.slot }}"
           python -c "import os,venv; venv.create(os.path.join(os.environ['RUNNER_TEMP'],'wheel-venv'),with_pip=True)"
-          python -c "import glob,os,pathlib,subprocess; root=pathlib.Path(os.environ['RUNNER_TEMP'])/'wheel-venv'; py=root/('Scripts/python.exe' if os.name=='nt' else 'bin/python'); wheels=glob.glob(os.path.abspath('dist/*.whl')); assert len(wheels)==1,wheels; subprocess.check_call([str(py),'-m','pip','install','pytest==8.4.2',wheels[0]])"
+          python -c "import glob,os,pathlib,subprocess; root=pathlib.Path(os.environ['RUNNER_TEMP'])/'wheel-venv'; py=root/('Scripts/python.exe' if os.name=='nt' else 'bin/python'); wheels=glob.glob(os.path.abspath('dist/*.whl')); assert len(wheels)==1,wheels; subprocess.check_call([str(py),'-m','pip','install',wheels[0]])"
           python -c "import os,pathlib,subprocess; root=pathlib.Path(os.environ['RUNNER_TEMP'])/'wheel-venv'; launcher=root/('Scripts/mineru.exe' if os.name=='nt' else 'bin/mineru'); subprocess.check_call([str(launcher),'--help'],cwd=os.environ['RUNNER_TEMP'])"
-          python -c "import os,pathlib,subprocess; root=pathlib.Path(os.environ['RUNNER_TEMP'])/'wheel-venv'; py=root/('Scripts/python.exe' if os.name=='nt' else 'bin/python'); subprocess.check_call([str(py),'-I','-c','import mineru_rs; assert mineru_rs.canonical_stem(\'a bad/pdf\') == \'a_bad_pdf\'; assert mineru_rs.validate_pdf_options(0, None, True, True, True)'],cwd=os.environ['RUNNER_TEMP']); subprocess.check_call([str(py),'-m','pytest',os.path.join(os.environ['GITHUB_WORKSPACE'],'bindings/python/tests')],cwd=os.environ['RUNNER_TEMP'])"
+          python -c "import os,pathlib,subprocess; root=pathlib.Path(os.environ['RUNNER_TEMP'])/'wheel-venv'; py=root/('Scripts/python.exe' if os.name=='nt' else 'bin/python'); subprocess.check_call([str(py),'-I','-c','import mineru_rs; assert mineru_rs.canonical_stem(\'a bad/pdf\') == \'a_bad_pdf\'; assert mineru_rs.validate_pdf_options(0, None, True, True, True)'],cwd=os.environ['RUNNER_TEMP']); subprocess.check_call([str(py),'-m','unittest','discover','-s',os.path.join(os.environ['GITHUB_WORKSPACE'],'bindings/python/tests'),'-p','test_*.py'],cwd=os.environ['RUNNER_TEMP'])"
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -553,3 +553,59 @@ jobs:
             publish_verified "@alexsun-top/mineru-$suffix" "./packages/alexsun-top-mineru-$suffix-$VERSION.tgz"
           done
           publish_verified "@alexsun-top/mineru" "./packages/alexsun-top-mineru-$VERSION.tgz"
+
+  attach-assets:
+    needs: [identity, release-ready]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.14.6
+      - name: Download verified crate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-crate
+          path: attach-sources/crate
+      - name: Download verified wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-wheels
+          path: attach-sources/wheels
+      - name: Download verified npm packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-npm
+          path: attach-sources/npm
+      - name: Re-verify the exact sealed payload before attaching
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          python .github/scripts/verify_release.py crate --directory attach-sources/crate --version "$VERSION"
+          python .github/scripts/verify_release.py wheel --directory attach-sources/wheels --version "$VERSION" --count 5 --platform all
+          python .github/scripts/verify_release.py npm --directory attach-sources/npm --version "$VERSION"
+      - name: Stage attachment set outside the verified payload directories
+        run: |
+          python .github/scripts/attach_release_assets.py stage \
+            --destination "$RUNNER_TEMP/release-upload" \
+            --source attach-sources/crate \
+            --source attach-sources/wheels \
+            --source attach-sources/npm
+      - name: Attach artifacts and SHA256SUMS to the published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ github.event.release.id }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python .github/scripts/attach_release_assets.py attach \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" \
+            --directory "$RUNNER_TEMP/release-upload"
