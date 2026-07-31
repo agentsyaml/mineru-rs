@@ -6,8 +6,10 @@ use mineru::{
     OfficeWorkers, OfficialPdfOptions,
     input_prepare::{DocumentKind, RasterWorkers, prepare as core_prepare},
 };
+#[cfg(feature = "office")]
 use std::path::PathBuf;
 use std::{io::Cursor, sync::Arc, time::Duration};
+#[cfg(feature = "office")]
 #[path = "support/office_fixtures.rs"]
 mod office_fixtures;
 
@@ -518,6 +520,7 @@ async fn exact_image_and_pdf_limits_hold_at_the_boundary() {
     );
 }
 
+#[cfg(feature = "office")]
 #[tokio::test]
 #[ignore = "real Office conversion e2e"]
 async fn office_prepare_uses_real_helper_and_accepts_multiple_pages() {

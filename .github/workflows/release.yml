@@ -69,7 +69,7 @@ jobs:
           cargo test --manifest-path "$RUNNER_TEMP/crate-unpacked/mineru-$VERSION/Cargo.toml" \
             --lib --locked -- --test-threads=1
           cargo install --path "$RUNNER_TEMP/crate-unpacked/mineru-$VERSION" --root "$RUNNER_TEMP/crate-install" \
-            --locked --bins
+            --locked --features office --bins
           "$RUNNER_TEMP/crate-install/bin/mineru" --help
       - name: Upload crate evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -141,7 +141,7 @@ jobs:
           cat > .github/scripts/release-stage-python-helper.sh <<'SH'
           #!/bin/sh
           set -eux
-          cargo build --locked --release --bin mineru-office-convert --target ${{ matrix.target }}
+          cargo build --locked --release --bin mineru-office-convert --features office --target ${{ matrix.target }}
           helper="${CARGO_TARGET_DIR:-target}/${{ matrix.target }}/release/${{ matrix.helper }}"
           python3 .github/scripts/stage_binding_artifacts.py stage-python \
             --target ${{ matrix.target }} --helper "$helper" \
@@ -151,7 +151,7 @@ jobs:
       - name: Build and stage same-target native helper
         if: runner.os != 'Linux'
         run: |
-          cargo build --locked --release --bin mineru-office-convert --target ${{ matrix.target }}
+          cargo build --locked --release --bin mineru-office-convert --features office --target ${{ matrix.target }}
           python .github/scripts/stage_binding_artifacts.py stage-python --target ${{ matrix.target }} --helper target/${{ matrix.target }}/release/${{ matrix.helper }} --package-dir bindings/python/python/mineru_rs
       - name: Build locked manylinux wheel
         if: runner.os == 'Linux'
@@ -247,7 +247,7 @@ jobs:
       - name: Install Rust 1.89.0 target
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add ${{ matrix.target }}
       - name: Build same-target Office helper
-        run: cargo build --locked --release --bin mineru-office-convert --target ${{ matrix.target }}
+        run: cargo build --locked --release --bin mineru-office-convert --features office --target ${{ matrix.target }}
       - name: Build generated addon
         working-directory: bindings/node
         run: npx --no-install napi build --release --platform --target ${{ matrix.target }} -- --locked

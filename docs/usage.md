@@ -78,6 +78,12 @@ export MINERU_VL_API_KEY='<your-key>'
 
 `mineru` 是规范产品二进制，支持 PDF、图像和 Office 输入，可选 `--api-url` 远程 API 服务器模式。它不暴露本地 ML 后端；`--backend` 仅接受 `vlm-http-client`。
 
+Office 格式转换需要 `mineru-office-convert` 辅助程序，它依赖可选的 `office` feature：
+
+```sh
+cargo build --release --features office
+```
+
 ### 直接 VLM 模式（默认）
 
 不传 `--api-url` 时，`mineru` 直接调用外部 VLM 服务。服务地址和模型由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME`、`MINERU_VL_API_KEY` 环境变量或 `--url` 覆盖。

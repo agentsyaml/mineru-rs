@@ -591,6 +591,7 @@ async fn active_worker_drains_before_exit() {
     mock_task.await.unwrap();
 }
 
+#[cfg(feature = "office")]
 #[tokio::test]
 #[ignore = "process-level API server e2e"]
 async fn canonical_client_consumes_real_api_server_zip_and_publishes_layout() {

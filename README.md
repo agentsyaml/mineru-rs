@@ -40,9 +40,15 @@ cargo install mineru
 mineru --help
 ```
 
-The package installs the existing `mineru`, `mineru-api`, `mineru-vlm`,
-`mineru-vlm-api`, and `mineru-office-convert` binaries. See
-[docs/usage.md](docs/usage.md) for service configuration and complete options.
+The package installs the `mineru`, `mineru-api`, `mineru-vlm`, and
+`mineru-vlm-api` binaries. To also install the `mineru-office-convert` Office
+conversion helper, build with `--features office`:
+
+```sh
+cargo install mineru --features office
+```
+
+See [docs/usage.md](docs/usage.md) for service configuration and complete options.
 
 ## Python
 

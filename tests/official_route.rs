@@ -842,104 +842,105 @@ async fn raw_reply_allowance_counts_ignored_json_fields() {
 }
 
 #[tokio::test]
-#[ignore = "130-page scheduler stress test"]
-async fn default_window_130_does_not_roll_into_the_next_operation() {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        #[derive(Clone)]
-        struct State {
-            requests: Arc<AtomicUsize>,
-            first: Arc<Barrier>,
-            second: Arc<Barrier>,
-            release_64: Arc<Notify>,
-            release_128: Arc<Notify>,
-        }
-        async fn handler(AxumState(state): AxumState<State>) -> Json<Value> {
-            let request = state.requests.fetch_add(1, Ordering::SeqCst) + 1;
-            match request {
-                1..=64 => {
-                    state.first.wait().await;
-                    if request == 64 {
-                        state.release_64.notified().await;
-                    }
+async fn processing_window_two_does_not_roll_into_the_next_window() {
+    #[derive(Clone)]
+    struct State {
+        layouts: Arc<AtomicUsize>,
+        second_entered: Arc<Notify>,
+        third_entered: Arc<Notify>,
+        fourth_entered: Arc<Notify>,
+        fifth_entered: Arc<Notify>,
+        release_second: Arc<Notify>,
+        release_fourth: Arc<Notify>,
+    }
+    async fn handler(
+        AxumState(state): AxumState<State>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        if request.to_string().contains("Layout Detection") {
+            let layout = state.layouts.fetch_add(1, Ordering::SeqCst) + 1;
+            match layout {
+                2 => {
+                    state.second_entered.notify_one();
+                    state.release_second.notified().await;
                 }
-                65..=128 => {
-                    state.second.wait().await;
-                    if request == 128 {
-                        state.release_128.notified().await;
-                    }
+                3 => state.third_entered.notify_one(),
+                4 => {
+                    state.fourth_entered.notify_one();
+                    state.release_fourth.notified().await;
                 }
+                5 => state.fifth_entered.notify_one(),
                 _ => {}
             }
-            empty_completion()
         }
+        empty_completion()
+    }
 
-        let state = State {
-            requests: Arc::new(AtomicUsize::new(0)),
-            first: Arc::new(Barrier::new(65)),
-            second: Arc::new(Barrier::new(65)),
-            release_64: Arc::new(Notify::new()),
-            release_128: Arc::new(Notify::new()),
-        };
-        let client = configured_client(
-            Router::new()
-                .route("/v1/chat/completions", post(handler))
-                .with_state(state.clone()),
-            64,
-        )
-        .await;
-        let output = tempfile::tempdir().unwrap();
-        let output_root = output.path().to_path_buf();
-        let route = tokio::spawn({
-            let input = tiny_pdf(130);
-            async move {
-                client
-                    .parse_and_write_official_pdf(
-                        PdfInput::Bytes(input),
-                        route_options(64),
-                        &output_root,
-                        "many",
-                    )
-                    .await
-            }
-        });
+    let state = State {
+        layouts: Arc::new(AtomicUsize::new(0)),
+        second_entered: Arc::new(Notify::new()),
+        third_entered: Arc::new(Notify::new()),
+        fourth_entered: Arc::new(Notify::new()),
+        fifth_entered: Arc::new(Notify::new()),
+        release_second: Arc::new(Notify::new()),
+        release_fourth: Arc::new(Notify::new()),
+    };
+    let client = configured_client(
+        Router::new()
+            .route("/v1/chat/completions", post(handler))
+            .with_state(state.clone()),
+        2,
+    )
+    .await;
+    let output = tempfile::tempdir().unwrap();
+    let output_root = output.path().to_path_buf();
+    let route = tokio::spawn({
+        let input = tiny_pdf(6);
+        async move {
+            client
+                .parse_and_write_official_pdf(
+                    PdfInput::Bytes(input),
+                    route_options(2),
+                    &output_root,
+                    "many",
+                )
+                .await
+        }
+    });
 
-        state.first.wait().await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), async {
-                while state.requests.load(Ordering::SeqCst) < 65 {
-                    tokio::task::yield_now().await;
-                }
-            })
+    tokio::time::timeout(Duration::from_secs(5), state.second_entered.notified())
+        .await
+        .expect("layout #2 did not enter");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), state.third_entered.notified())
             .await
             .is_err()
-        );
-        state.release_64.notify_one();
-        state.second.wait().await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), async {
-                while state.requests.load(Ordering::SeqCst) < 129 {
-                    tokio::task::yield_now().await;
-                }
-            })
+    );
+    state.release_second.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), state.fourth_entered.notified())
+        .await
+        .expect("layout #4 did not enter");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), state.fifth_entered.notified())
             .await
             .is_err()
-        );
-        state.release_128.notify_one();
+    );
+    state.release_fourth.notify_one();
 
-        let manifest = route.await.unwrap().unwrap();
-        assert_eq!(state.requests.load(Ordering::SeqCst), 130);
-        let middle: Value = serde_json::from_slice(
-            &std::fs::read(manifest.vlm_dir.join("many_middle.json")).unwrap(),
-        )
+    let manifest = tokio::time::timeout(Duration::from_secs(10), route)
+        .await
+        .expect("route test timed out")
+        .unwrap()
         .unwrap();
-        let pages = middle["pdf_info"].as_array().unwrap();
-        assert_eq!(pages.len(), 130);
-        for (index, page) in pages.iter().enumerate() {
-            assert_eq!(page["page_idx"], index);
-        }
-    })
-    .await
-    .expect("route test timed out");
+    assert_eq!(state.layouts.load(Ordering::SeqCst), 6);
+    let middle: Value =
+        serde_json::from_slice(&std::fs::read(manifest.vlm_dir.join("many_middle.json")).unwrap())
+            .unwrap();
+    let pages = middle["pdf_info"].as_array().unwrap();
+    assert_eq!(pages.len(), 6);
+    for (index, page) in pages.iter().enumerate() {
+        assert_eq!(page["page_idx"], index);
+    }
 }
 
 #[tokio::test]

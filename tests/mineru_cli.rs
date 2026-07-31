@@ -1,7 +1,9 @@
+#[cfg(feature = "office")]
+use axum::http::header;
 use axum::{
     Json, Router,
     extract::{Multipart, Path as AxumPath, Request, State},
-    http::{StatusCode, header},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -163,6 +165,7 @@ async fn command(mut command: Command) -> Output {
         .unwrap()
 }
 
+#[cfg(feature = "office")]
 #[derive(Clone, Debug)]
 struct MultipartPart {
     name: String,
@@ -171,6 +174,7 @@ struct MultipartPart {
     bytes: Vec<u8>,
 }
 
+#[cfg(feature = "office")]
 struct ApiState {
     base: String,
     output: std::path::PathBuf,
@@ -183,6 +187,7 @@ struct ApiState {
     third_after_layouts: bool,
 }
 
+#[cfg(feature = "office")]
 fn result_zip(stem: &str, kind: &str, extension: &str, origin: &[u8]) -> Vec<u8> {
     use std::io::Write;
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
@@ -297,6 +302,7 @@ fn encoded_image(format: ImageFormat) -> Vec<u8> {
     out
 }
 
+#[cfg(feature = "office")]
 #[tokio::test]
 #[ignore = "real Office conversion e2e"]
 async fn one_level_mixed_inputs_publish_exact_origins_and_selected_pdf_source_page() {
@@ -366,6 +372,7 @@ async fn one_level_mixed_inputs_publish_exact_origins_and_selected_pdf_source_pa
     );
 }
 
+#[cfg(feature = "office")]
 #[tokio::test]
 #[ignore = "real Office conversion e2e"]
 async fn non_pdf_ranges_are_ignored_by_the_direct_consumer() {
@@ -973,6 +980,7 @@ async fn absent_model_discovers_exactly_once() {
     );
 }
 
+#[cfg(feature = "office")]
 #[tokio::test]
 #[ignore = "full CLI/API/PDF process e2e"]
 async fn api_mode_mixed_inputs_use_exact_forms_waves_and_layouts() {

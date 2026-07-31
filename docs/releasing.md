@@ -152,7 +152,9 @@ python3.9 -m venv /tmp/mineru-release-venv
 
 (cd bindings/node && npm ci && npm run build)
 # Stage the current-target addon and mineru-office-convert exactly as in CI's
-# node-binding job, install that package under node_modules, then run:
+# node-binding job (helper requires --features office):
+cargo build --release --bin mineru-office-convert --features office
+# Install that package under node_modules, then run:
 (cd bindings/node && npm test)
 
 python3 .github/scripts/verify_release.py self-test
