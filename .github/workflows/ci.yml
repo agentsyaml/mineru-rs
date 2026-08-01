@@ -322,7 +322,10 @@ jobs:
       - name: Build same-target Office helper
         run: cargo +1.89.0 build --locked --release -p mineru --bin mineru-office-convert --features office --target x86_64-unknown-linux-gnu
       - name: Build Linux x64 binding
-        run: npx --no-install napi build --release --platform --target x86_64-unknown-linux-gnu -- --locked
+        run: |
+          npx --no-install napi build --release --platform --target x86_64-unknown-linux-gnu -- --locked
+          git restore --source=HEAD -- index.js
+          git diff --exit-code -- index.d.ts
       - name: Stage exact current-build platform package
         run: |
           python ../../.github/scripts/stage_binding_artifacts.py stage-npm \

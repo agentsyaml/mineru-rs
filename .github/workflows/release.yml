@@ -250,7 +250,9 @@ jobs:
         run: cargo build --locked --release --bin mineru-office-convert --features office --target ${{ matrix.target }}
       - name: Build generated addon
         working-directory: bindings/node
-        run: npx --no-install napi build --release --platform --target ${{ matrix.target }} -- --locked
+        run: |
+          npx --no-install napi build --release --platform --target ${{ matrix.target }} -- --locked
+          git restore --source=HEAD -- index.js
       - name: Stage and inspect current-build platform package
         run: |
           python .github/scripts/stage_binding_artifacts.py stage-npm --target ${{ matrix.target }} --addon bindings/node/mineru.${{ matrix.suffix }}.node --helper target/${{ matrix.target }}/release/${{ matrix.helper }} --package-dir bindings/node/staged/${{ matrix.suffix }} --root-package-json bindings/node/package.json
@@ -261,10 +263,10 @@ jobs:
         env:
           MINERU_RUN_OFFICE_E2E: "1"
         run: npm test
-      - name: Verify checked-in generated loader
+      - name: Verify checked-in generated types
         if: matrix.suffix == 'linux-x64-gnu'
         working-directory: bindings/node
-        run: git diff --exit-code -- index.js index.d.ts
+        run: git diff --exit-code -- index.d.ts
       - name: Verify exact native artifact
         run: python .github/scripts/verify_release.py node-native --directory bindings/node/staged/${{ matrix.suffix }} --suffix ${{ matrix.suffix }}
       - name: Pack current-build platform and root tarballs

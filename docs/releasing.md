@@ -150,7 +150,8 @@ python3.9 -m venv /tmp/mineru-release-venv
 /tmp/mineru-release-venv/bin/pip install --force-reinstall target/wheels/mineru_rs-*.whl
 /tmp/mineru-release-venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
 
-(cd bindings/node && npm ci && npm run build)
+# index.js is maintained and hardened; index.d.ts is generated.
+(cd bindings/node && npm ci && npm run build && git restore --source=HEAD -- index.js && git diff --exit-code -- index.d.ts)
 # Stage the current-target addon and mineru-office-convert exactly as in CI's
 # node-binding job (helper requires --features office):
 cargo build --release --bin mineru-office-convert --features office
