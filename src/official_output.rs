@@ -40,9 +40,9 @@ pub(crate) struct OfficialOutputStage {
     target_name: OfficialOutputTarget,
     target: PathBuf,
     directory: Dir,
-    staging_parent: Dir,
-    stage: Dir,
-    parts: Dir,
+    staging_parent: Option<Dir>,
+    stage: Option<Dir>,
+    parts: Option<Dir>,
     pages: Vec<usize>,
     preview_pages: Vec<usize>,
     assets: HashSet<PathBuf>,
@@ -67,13 +67,15 @@ impl OfficialOutputStage {
         let tree = OutputTree::open(root, &stem, target_name)?;
         let (staging_parent_name, staging_parent, stage) = create_private_stage(&tree.directory)?;
         if let Err(error) = stage.create_dir("parts").map_err(io) {
-            remove_private_stage(&tree.directory, &staging_parent_name, &staging_parent);
+            drop(stage);
+            remove_private_stage(&tree.directory, &staging_parent_name, staging_parent);
             return Err(error);
         }
         let parts = match open_child_nofollow(stage.try_clone().map_err(io)?, "parts") {
             Ok(parts) => parts,
             Err(error) => {
-                remove_private_stage(&tree.directory, &staging_parent_name, &staging_parent);
+                drop(stage);
+                remove_private_stage(&tree.directory, &staging_parent_name, staging_parent);
                 return Err(error);
             }
         };
@@ -86,7 +88,9 @@ impl OfficialOutputStage {
         ) {
             Ok(cleanup) => cleanup,
             Err(error) => {
-                remove_private_stage(&tree.directory, &staging_parent_name, &staging_parent);
+                drop(parts);
+                drop(stage);
+                remove_private_stage(&tree.directory, &staging_parent_name, staging_parent);
                 return Err(error);
             }
         };
@@ -96,9 +100,9 @@ impl OfficialOutputStage {
             target_name,
             target: tree.target,
             directory: tree.directory,
-            staging_parent,
-            stage,
-            parts,
+            staging_parent: Some(staging_parent),
+            stage: Some(stage),
+            parts: Some(parts),
             pages: Vec::new(),
             preview_pages: Vec::new(),
             assets: HashSet::new(),
@@ -129,7 +133,7 @@ impl OfficialOutputStage {
             return invalid("official pages must have increasing source indexes");
         }
         self.write_serialized_in(
-            &self.parts.try_clone().map_err(io)?,
+            &self.parts()?.try_clone().map_err(io)?,
             format!("{source_page_idx:020}-prepared.json"),
             &prepared,
         )?;
@@ -148,7 +152,7 @@ impl OfficialOutputStage {
     ) -> VlmResult<()> {
         let prepared_bytes = self.pages.iter().try_fold(0usize, |total, page| {
             let bytes = usize::try_from(
-                self.parts
+                self.parts()?
                     .metadata(format!("{page:020}-prepared.json"))
                     .map_err(io)?
                     .len(),
@@ -169,7 +173,7 @@ impl OfficialOutputStage {
             .map(|page| {
                 check_stage_deadline(deadline)?;
                 serde_json::from_reader(
-                    self.parts
+                    self.parts()?
                         .open(format!("{page:020}-prepared.json"))
                         .map_err(io)?,
                 )
@@ -225,7 +229,7 @@ impl OfficialOutputStage {
                 operation: "official output staging",
                 message: "page content-list-v2 output is missing".into(),
             })?;
-        let parts = self.parts.try_clone().map_err(io)?;
+        let parts = self.parts()?.try_clone().map_err(io)?;
         self.write_json_in(&parts, format!("{source_page_idx:020}-model.json"), model)?;
         self.write_json_in(&parts, format!("{source_page_idx:020}-middle.json"), middle)?;
         self.write_json_in(
@@ -251,7 +255,7 @@ impl OfficialOutputStage {
             return invalid("official pages must have increasing source indexes");
         }
         self.write_serialized_in(
-            &self.parts.try_clone().map_err(io)?,
+            &self.parts()?.try_clone().map_err(io)?,
             format!("{:020}-preview.json", page.page_index),
             page,
         )?;
@@ -264,7 +268,7 @@ impl OfficialOutputStage {
             .iter()
             .map(|page| {
                 serde_json::from_reader(
-                    self.parts
+                    self.parts()?
                         .open(format!("{page:020}-preview.json"))
                         .map_err(io)?,
                 )
@@ -302,7 +306,8 @@ impl OfficialOutputStage {
             return invalid("official stage is incomplete");
         }
         self.write_final_outputs(deadline)?;
-        self.stage.remove_dir_all("parts").map_err(io)?;
+        drop(self.parts.take());
+        self.stage()?.remove_dir_all("parts").map_err(io)?;
         check_stage_deadline(deadline)?;
         Ok(())
     }
@@ -313,14 +318,16 @@ impl OfficialOutputStage {
             stem: self.stem.clone(),
             vlm_dir: self.target.clone(),
         };
+        self.close_stage_handles();
         let result = install_stage_in(
-            &self.staging_parent,
+            self.staging_parent()?,
             std::ffi::OsStr::new("stage"),
             &self.directory,
             std::ffi::OsStr::new(self.target_name.name()),
         );
         match result {
             Ok(backup) => {
+                drop(self.staging_parent.take());
                 let mut cleanup = self
                     .cleanup
                     .take()
@@ -342,9 +349,39 @@ impl OfficialOutputStage {
     }
 
     fn cleanup_now(&mut self) {
+        self.close_stage_handles();
+        drop(self.staging_parent.take());
         if let Some(cleanup) = self.cleanup.take() {
             cleanup.detach(true);
         }
+    }
+
+    fn stage(&self) -> VlmResult<&Dir> {
+        self.stage.as_ref().ok_or_else(|| VlmError::Protocol {
+            operation: "official output staging",
+            message: "stage directory is closed".into(),
+        })
+    }
+
+    fn parts(&self) -> VlmResult<&Dir> {
+        self.parts.as_ref().ok_or_else(|| VlmError::Protocol {
+            operation: "official output staging",
+            message: "parts directory is closed".into(),
+        })
+    }
+
+    fn staging_parent(&self) -> VlmResult<&Dir> {
+        self.staging_parent
+            .as_ref()
+            .ok_or_else(|| VlmError::Protocol {
+                operation: "official output staging",
+                message: "staging parent directory is closed".into(),
+            })
+    }
+
+    fn close_stage_handles(&mut self) {
+        drop(self.parts.take());
+        drop(self.stage.take());
     }
 
     fn write_asset(&mut self, asset: &Asset) -> VlmResult<()> {
@@ -355,7 +392,7 @@ impl OfficialOutputStage {
         };
         if !self.assets.insert(path.clone()) {
             let parent =
-                open_or_create_relative(&self.stage, path.parent().expect("asset parent"))?;
+                open_or_create_relative(self.stage()?, path.parent().expect("asset parent"))?;
             let mut existing = Vec::new();
             parent
                 .open(path.file_name().expect("asset name"))
@@ -378,7 +415,7 @@ impl OfficialOutputStage {
                 actual: next as u64,
             });
         }
-        let parent = open_or_create_relative(&self.stage, path.parent().expect("asset parent"))?;
+        let parent = open_or_create_relative(self.stage()?, path.parent().expect("asset parent"))?;
         write_bytes_in(&parent, path.file_name().expect("asset name"), &asset.data)?;
         self.asset_bytes = next;
         Ok(())
@@ -400,7 +437,7 @@ impl OfficialOutputStage {
             });
         }
         write_bytes_in(
-            &self.stage,
+            self.stage()?,
             format!("{}_origin.{suffix}", self.stem),
             &origin,
         )?;
@@ -454,10 +491,10 @@ impl OfficialOutputStage {
     }
 
     fn append_part<W: Write>(&mut self, output: &mut W, name: impl AsRef<Path>) -> VlmResult<()> {
-        let bytes = self.parts.metadata(name.as_ref()).map_err(io)?.len();
+        let bytes = self.parts()?.metadata(name.as_ref()).map_err(io)?.len();
         let bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
         self.charge_text(bytes)?;
-        stdio::copy(&mut self.parts.open(name).map_err(io)?, output).map_err(io)?;
+        stdio::copy(&mut self.parts()?.open(name).map_err(io)?, output).map_err(io)?;
         Ok(())
     }
 
@@ -476,7 +513,7 @@ impl OfficialOutputStage {
 
     fn write_final_outputs(&mut self, deadline: std::time::Instant) -> VlmResult<()> {
         let mut middle = self
-            .stage
+            .stage()?
             .create(format!("{}_middle.json", self.stem))
             .map_err(io)?;
         self.write_fragment(&mut middle, b"{\"pdf_info\":[")?;
@@ -493,7 +530,7 @@ impl OfficialOutputStage {
         )?;
 
         let mut model = self
-            .stage
+            .stage()?
             .create(format!("{}_model.json", self.stem))
             .map_err(io)?;
         self.write_fragment(&mut model, b"[")?;
@@ -507,7 +544,7 @@ impl OfficialOutputStage {
         self.write_fragment(&mut model, b"]")?;
 
         let mut content = self
-            .stage
+            .stage()?
             .create(format!("{}_content_list.json", self.stem))
             .map_err(io)?;
         self.write_fragment(&mut content, b"[")?;
@@ -515,7 +552,7 @@ impl OfficialOutputStage {
         for page in self.pages.clone() {
             check_stage_deadline(deadline)?;
             let mut source = self
-                .parts
+                .parts()?
                 .open(format!("{page:020}-content.json"))
                 .map_err(io)?;
             let length =
@@ -551,7 +588,7 @@ impl OfficialOutputStage {
         self.write_fragment(&mut content, b"]")?;
 
         let mut v2 = self
-            .stage
+            .stage()?
             .create(format!("{}_content_list_v2.json", self.stem))
             .map_err(io)?;
         self.write_fragment(&mut v2, b"[")?;
@@ -564,12 +601,15 @@ impl OfficialOutputStage {
         }
         self.write_fragment(&mut v2, b"]")?;
 
-        let mut markdown = self.stage.create(format!("{}.md", self.stem)).map_err(io)?;
+        let mut markdown = self
+            .stage()?
+            .create(format!("{}.md", self.stem))
+            .map_err(io)?;
         let mut markdown_written = false;
         for page in self.pages.clone() {
             check_stage_deadline(deadline)?;
             let name = format!("{page:020}-markdown.md");
-            let bytes = usize::try_from(self.parts.metadata(&name).map_err(io)?.len())
+            let bytes = usize::try_from(self.parts()?.metadata(&name).map_err(io)?.len())
                 .unwrap_or(usize::MAX);
             if bytes == 0 {
                 continue;
@@ -578,7 +618,7 @@ impl OfficialOutputStage {
                 self.write_fragment(&mut markdown, b"\n\n")?;
             }
             self.charge_text(bytes)?;
-            stdio::copy(&mut self.parts.open(name).map_err(io)?, &mut markdown).map_err(io)?;
+            stdio::copy(&mut self.parts()?.open(name).map_err(io)?, &mut markdown).map_err(io)?;
             markdown_written = true;
         }
         Ok(())
@@ -592,6 +632,8 @@ impl OfficialOutputStage {
 
 impl Drop for OfficialOutputStage {
     fn drop(&mut self) {
+        self.close_stage_handles();
+        drop(self.staging_parent.take());
         if let Some(cleanup) = self.cleanup.take() {
             cleanup.detach(false);
         }
@@ -820,7 +862,7 @@ fn create_private_stage(directory: &Dir) -> VlmResult<(std::ffi::OsString, Dir, 
         }
     };
     if let Err(error) = parent.create_dir("stage").map_err(io) {
-        remove_private_stage(directory, &parent_name, &parent);
+        remove_private_stage(directory, &parent_name, parent);
         return Err(error);
     }
     let stage = match parent
@@ -830,17 +872,18 @@ fn create_private_stage(directory: &Dir) -> VlmResult<(std::ffi::OsString, Dir, 
     {
         Ok(stage) => stage,
         Err(error) => {
-            remove_private_stage(directory, &parent_name, &parent);
+            remove_private_stage(directory, &parent_name, parent);
             return Err(error);
         }
     };
     Ok((parent_name, parent, stage))
 }
 
-fn remove_private_stage(directory: &Dir, parent_name: &std::ffi::OsStr, parent: &Dir) {
+fn remove_private_stage(directory: &Dir, parent_name: &std::ffi::OsStr, parent: Dir) {
     // The parent handle reaches only our private staging tree. The outer removal is
     // descriptor-relative and deliberately non-recursive.
     let _ = parent.remove_dir_all("stage");
+    drop(parent);
     let _ = directory.remove_dir(parent_name);
 }
 
@@ -904,14 +947,16 @@ impl CleanupAdmission {
 
 impl CleanupJob {
     fn run(self) {
-        if let Some(backup) = self.backup {
+        let Self {
+            directory,
+            backup,
+            staging_parent_name,
+            staging_parent,
+        } = self;
+        if let Some(backup) = backup {
             remove_backup(backup);
         }
-        remove_private_stage(
-            &self.directory,
-            &self.staging_parent_name,
-            &self.staging_parent,
-        );
+        remove_private_stage(&directory, &staging_parent_name, staging_parent);
     }
 }
 
@@ -924,16 +969,22 @@ struct Backup {
 fn remove_backup(backup: Backup) {
     // The backup was opened no-follow before publication and lives under our private staging
     // parent. Never recurse through its former public pathname.
-    if let Ok(entries) = backup.directory.read_dir(".") {
+    let Backup {
+        name,
+        parent,
+        directory,
+    } = backup;
+    if let Ok(entries) = directory.read_dir(".") {
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let _ = backup.directory.remove_dir_all(&name);
-            let _ = backup.directory.remove_file(name);
+            let _ = directory.remove_dir_all(&name);
+            let _ = directory.remove_file(name);
         }
     }
     // `name` is private to the staging parent, whose retained capability removes only this
     // original entry after its opened directory has been emptied.
-    let _ = backup.parent.remove_dir(&backup.name);
+    drop(directory);
+    let _ = parent.remove_dir(&name);
 }
 
 fn install_stage_in(
@@ -993,16 +1044,21 @@ fn install_stage_in(
     };
     if let Err(error) = stage_parent_handle.rename(stage_name, directory_handle, target_name) {
         let install_error = error.to_string();
-        if let Some(backup) = &backup
-            && let Err(rollback_error) =
-                stage_parent_handle.rename(&backup.name, directory_handle, target_name)
-        {
-            return Err(VlmError::Io {
-                operation: "official output rollback",
-                message: format!(
-                    "install failed: {install_error}; restoring previous vlm failed: {rollback_error}"
-                ),
-            });
+        if let Some(backup) = backup {
+            let Backup {
+                name, directory, ..
+            } = backup;
+            drop(directory);
+            if let Err(rollback_error) =
+                stage_parent_handle.rename(&name, directory_handle, target_name)
+            {
+                return Err(VlmError::Io {
+                    operation: "official output rollback",
+                    message: format!(
+                        "install failed: {install_error}; restoring previous vlm failed: {rollback_error}"
+                    ),
+                });
+            }
         }
         return Err(VlmError::Io {
             operation: "official output install",
@@ -1137,7 +1193,8 @@ mod tests {
             install_stage_in(&parent, "stage".as_ref(), &tree.directory, "vlm".as_ref()).is_err()
         );
         assert!(tree.directory.open("vlm").is_ok(), "old file was restored");
-        remove_private_stage(&tree.directory, &parent_name, &parent);
+        drop(stage);
+        remove_private_stage(&tree.directory, &parent_name, parent);
     }
 
     #[test]
@@ -1155,6 +1212,8 @@ mod tests {
         assert_eq!(
             stage
                 .stage
+                .as_ref()
+                .unwrap()
                 .open("document_origin.png")
                 .unwrap()
                 .metadata()
@@ -1175,6 +1234,64 @@ mod tests {
             .is_err()
         );
         assert!(!temp.path().join("document/vlm").exists());
+    }
+
+    #[test]
+    fn commit_replaces_same_target_without_private_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        for contents in [b"first".as_slice(), b"second".as_slice()] {
+            let mut stage = OfficialOutputStage::begin(
+                temp.path(),
+                "document",
+                OfficialOutputTarget::Vlm,
+                usize::MAX,
+                usize::MAX,
+                None,
+            )
+            .unwrap();
+            stage.pages.push(0);
+            stage.preview_pages.push(0);
+            stage.preview_written = true;
+            let parts = stage.parts().unwrap();
+            for (suffix, bytes) in [
+                ("middle.json", b"{}".as_slice()),
+                ("model.json", b"{}".as_slice()),
+                ("content.json", b"[]".as_slice()),
+                ("v2.json", b"{}".as_slice()),
+                ("markdown.md", contents),
+            ] {
+                super::write_bytes_in(parts, format!("{:020}-{suffix}", 0), bytes).unwrap();
+            }
+            super::write_bytes_in(stage.stage().unwrap(), "document_layout.pdf", b"pdf").unwrap();
+            stage
+                .assemble(std::time::Instant::now() + std::time::Duration::from_secs(5))
+                .unwrap();
+            assert!(stage.stage().unwrap().symlink_metadata("parts").is_err());
+            let manifest = stage.commit().unwrap();
+            assert_eq!(
+                std::fs::read(manifest.vlm_dir.join("document.md")).unwrap(),
+                contents
+            );
+            assert!(!manifest.vlm_dir.join("parts").exists());
+        }
+        let document = temp.path().join("document");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let private = std::fs::read_dir(&document)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name())
+                .filter(|name| name.to_string_lossy().starts_with(".vlm-"))
+                .collect::<Vec<_>>();
+            if private.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "private official-output artifacts remain: {private:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

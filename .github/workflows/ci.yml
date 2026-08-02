@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install actionlint
@@ -29,6 +29,12 @@ jobs:
         run: |
           actionlint="$(go env GOPATH)/bin/actionlint"
           "$actionlint"
+      - name: Run release script self-tests
+        run: |
+          python3 .github/scripts/verify_release.py self-test
+          python3 .github/scripts/stage_binding_artifacts.py self-test
+          python3 .github/scripts/attach_release_assets.py self-test
+          python3 .github/scripts/check_cargo_audit.py self-test
 
   rust-msrv:
     name: Rust 1.89.0
@@ -36,15 +42,48 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust 1.89.0
         run: rustup toolchain install 1.89.0 --profile minimal --component rustfmt
+      - name: Cache Cargo registry and git dependencies
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-audit
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-cargo-audit-0.22.2-${{ hashFiles('Cargo.lock') }}
+      - name: Install cargo-audit 0.22.2
+        run: |
+          if [ "$("$HOME/.cargo/bin/cargo-audit" --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]; then
+            cargo install cargo-audit --version 0.22.2 --locked --force
+          fi
+          test "$("$HOME/.cargo/bin/cargo-audit" --version)" = "cargo-audit 0.22.2"
+      - name: Check reviewed cargo-audit exception
+        run: |
+          set +e
+          "$HOME/.cargo/bin/cargo-audit" audit --json > "$RUNNER_TEMP/cargo-audit.json"
+          audit_status=$?
+          set -e
+          python3 .github/scripts/check_cargo_audit.py check \
+            --report "$RUNNER_TEMP/cargo-audit.json" --lockfile Cargo.lock --manifest Cargo.toml
+          printf '### cargo-audit exception\n\nAllowed: `RUSTSEC-2026-0194`, `RUSTSEC-2026-0195` (`quick-xml` only). Expires: `2026-09-30` UTC.\n' >> "$GITHUB_STEP_SUMMARY"
+          test "$audit_status" -eq 1
       - name: Check formatting
         run: cargo +1.89.0 fmt --all -- --check
       - name: Test root package
         run: cargo +1.89.0 test --locked -p mineru --all-targets -- --test-threads=1
+      - name: Run hermetic API process end-to-end tests
+        run: |
+          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact aliases_help_health_cwd_and_eof --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact invalid_log_level_exits_before_bind_or_output --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact public_bind_matrix --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact sigint_exits_while_stdin_watcher_is_blocked --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact active_worker_drains_before_exit --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --all-features --test mineru_api_server -- --exact canonical_client_consumes_real_api_server_zip_and_publishes_layout --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --all-features --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
       - name: Check root package without default features
         run: cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features
       - name: Build documentation
@@ -182,10 +221,10 @@ jobs:
   windows-path-safety-msrv:
     name: Windows path safety, Rust 1.89.0
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust 1.89.0
@@ -195,8 +234,14 @@ jobs:
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc command::direct::tests -- --test-threads=1
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_output::tests -- --test-threads=1
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=1
+      - name: Test Windows Office helper containment and conversion
+        run: |
+          cargo +1.89.0 test --locked -p mineru --all-features --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --all-features --target x86_64-pc-windows-msvc --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
       - name: Check ARM64 Windows tests
-        run: cargo +1.89.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
+        run: |
+          cargo +1.89.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
+          cargo +1.89.0 check --locked -p mineru --features office --bin mineru-office-convert --target aarch64-pc-windows-msvc
 
   rust-all-features:
     name: Rust stable, all features
@@ -204,7 +249,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install stable Rust
@@ -214,31 +259,17 @@ jobs:
       - name: Clippy
         run: cargo +stable clippy --locked -p mineru --all-targets --all-features
 
-  rust-slow-e2e:
-    name: Rust stable, slow E2E
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-      - name: Install stable Rust
-        run: rustup toolchain install stable --profile minimal && rustup default stable
-      - name: Run ignored end-to-end tests
-        run: cargo test --locked -p mineru --all-targets --all-features -- --ignored --skip real_pdf_selected_200_produces_official_preview --test-threads=1
-
   python-binding:
     name: Python 3.9 binding
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Python 3.9
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.9"
       - name: Install Rust 1.89.0 target
@@ -306,15 +337,15 @@ jobs:
         working-directory: bindings/node
     steps:
       - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Node 24.18.0
+      - name: Set up Node 24.18.1
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24.18.0
-      - name: Install npm 12.0.1
-        run: npm install --global npm@12.0.1
+          node-version: 24.18.1
+      - name: Install npm 12.0.2
+        run: npm install --global npm@12.0.2
       - name: Install Node dependencies
         run: npm ci
       - name: Install Rust 1.89.0 target
@@ -357,4 +388,29 @@ jobs:
         with:
           node-version: 18.20.8
       - name: Test on Node 18
-        run: node __test__/smoke.test.js
+        run: npm test
+
+  container-smoke:
+    name: Container smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build cached local image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: mineru:ci
+          cache-from: type=gha,scope=ci-container
+          cache-to: type=gha,mode=max,scope=ci-container
+      - name: Smoke canonical CLI
+        run: docker run --rm mineru:ci mineru --version
+      - name: Smoke API task lifecycle
+        run: python3 .github/scripts/container_smoke.py --image mineru:ci --pdf tests/fixtures/pdf/minimal.pdf

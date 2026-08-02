@@ -1580,7 +1580,7 @@ mod tests {
                 async move {
                     match state.fetch_add(1, Ordering::SeqCst) {
                         0 => {
-                            tokio::time::sleep(Duration::from_millis(25)).await;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                             Json(json!({"status":"completed"}))
                         }
                         1 => Json(json!({"status":"pending"})),
@@ -1593,7 +1593,7 @@ mod tests {
         let client = MineruApiClient::with_timing(
             &base,
             Timing {
-                acquisition: Duration::from_millis(5),
+                acquisition: Duration::from_millis(50),
                 send: Duration::from_millis(50),
                 interval: Duration::from_millis(10),
             },

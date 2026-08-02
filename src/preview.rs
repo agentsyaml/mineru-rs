@@ -1191,7 +1191,6 @@ mod tests {
         assert!(
             preview
                 .get_page_content(final_page_id)
-                .unwrap()
                 .windows(b"/OuterPhase2 Do".len())
                 .any(|bytes| bytes == b"/OuterPhase2 Do")
         );
@@ -1414,7 +1413,7 @@ mod tests {
             number(&preview, page.get(b"UserUnit").unwrap()).unwrap(),
             1.25
         );
-        let content = preview.get_page_content(page_id).unwrap();
+        let content = preview.get_page_content(page_id);
         let vector = b"30 70 m 120 70 l 120 140 l h S";
         assert!(content.windows(vector.len()).any(|bytes| bytes == vector));
         let contents = page.get(b"Contents").unwrap().as_array().unwrap();

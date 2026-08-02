@@ -51,7 +51,7 @@ WHEEL_SLOTS = {
 }
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-NPM_DEV_DEPENDENCIES = {"@napi-rs/cli": "^3.2.0"}
+NPM_DEV_DEPENDENCIES = {"@napi-rs/cli": "^3.8.2"}
 PYPI_USER_AGENT = "mineru-rs-release-verifier/1"
 PYTHON_SCRIPTS = {"mineru": "mineru_rs._cli:main", "mineru-rs": "mineru_rs._cli:main"}
 NODE_ROOT_BIN = {"mineru": "bin/mineru.js", "mineru-rs": "bin/mineru.js"}
@@ -555,7 +555,7 @@ def pypi_postflight(args: argparse.Namespace) -> None:
     local = local_wheel_hashes(args.directory, args.project, args.version)
     last_remote: dict[str, str] | None = None
     last_status = 0
-    for attempt in range(5):
+    for attempt in range(8):
         status, remote, retry_after = pypi_release_files(args.project, args.version)
         last_status = status
         if status == 200:
@@ -564,11 +564,11 @@ def pypi_postflight(args: argparse.Namespace) -> None:
             if not missing:
                 print(f"PyPI postflight: verified={len(local)}")
                 return
-        if attempt < 4:
+        if attempt < 7:
             retry_pypi(retry_after, 2**attempt)
     if last_remote is not None:
         require_pypi_postflight(local, last_remote)
-    fail(f"PyPI postflight unavailable after 5 attempts; last status={last_status or 'network error'}")
+    fail(f"PyPI postflight unavailable after 8 attempts; last status={last_status or 'network error'}")
 
 
 def expected_platform_manifest(root: dict, suffix: str, version: str) -> dict:

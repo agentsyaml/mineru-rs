@@ -84,6 +84,18 @@ Office 格式转换需要 `mineru-office-convert` 辅助程序，它依赖可选
 cargo build --release --features office
 ```
 
+### Office helper containment
+
+辅助程序在转换前对 OOXML 执行强制完整预检，并限制输入 32 MiB、输出 64 MiB。
+
+| 平台 | 内存硬限制 | 其他辅助程序限制 |
+| --- | --- | --- |
+| Linux | `RLIMIT_AS` 1 GiB | CPU 120 秒、`NOFILE` 256、托管 180 秒 wall deadline、进程组清理 |
+| Windows | Job Object 1 GiB | CPU 120 秒、托管 180 秒 wall deadline、Job tree 清理 |
+| macOS | 无原生硬 RSS 上限 | 强制预检、CPU 120 秒、`NOFILE` 256、托管 180 秒 wall deadline、进程组清理 |
+
+macOS 原生 API 没有可靠且无需 entitlement 的进程 RSS/地址空间硬限制。面向互联网、在原生 macOS 接收不可信 Office 文档的部署，必须使用外部 VM 或容器内存边界提供硬内存隔离。
+
 ### 直接 VLM 模式（默认）
 
 不传 `--api-url` 时，`mineru` 直接调用外部 VLM 服务。服务地址和模型由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME`、`MINERU_VL_API_KEY` 环境变量或 `--url` 覆盖。
@@ -129,6 +141,31 @@ export MINERU_VL_API_KEY="<your-key>"
 ## API 服务端
 
 `mineru-api` 与 `mineru-vlm-api` 是同一个服务的两个可执行名，行为完全一致。服务本身不做本地推理，它接收文档、调用外部 VLM 服务，再把结果归档返回。
+
+### 容器
+
+稳定版镜像支持 `amd64` 和 `arm64`：
+
+```sh
+docker pull ghcr.io/agentsyaml/mineru-rs:latest
+docker volume create mineru-output
+docker run --rm -p 8000:8000 -v mineru-output:/app/output \
+  -e MINERU_VL_SERVER="https://<server>" \
+  -e MINERU_VL_MODEL_NAME="<model-id>" \
+  -e MINERU_VL_API_KEY="<your-key>" \
+  -e MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
+  ghcr.io/agentsyaml/mineru-rs:latest
+```
+
+默认命令启动 API，监听 `8000`，并将任务输出写入 `/app/output`；默认使用 named volume，以保留非 root 镜像所需的目录权限。若在原生 Linux 上绑定宿主目录，需创建目录并通过 `--user "$(id -u):$(id -g)"` 以宿主用户身份运行。镜像公开绑定 API，但为避免未认证的公开解析，POST 解析必须由操作者显式启用：`-e MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true`。可替换默认命令运行 CLI：
+
+```sh
+docker run --rm ghcr.io/agentsyaml/mineru-rs:latest mineru --version
+mkdir -p output
+docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/work" -w /work \
+  -e MINERU_VL_SERVER="https://<server>" -e MINERU_VL_MODEL_NAME="<model-id>" \
+  ghcr.io/agentsyaml/mineru-rs:latest mineru -p input.pdf -o output
+```
 
 ### 启动
 
@@ -196,7 +233,8 @@ curl "http://127.0.0.1:8000/health"
 ```sh
 curl -X POST "http://127.0.0.1:8000/tasks" \
   -F "files=@input.pdf" \
-  -F "backend=vlm-http-client"
+  -F "backend=vlm-http-client" \
+  -F "response_format_zip=true"
 ```
 
 ```json
@@ -216,12 +254,13 @@ curl -o result.zip "http://127.0.0.1:8000/tasks/local-0/result"
 curl -X POST "http://127.0.0.1:8000/file_parse" \
   -F "files=@input.pdf" \
   -F "backend=vlm-http-client" \
+  -F "response_format_zip=true" \
   -o result.zip
 ```
 
 选择建议：批量、长文档或需要进度可见性时用 `/tasks`；单个小文档、脚本内一次性调用用 `/file_parse`。
 
-表单接受 `files` 文件部分，以及 `lang_list`、`backend`、`effort`、`parse_method`、`formula_enable`、`table_enable`、`image_analysis`、`start_page_id`、`end_page_id`、`server_url` 和 `return_md`、`return_middle_json`、`return_model_output`、`return_content_list`、`return_images`、`return_original_file` 文本字段。字段重复、字段过多或取值非法都会被拒绝。
+表单接受 `files` 文件部分，以及 `lang_list`、`backend`、`effort`、`parse_method`、`formula_enable`、`table_enable`、`image_analysis`、`start_page_id`、`end_page_id`、`server_url`、`response_format_zip` 和 `return_md`、`return_middle_json`、`return_model_output`、`return_content_list`、`return_images`、`return_original_file` 文本字段。字段重复、字段过多或取值非法都会被拒绝。
 
 常见状态码：
 

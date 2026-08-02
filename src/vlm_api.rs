@@ -5446,7 +5446,8 @@ mod tests {
                 .status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
-        let invalid_file = reqwest::Client::new()
+        let no_proxy = reqwest::Client::builder().no_proxy().build().unwrap();
+        let invalid_file = no_proxy
             .post(format!("{}/file_parse", service.base))
             .header(header::HOST, "bad/path")
             .multipart(form(canonical_fields(), vec![]))
@@ -5466,7 +5467,7 @@ mod tests {
             .unwrap();
         assert_eq!(health["task_count"], 0);
 
-        let accepted: serde_json::Value = reqwest::Client::new()
+        let accepted: serde_json::Value = no_proxy
             .post(format!("{}/tasks", service.base))
             .header(header::HOST, "Original.Example:8123")
             .header("forwarded", "host=other.test")
@@ -5483,7 +5484,7 @@ mod tests {
         let result_url = format!("{status_url}/result");
         assert_eq!(accepted["status_url"], status_url);
         assert_eq!(accepted["result_url"], result_url);
-        let fetched: serde_json::Value = reqwest::Client::new()
+        let fetched: serde_json::Value = no_proxy
             .get(format!("{}/tasks/{id}", service.base))
             .header(header::HOST, "Different.Example:9000")
             .send()

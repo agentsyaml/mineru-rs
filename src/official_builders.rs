@@ -114,7 +114,10 @@ fn err<T>(message: impl Into<String>) -> VlmResult<T> {
 }
 
 fn sha(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn json_truthy(value: &Value) -> bool {

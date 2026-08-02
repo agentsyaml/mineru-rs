@@ -13,8 +13,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 mineru = { path = "../.." }
-napi = { version = "3.10", features = ["async"] }
-napi-derive = "3.5"
+napi = { version = "3.12", features = ["async"] }
+napi-derive = "3.6"
 
 [build-dependencies]
-napi-build = "2.3"
+napi-build = "2.4"

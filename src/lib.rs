@@ -44,6 +44,8 @@ pub use input_prepare::DocumentKind;
 #[doc(hidden)]
 pub use input_prepare::RasterWorkers;
 #[doc(hidden)]
+pub use mineru_api::ooxml::preflight_ooxml_bytes;
+#[doc(hidden)]
 pub use mineru_api::{
     RemoteApiDocument, RemoteApiEnv, RemoteApiFailure, RemoteApiOptions, normalize_remote_language,
     parse_remote_api_env, selected_document_pages,

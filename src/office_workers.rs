@@ -23,6 +23,7 @@ struct TestProbe {
 const INPUT_CAP: usize = 32 * 1024 * 1024;
 const OUTPUT_CAP: usize = 64 * 1024 * 1024;
 const STDERR_CAP: usize = 4096;
+const MANAGED_WALL_CAP: Duration = Duration::from_secs(180);
 // Only the direct child is reaped. After this grace, cleanup continues detached so drain stays bounded.
 const CHILD_REAP_GRACE: Duration = Duration::from_millis(250);
 
@@ -298,6 +299,19 @@ mod tests {
             "hang" => {
                 eprintln!("entered");
                 std::thread::sleep(Duration::from_secs(30));
+            }
+            #[cfg(unix)]
+            "group_hang" => {
+                let grandchild = std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .unwrap();
+                if let Some(path) = std::env::var_os("MINERU_OFFICE_FAKE_READY") {
+                    std::fs::write(path, grandchild.id().to_string()).unwrap();
+                }
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
             }
             "pipe_failure" | "reap_timeout" | "reap_wait_error" => {
                 std::thread::sleep(Duration::from_secs(30));
@@ -588,6 +602,63 @@ mod tests {
         assert_eq!(w.probe.stdout.load(Ordering::Relaxed), 0);
         assert_eq!(w.probe.stderr.load(Ordering::Relaxed), 0);
     }
+
+    #[test]
+    fn managed_wall_time_is_capped_independently_of_route_deadline() {
+        assert_eq!(
+            managed_timeout(Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            managed_timeout(Duration::from_secs(24 * 60 * 60)),
+            MANAGED_WALL_CAP
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_the_helper_process_group() {
+        let mut w = workers();
+        let ready = tempfile::NamedTempFile::new().unwrap();
+        let path = ready.path().to_path_buf();
+        std::fs::remove_file(&path).unwrap();
+        w.ready = Some(path.clone());
+        let conversion = tokio::spawn({
+            let w = w.clone();
+            async move {
+                w.convert("group_hang", vec![], Duration::from_millis(100))
+                    .await
+            }
+        });
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&path)
+                    && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
+                {
+                    break pid;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(conversion.await.unwrap().is_err());
+        let gone = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                // SAFETY: `pid` was reported by the disposable test child.
+                if unsafe { libc::kill(pid, 0) } == -1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if gone.is_err() {
+            // SAFETY: prevent a failed assertion from leaking the disposable child.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(gone.is_ok(), "process-group descendant survived cleanup");
+    }
 }
 
 async fn owner(
@@ -600,9 +671,11 @@ async fn owner(
     #[cfg(test)] probe: Arc<TestProbe>,
     #[cfg(test)] ready: Option<PathBuf>,
 ) -> Result<(Vec<u8>, Option<String>), OfficeConvertError> {
-    let deadline = tokio::time::Instant::now()
+    let now = tokio::time::Instant::now();
+    let route_deadline = now
         .checked_add(timeout)
         .ok_or_else(|| OfficeConvertError::Failed("invalid timeout".into()))?;
+    let deadline = route_deadline.min(now + managed_timeout(timeout));
     let mut command = Command::new(executable);
     #[cfg(test)]
     let fake_child = !prefix.is_empty();
@@ -623,11 +696,16 @@ async fn owner(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     #[cfg(test)]
     command.env("MINERU_OFFICE_FAKE_CHILD", "1");
     let mut child = command
         .spawn()
         .map_err(|_| OfficeConvertError::Unavailable)?;
+    let process_group = child.id();
+    #[cfg(unix)]
+    let mut process_group_guard = ProcessGroup(process_group);
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -637,7 +715,7 @@ async fn owner(
             drop(stdin);
             drop(stdout);
             drop(stderr);
-            let _reap = kill_and_reap(child, false, ReapMode::Normal).await;
+            let _reap = kill_and_reap(child, process_group, false, ReapMode::Normal).await;
             #[cfg(test)]
             match _reap {
                 ReapOutcome::Reaped => {
@@ -789,7 +867,7 @@ async fn owner(
         };
         #[cfg(not(test))]
         let reap_mode = ReapMode::Normal;
-        let _reap = kill_and_reap(child, child_reaped, reap_mode).await;
+        let _reap = kill_and_reap(child, process_group, child_reaped, reap_mode).await;
         #[cfg(test)]
         match _reap {
             ReapOutcome::Reaped => {
@@ -811,6 +889,13 @@ async fn owner(
         return Err(OfficeConvertError::Failed(sanitize(
             diagnostic.as_deref().unwrap_or_default(),
         )));
+    }
+    #[cfg(unix)]
+    {
+        // The direct child and every pipe are complete; clear lingering descendants before any
+        // PDF validation can delay us, then discard the PGID before it can be reused.
+        kill_process_group(process_group);
+        process_group_guard.disarm();
     }
     let output = output.unwrap_or_default();
     #[cfg(test)]
@@ -854,10 +939,12 @@ enum ReapOutcome {
 }
 async fn kill_and_reap(
     mut child: tokio::process::Child,
+    process_group: Option<u32>,
     already_reaped: bool,
     mode: ReapMode,
 ) -> ReapOutcome {
-    // Tokio only controls the direct child; descendants that inherit pipes are not process-tree managed.
+    #[cfg(unix)]
+    kill_process_group(process_group);
     let _ = child.start_kill();
     if already_reaped {
         return ReapOutcome::AlreadyReaped;
@@ -878,12 +965,45 @@ async fn kill_and_reap(
         Ok(Ok(_)) => ReapOutcome::Reaped,
         Ok(Err(_)) | Err(_) => {
             tokio::spawn(async move {
+                #[cfg(unix)]
+                kill_process_group(process_group);
                 let _ = child.start_kill();
                 let _ = child.wait().await;
             });
             ReapOutcome::Detached
         }
     }
+}
+
+#[cfg(unix)]
+fn kill_process_group(process_group: Option<u32>) {
+    let Some(process_group) = process_group.filter(|id| *id != 0 && *id != std::process::id())
+    else {
+        return;
+    };
+    // SAFETY: the child was launched with process_group(0), so -pid denotes only its new group.
+    unsafe { libc::kill(-(process_group as libc::pid_t), libc::SIGKILL) };
+}
+
+#[cfg(unix)]
+struct ProcessGroup(Option<u32>);
+
+#[cfg(unix)]
+impl ProcessGroup {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        kill_process_group(self.0);
+    }
+}
+
+fn managed_timeout(remaining_route_deadline: Duration) -> Duration {
+    remaining_route_deadline.min(MANAGED_WALL_CAP)
 }
 enum ReadCapError {
     TooLarge,

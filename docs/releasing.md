@@ -1,14 +1,15 @@
 # Releasing
 
-Releases are coordinated across crates.io `mineru`, PyPI `mineru-rs`, and npm
-`@alexsun-top/mineru`. Registry credentials must be short-lived environment
-variables or trusted-publisher OIDC credentials. Never store a registry token
-in the repository, GitHub secrets, `.npmrc`, or Cargo configuration.
+Releases are coordinated across crates.io `mineru`, PyPI `mineru-rs`, npm
+`@alexsun-top/mineru`, and GHCR `ghcr.io/agentsyaml/mineru-rs`. Registry
+credentials must be short-lived environment variables or trusted-publisher OIDC
+credentials. Never store a registry token in the repository, GitHub secrets,
+`.npmrc`, or Cargo configuration.
 
 ## One-time repository and registry setup
 
 In `agentsyaml/mineru-rs`, create protected GitHub environments named
-`crates-io`, `pypi`, and `npm`, with required reviewers and release-tag
+`crates-io`, `pypi`, `npm`, and `ghcr`, with required reviewers and release-tag
 restrictions as appropriate.
 
 - PyPI: create a **pending trusted publisher** for project `mineru-rs`,
@@ -20,9 +21,12 @@ restrictions as appropriate.
 - npm: control the `@alexsun-top` scope. After bootstrap creates all seven
   records, configure a trusted publisher on every record for repository
   `agentsyaml/mineru-rs`, workflow `release.yml`, environment `npm`.
+- GHCR: `publish-container` uses the workflow `GITHUB_TOKEN` with only
+  `contents: read` and `packages: write` permissions.
 
-No long-lived registry token belongs in GitHub Actions. Publishing jobs acquire
-OIDC credentials only after all release artifacts pass verification.
+No long-lived registry token belongs in GitHub Actions. The crates.io, PyPI,
+and npm jobs acquire OIDC credentials only after all release artifacts pass
+verification; GHCR uses the job-scoped `GITHUB_TOKEN` permissions above.
 
 ## Non-user-facing 0.0.1 bootstrap
 
@@ -133,6 +137,8 @@ prerelease.
 
 ## Local preflight
 
+The temporary `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` (`quick-xml`) exception is mitigated reachability, not fixed or unreachable: mandatory full OOXML preflight runs before Office conversion. It expires on 2026-09-30 and must be reviewed or removed then. Native macOS has no reliable no-entitlement hard memory cap, so hostile Office processing there requires an external VM or container memory boundary.
+
 Run from the repository root unless a subshell changes directory:
 
 ```sh
@@ -182,8 +188,16 @@ is released. Do not build or publish a Python sdist.
 Push the synchronized release commit and tag, then publish the matching stable
 GitHub Release. The release workflow is triggered only by that published
 release. It builds and verifies everything before separate protected jobs
-publish crates.io, PyPI wheels, the six npm native packages, and finally the
-npm root package. Creating a tag alone does not publish anything.
+publish crates.io, PyPI wheels, the six npm native packages and npm root
+package, and the GHCR image. Creating a tag alone does not publish anything.
+
+`publish-container` runs alongside the other publishing and asset-attachment
+jobs after the same `release-ready` gate, so an image failure does not block
+the other registries. It builds the repository Dockerfile for `linux/amd64` and
+`linux/arm64` and publishes `ghcr.io/agentsyaml/mineru-rs` with the exact
+release version, `major.minor`, `major`, and `latest` tags. Buildx records the
+multi-architecture digest in the job summary and publishes maximal provenance
+and an SBOM.
 
 ## Release asset attachment
 

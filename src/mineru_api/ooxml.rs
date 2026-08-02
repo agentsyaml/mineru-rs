@@ -7,7 +7,7 @@ use quick_xml::{
     reader::NsReader,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{Cursor, Read},
     path::Path,
@@ -18,8 +18,16 @@ use zip::{
 };
 
 const ARCHIVE_CAP: u64 = 512 * 1024 * 1024;
-const TOTAL_CAP: u64 = 2 * 1024 * 1024 * 1024;
-const XML_CAP: u64 = 8 * 1024 * 1024;
+/// Maximum uncompressed package size accepted by the OOXML preflight.
+const MAX_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum bytes in one XML part accepted by the OOXML preflight.
+const MAX_XML_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
+/// Maximum XML bytes retained and parsed across one OOXML package.
+const MAX_XML_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_XML_DEPTH: usize = 128;
+const MAX_XML_EVENTS: usize = 100_000;
+const MAX_XML_ATTRIBUTES: usize = 256;
+const MAX_XML_NAMESPACES: usize = 256;
 const RATIO_CAP: u64 = 500;
 const RELS: &str = "_rels/.rels";
 const TYPES: &str = "[Content_Types].xml";
@@ -34,6 +42,16 @@ pub(super) fn detect(path: &Path) -> Result<Option<&'static str>, String> {
 
 /// Detect an OOXML package from the exact bounded bytes that will be consumed.
 pub(crate) fn detect_bytes(bytes: &[u8]) -> Result<Option<&'static str>, String> {
+    // The legacy detector is a classifier; callers still receive no office kind on rejection.
+    Ok(preflight_ooxml_bytes(bytes).unwrap_or(None))
+}
+
+/// Preflights exact OOXML archive bytes before they are passed to an office converter.
+///
+/// `Ok(Some(..))` is the detected `"docx"`, `"pptx"`, or `"xlsx"` kind;
+/// `Ok(None)` is a non-OOXML input; errors are bounded preflight rejections.
+#[doc(hidden)]
+pub fn preflight_ooxml_bytes(bytes: &[u8]) -> Result<Option<&'static str>, String> {
     detect_reader(Cursor::new(bytes), bytes.len() as u64, Limits::default())
 }
 
@@ -43,15 +61,17 @@ struct Limits {
     total: u64,
     xml: u64,
     ratio: u64,
+    xml_total: u64,
     scan: ScanLimits,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
             archive: ARCHIVE_CAP,
-            total: TOTAL_CAP,
-            xml: XML_CAP,
+            total: MAX_EXPANDED_BYTES,
+            xml: MAX_XML_ENTRY_BYTES,
             ratio: RATIO_CAP,
+            xml_total: MAX_XML_TOTAL_BYTES,
             scan: ScanLimits::production(10_000),
         }
     }
@@ -104,16 +124,24 @@ fn detect_reader<R: Read + std::io::Seek>(
         || u64::try_from(zip.len()).ok() != Some(scanned.count)
         || zip.central_directory_start() != scanned.central_start
     {
-        return Ok(None);
+        return Err("OOXML archive directory does not match its entries".into());
     }
     let mut total = 0u64;
-    let mut rel = None;
-    let mut types = None;
+    let mut xml_total = 0u64;
+    let mut names = HashSet::new();
+    let mut validated_xml = HashSet::new();
+    let mut rels = Vec::new();
+    let mut relationships = None;
+    let mut overrides = None;
     for i in 0..zip.len() {
-        let entry = match zip.by_index(i) {
+        let mut entry = match zip.by_index(i) {
             Ok(v) => v,
             Err(_) => return Ok(None),
         };
+        let name = entry.name().to_owned();
+        if !names.insert(entry_name_key(&name)) {
+            return Err("OOXML archive contains duplicate entry names".into());
+        }
         let mode = entry.unix_mode().unwrap_or(0) & 0o170000;
         if mode != 0 && mode != 0o100000 && mode != 0o040000 {
             return Err("OOXML archive contains a symlink or special entry".into());
@@ -122,25 +150,62 @@ fn detect_reader<R: Read + std::io::Seek>(
             .checked_add(entry.size())
             .filter(|v| *v <= limits.total)
             .ok_or("OOXML archive exceeds expanded size limit")?;
-        match entry.name() {
-            RELS if rel.replace(i).is_some() => return Ok(None),
-            TYPES if types.replace(i).is_some() => return Ok(None),
-            _ => {}
+        let named_xml = is_xml_name(&name);
+        let declared = entry.size();
+        let packed = entry.compressed_size();
+        if declared > 0
+            && (packed == 0
+                || packed
+                    .checked_mul(limits.ratio)
+                    .is_none_or(|limit| declared > limit))
+        {
+            return Err("OOXML entry compression ratio exceeds limit".into());
+        }
+        let bytes = read_entry(&mut entry, declared, named_xml, limits, &mut xml_total)?;
+        if let Some(bytes) = bytes {
+            validate_xml(&bytes).map_err(|_| "OOXML XML is unsafe or malformed")?;
+            validated_xml.insert(name.clone());
+            if name.as_bytes().ends_with(b".rels") {
+                rels.push((name.clone(), bytes.clone()));
+            }
+            if name == RELS {
+                if relationships.replace(bytes).is_some() {
+                    return Ok(None);
+                }
+            } else if name == TYPES && overrides.replace(bytes).is_some() {
+                return Ok(None);
+            }
         }
     }
-    let (rel, types) = match (rel, types) {
+    let forced_xml: HashSet<String> = rels
+        .iter()
+        .flat_map(|(rels_name, bytes)| {
+            let owner = rels_owner(rels_name);
+            parse_internal_relationships(bytes)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(move |(typ, target)| {
+                    office2pdf_xml_target(&owner, typ.as_deref().unwrap_or(""), &target)
+                        .then(|| resolve_opc_target(&owner, &target))
+                        .flatten()
+                })
+        })
+        .collect();
+    for target in forced_xml {
+        if !validated_xml.insert(target.clone()) {
+            continue;
+        }
+        let Ok(mut entry) = zip.by_name(&target) else {
+            continue;
+        };
+        let declared = entry.size();
+        let bytes = read_entry(&mut entry, declared, true, limits, &mut xml_total)?
+            .ok_or("OOXML XML relationship target is invalid")?;
+        validate_xml(&bytes).map_err(|_| "OOXML XML is unsafe or malformed")?;
+    }
+    let (relationships, overrides) = match (relationships, overrides) {
         (Some(a), Some(b)) => (a, b),
         _ => return Ok(None),
-    };
-    let relationships = match read_xml(&mut zip, rel, limits) {
-        Ok(v) => v,
-        Err(ReadXml::Fallback) => return Ok(None),
-        Err(ReadXml::Limit) => return Err("OOXML XML exceeds limit".into()),
-    };
-    let overrides = match read_xml(&mut zip, types, limits) {
-        Ok(v) => v,
-        Err(ReadXml::Fallback) => return Ok(None),
-        Err(ReadXml::Limit) => return Err("OOXML XML exceeds limit".into()),
     };
     let targets = parse_relationships(&relationships).ok();
     let overrides = parse_overrides(&overrides).ok();
@@ -155,51 +220,319 @@ fn detect_reader<R: Read + std::io::Seek>(
     }))
 }
 
-enum ReadXml {
-    Fallback,
-    Limit,
+fn rels_owner(name: &str) -> String {
+    if name == RELS {
+        return String::new();
+    }
+    let Some((dir, file)) = name.rsplit_once("/_rels/") else {
+        return String::new();
+    };
+    file.strip_suffix(".rels")
+        .map(|file| format!("{dir}/{file}"))
+        .unwrap_or_default()
 }
-fn read_xml<R: Read + std::io::Seek>(
-    zip: &mut ZipArchive<R>,
-    index: usize,
+
+fn resolve_opc_target(owner: &str, target: &str) -> Option<String> {
+    let mut parts: Vec<&str> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        owner
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.split('/').collect())?
+    };
+    for part in target.trim_start_matches('/').split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+// office2pdf 0.6.5 dynamic XML inventory: PPT presentation/slide/layout/master/theme,
+// chart and SmartArt; DOCX headers/footers/charts; XLSX workbook sheets, worksheet
+// drawings, and drawing charts. Image/media rels are binary-only under their owners.
+fn office2pdf_xml_target(owner: &str, typ: &str, target: &str) -> bool {
+    let owner = owner.to_ascii_lowercase();
+    let typ = typ.to_ascii_lowercase();
+    let target = target.to_ascii_lowercase();
+    if owner == "ppt/presentation.xml" {
+        // parse_rels_xml ignores Type and TargetMode before slide-id/theme selection.
+        return true;
+    }
+    if owner.starts_with("ppt/slides/") {
+        return target.contains("slidelayout")
+            || (target.contains("chart")
+                && !target.contains("chartstyle")
+                && !target.contains("chartcolor"))
+            || target.contains("diagrams/data")
+            || target.contains("diagram/data")
+            || target.contains("diagrams/drawing")
+            || target.contains("diagram/drawing")
+            || typ.contains("diagramdrawing");
+    }
+    if owner.starts_with("ppt/slidelayouts/") {
+        return target.contains("slidemaster");
+    }
+    if owner == "word/document.xml" {
+        return typ.contains("/header") || typ.contains("/footer") || typ.contains("chart");
+    }
+    if owner == "xl/workbook.xml" {
+        // Workbook relationship targets are selected by r:id, not relationship Type.
+        return true;
+    }
+    if owner.starts_with("xl/worksheets/") {
+        return typ.contains("drawing");
+    }
+    if owner.starts_with("xl/drawings/") {
+        return !pptx_binary_media_relationship(&typ, &target);
+    }
+    false
+}
+
+fn pptx_binary_media_relationship(typ: &str, target: &str) -> bool {
+    typ.contains("/image")
+        || typ.contains("hdphoto")
+        || target.contains("/media/")
+        || target.ends_with(".png")
+        || target.ends_with(".jpg")
+        || target.ends_with(".jpeg")
+        || target.ends_with(".gif")
+        || target.ends_with(".bmp")
+        || target.ends_with(".tiff")
+        || target.ends_with(".tif")
+        || target.ends_with(".emf")
+}
+
+fn parse_internal_relationships(bytes: &[u8]) -> Result<Vec<(Option<String>, String)>, ()> {
+    let mut reader = xml_reader(bytes)?;
+    let decoder = NsReader::from_reader(Cursor::new(b"".as_slice())).decoder();
+    let mut buf = Vec::new();
+    let mut version = XmlVersion::Implicit1_0;
+    let mut out = Vec::new();
+    loop {
+        buf.clear();
+        let (_, event) = reader.read_resolved_event_into(&mut buf).map_err(|_| ())?;
+        if let Event::Decl(decl) = &event {
+            version = decl.xml_version().map_err(|_| ())?;
+        }
+        if let Event::Start(element) | Event::Empty(element) = &event
+            && element.local_name().as_ref() == b"Relationship"
+        {
+            let mut typ = None;
+            let mut id = None;
+            let mut target = None;
+            for attribute in element.attributes() {
+                let attribute = attribute.map_err(|_| ())?;
+                let value = attribute
+                    .decoded_and_normalized_value(version, decoder)
+                    .map_err(|_| ())?;
+                match attribute.key.local_name().as_ref() {
+                    b"Id" => id = Some(value.into_owned()),
+                    b"Type" => typ = Some(value.into_owned()),
+                    b"Target" => target = Some(value.into_owned()),
+                    _ => {}
+                }
+            }
+            // office2pdf 0.6.5 keeps Id+Target entries, omits Type, and ignores TargetMode.
+            if let (Some(_), Some(target)) = (id, target) {
+                out.push((typ, target));
+            }
+        }
+        if matches!(event, Event::Eof) {
+            return Ok(out);
+        }
+    }
+}
+
+fn entry_name_key(name: &str) -> Vec<u8> {
+    let mut key = name.as_bytes().to_vec();
+    key.make_ascii_lowercase();
+    while key.last() == Some(&b'/') {
+        key.pop();
+    }
+    key
+}
+
+fn is_xml_name(name: &str) -> bool {
+    let name = name.as_bytes();
+    name.len() >= 4
+        && (name[name.len() - 4..].eq_ignore_ascii_case(b".xml")
+            || (name.len() >= 5 && name[name.len() - 5..].eq_ignore_ascii_case(b".rels")))
+}
+
+fn xml_like(bytes: &[u8]) -> bool {
+    let mut bytes = bytes;
+    while let Some((first, rest)) = bytes.split_first() {
+        if !matches!(first, b' ' | b'\t' | b'\r' | b'\n') {
+            break;
+        }
+        bytes = rest;
+    }
+    bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    while let Some((first, rest)) = bytes.split_first() {
+        if !matches!(first, b' ' | b'\t' | b'\r' | b'\n') {
+            break;
+        }
+        bytes = rest;
+    }
+    bytes.starts_with(b"\xff\xfe")
+        || bytes.starts_with(b"\xfe\xff")
+        || bytes.starts_with(b"\xff\xfe\0\0")
+        || bytes.starts_with(b"\0\0\xfe\xff")
+        || bytes.starts_with(b"<\0")
+        || bytes.starts_with(b"\0<")
+        || bytes.starts_with(b"<\0\0\0")
+        || bytes.starts_with(b"\0\0\0<")
+        || bytes.starts_with(b"<?xml")
+        || bytes.starts_with(b"<!")
+        || matches!(bytes.first(), Some(b'<'))
+            && matches!(bytes.get(1), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_' | b':'))
+}
+
+fn read_entry<R: Read>(
+    entry: &mut R,
+    declared: u64,
+    named_xml: bool,
     limits: Limits,
-) -> Result<Vec<u8>, ReadXml> {
-    let mut entry = zip.by_index(index).map_err(|_| ReadXml::Fallback)?;
-    let declared = entry.size();
-    let packed = entry.compressed_size();
-    if declared > limits.xml {
-        return Err(ReadXml::Limit);
-    }
-    if declared > 0
-        && (packed == 0
-            || packed
-                .checked_mul(limits.ratio)
-                .is_none_or(|limit| declared > limit))
-    {
-        return Err(ReadXml::Limit);
-    }
-    let mut out = Vec::with_capacity(usize::try_from(declared).map_err(|_| ReadXml::Limit)?);
+    xml_total: &mut u64,
+) -> Result<Option<Vec<u8>>, String> {
+    let mut out = Vec::new();
+    let mut total = 0u64;
     let mut chunk = [0u8; 8192];
     loop {
-        let n = entry.read(&mut chunk).map_err(|_| ReadXml::Fallback)?;
+        let n = entry
+            .read(&mut chunk)
+            .map_err(|_| "OOXML entry decompression or CRC check failed")?;
         if n == 0 {
             break;
-        };
-        let read_len = u64::try_from(n).map_err(|_| ReadXml::Limit)?;
-        if u64::try_from(out.len())
-            .ok()
-            .and_then(|written| written.checked_add(read_len))
-            .filter(|n| *n <= limits.xml)
-            .is_none()
-        {
-            return Err(ReadXml::Limit);
         }
-        out.extend_from_slice(&chunk[..n]);
+        total = total
+            .checked_add(n as u64)
+            .ok_or("OOXML entry is too large")?;
+        if total <= limits.xml {
+            out.extend_from_slice(&chunk[..n]);
+        }
     }
-    if u64::try_from(out.len()).ok() != Some(declared) {
-        return Err(ReadXml::Fallback);
+    if total != declared {
+        return Err("OOXML entry length does not match its declaration".into());
     }
-    Ok(out)
+    if named_xml || xml_like(&out) {
+        if total > limits.xml {
+            return Err("OOXML XML exceeds per-entry limit".into());
+        }
+        *xml_total = xml_total
+            .checked_add(total)
+            .filter(|v| *v <= limits.xml_total)
+            .ok_or("OOXML XML exceeds aggregate limit")?;
+        return Ok(Some(out));
+    }
+    Ok(None)
+}
+
+fn validate_xml(bytes: &[u8]) -> Result<(), ()> {
+    let mut reader = xml_reader(bytes)?;
+    let mut buf = Vec::new();
+    let mut events = 0usize;
+    let mut depth = 0usize;
+    let mut root_seen = false;
+    let mut declaration_seen = false;
+    let mut first_event = true;
+    let mut version = XmlVersion::Implicit1_0;
+    loop {
+        buf.clear();
+        let (ns, event) = reader.read_resolved_event_into(&mut buf).map_err(|_| ())?;
+        if matches!(ns, ResolveResult::Unknown(_)) {
+            return Err(());
+        }
+        events += 1;
+        if events > MAX_XML_EVENTS {
+            return Err(());
+        }
+        if let Event::Decl(decl) = &event {
+            if !first_event || declaration_seen || root_seen {
+                return Err(());
+            }
+            declaration_seen = true;
+            version = decl.xml_version().map_err(|_| ())?;
+            validate_declaration(decl, bytes)?;
+        }
+        first_event = false;
+        if let Event::Start(element) | Event::Empty(element) = &event {
+            validate_xml_attributes(&reader, element)?;
+        }
+        match &event {
+            Event::DocType(_) => return Err(()),
+            Event::GeneralRef(reference)
+                if depth == 0 || !valid_general_ref(reference.as_ref(), version) =>
+            {
+                return Err(());
+            }
+            Event::CData(_) if depth == 0 => return Err(()),
+            Event::Start(_) => {
+                if depth == 0 && root_seen {
+                    return Err(());
+                }
+                root_seen = true;
+                depth = depth.checked_add(1).ok_or(())?;
+                if depth > MAX_XML_DEPTH {
+                    return Err(());
+                }
+            }
+            Event::Empty(_) => {
+                if depth == 0 && root_seen {
+                    return Err(());
+                }
+                root_seen = true;
+            }
+            Event::End(_) => depth = depth.checked_sub(1).ok_or(())?,
+            Event::Text(text) if depth == 0 && !is_ascii_whitespace_text(text) => return Err(()),
+            Event::Eof => return (root_seen && depth == 0).then_some(()).ok_or(()),
+            _ => {}
+        }
+    }
+}
+
+fn validate_xml_attributes(
+    reader: &NsReader<DecodingReader<Cursor<&[u8]>>>,
+    element: &quick_xml::events::BytesStart<'_>,
+) -> Result<(), ()> {
+    let mut attributes = 0usize;
+    let mut namespaces = 0usize;
+    let mut names = HashSet::new();
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|_| ())?;
+        attributes += 1;
+        if attributes > MAX_XML_ATTRIBUTES {
+            return Err(());
+        }
+        if attribute.key.as_namespace_binding().is_some() {
+            namespaces += 1;
+            if namespaces > MAX_XML_NAMESPACES || !names.insert(attribute.key.as_ref().to_vec()) {
+                return Err(());
+            }
+        } else {
+            let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+            let mut name = Vec::new();
+            match namespace {
+                ResolveResult::Unbound => name.push(0),
+                ResolveResult::Bound(namespace) => {
+                    name.push(1);
+                    name.extend_from_slice(namespace.as_ref());
+                    name.push(0);
+                }
+                ResolveResult::Unknown(_) => return Err(()),
+            }
+            name.extend_from_slice(local.as_ref());
+            if !names.insert(name) {
+                return Err(());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_relationships(bytes: &[u8]) -> Result<Vec<String>, ()> {
@@ -628,7 +961,7 @@ mod tests {
         }) ^ !0
     }
     fn detect_bytes(bytes: &[u8]) -> Option<&'static str> {
-        detect_with_bytes(bytes, Limits::default()).unwrap()
+        detect_with_bytes(bytes, Limits::default()).unwrap_or(None)
     }
     fn detect_with_bytes(bytes: &[u8], limits: Limits) -> Result<Option<&'static str>, String> {
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -674,10 +1007,106 @@ mod tests {
     fn package(rels: impl AsRef<[u8]>, types: impl AsRef<[u8]>) -> Vec<u8> {
         bytes(&[(RELS, rels.as_ref()), (TYPES, types.as_ref())])
     }
+    fn package_part(kind: &str, name: &str, part: &[u8]) -> Vec<u8> {
+        let (relationships, types) = xml(kind, false);
+        bytes(&[
+            (RELS, relationships.as_bytes()),
+            (TYPES, types.as_bytes()),
+            (name, part),
+        ])
+    }
+    fn relationship_package(
+        kind: &str,
+        owner: &str,
+        target: &str,
+        typ: &str,
+        target_path: &str,
+        part: &[u8],
+    ) -> Vec<u8> {
+        let (relationships, types) = xml(kind, false);
+        let (dir, file) = owner.rsplit_once('/').unwrap();
+        let rels_name = format!("{dir}/_rels/{file}.rels");
+        let rels = format!(
+            "<Relationships><Relationship Id=\"rId1\" Type=\"{typ}\" Target=\"{target}\"/></Relationships>"
+        );
+        bytes(&[
+            (RELS, relationships.as_bytes()),
+            (TYPES, types.as_bytes()),
+            (owner, b"<root/>"),
+            (rels_name.as_str(), rels.as_bytes()),
+            (target_path, part),
+        ])
+    }
+    fn pptx_slide_target(target: &str, typ: &str, part: &[u8]) -> Vec<u8> {
+        pptx_slide_target_with(
+            "ppt/slides/slide1.xml",
+            "ppt/charts/chart.bin",
+            target,
+            Some(typ),
+            None,
+            part,
+        )
+    }
+    fn pptx_slide_target_with(
+        slide: &str,
+        chart: &str,
+        target: &str,
+        typ: Option<&str>,
+        mode: Option<&str>,
+        part: &[u8],
+    ) -> Vec<u8> {
+        let relationships = format!(
+            "<Relationships><Relationship Type=\"{OFFICE}\" Target=\"ppt/presentation.xml\"/></Relationships>"
+        );
+        let types = format!(
+            "<Types><Override PartName=\"/ppt/presentation.xml\" ContentType=\"{PPTX}\"/></Types>"
+        );
+        let typ = typ
+            .map(|value| format!(" Type=\"{value}\""))
+            .unwrap_or_default();
+        let mode = mode
+            .map(|value| format!(" TargetMode=\"{value}\""))
+            .unwrap_or_default();
+        let rels = format!(
+            "<Relationships><Relationship Id=\"rId1\"{typ} Target=\"{target}\"{mode}/></Relationships>"
+        );
+        let (dir, file) = slide.rsplit_once('/').unwrap();
+        let slide_rels = format!("{dir}/_rels/{file}.rels");
+        let presentation_target = slide.strip_prefix("ppt/").unwrap_or(slide);
+        let presentation_rels = format!(
+            "<Relationships><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"{presentation_target}\"/></Relationships>"
+        );
+        bytes(&[
+            (RELS, relationships.as_bytes()),
+            (TYPES, types.as_bytes()),
+            (
+                "ppt/presentation.xml",
+                b"<p:presentation xmlns:p=\"urn:p\" xmlns:r=\"urn:r\"><p:sldIdLst><p:sldId r:id=\"rId1\"/></p:sldIdLst></p:presentation>",
+            ),
+            ("ppt/_rels/presentation.xml.rels", presentation_rels.as_bytes()),
+            (slide, b"<p:sld xmlns:p=\"urn:p\"/>"),
+            (slide_rels.as_str(), rels.as_bytes()),
+            (chart, part),
+        ])
+    }
     fn deflated_package(rels: &[u8], types: &[u8]) -> Vec<u8> {
         let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
         let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         for (name, data) in [(RELS, rels), (TYPES, types)] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+    fn deflated_package_part(kind: &str, name: &str, part: &[u8]) -> Vec<u8> {
+        let (relationships, types) = xml(kind, false);
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for (name, data) in [
+            (RELS, relationships.as_bytes()),
+            (TYPES, types.as_bytes()),
+            (name, part),
+        ] {
             zip.start_file(name, options).unwrap();
             zip.write_all(data).unwrap();
         }
@@ -697,6 +1126,264 @@ mod tests {
     fn assert_kind(kind: &str) {
         let (r, t) = xml(kind, false);
         assert_eq!(detect_bytes(&package(r, t)), Some(kind));
+    }
+
+    #[test]
+    fn preflight_validates_downstream_xml_in_every_office_format() {
+        for (kind, part) in [
+            ("docx", "word/document.xml"),
+            ("pptx", "ppt/slides/slide1.xml"),
+            ("xlsx", "xl/worksheets/sheet1.xml"),
+        ] {
+            assert_eq!(
+                preflight_ooxml_bytes(&package_part(kind, part, b"<root/>")),
+                Ok(Some(kind))
+            );
+            for attack in [
+                format!("<root {} />", "a=\"x\" ".repeat(MAX_XML_ATTRIBUTES + 1)),
+                format!(
+                    "<root {} />",
+                    (0..=MAX_XML_NAMESPACES)
+                        .map(|i| format!("xmlns:n{i}=\"u{i}\""))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                "<root a=\"1\" a=\"2\"/>".into(),
+                "<!DOCTYPE root [<!ENTITY x 'x'>]><root>&x;</root>".into(),
+                format!(
+                    "{}<x/>{}",
+                    "<x>".repeat(MAX_XML_DEPTH + 1),
+                    "</x>".repeat(MAX_XML_DEPTH + 1)
+                ),
+            ] {
+                assert!(
+                    preflight_ooxml_bytes(&package_part(kind, part, attack.as_bytes())).is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_rejects_xml_like_parts_and_duplicate_names() {
+        let event_bomb = format!("<root>{}</root>", "<x/>".repeat(MAX_XML_EVENTS));
+        assert!(
+            preflight_ooxml_bytes(&package_part("docx", "payload.bin", event_bomb.as_bytes()))
+                .is_err()
+        );
+        let (relationships, types) = xml("docx", false);
+        let duplicate = bytes(&[
+            (RELS, relationships.as_bytes()),
+            (TYPES, types.as_bytes()),
+            ("word/document.xml", b"<x/>"),
+            ("word/document.xml", b"<x/>"),
+        ]);
+        assert!(preflight_ooxml_bytes(&duplicate).is_err());
+        assert!(
+            preflight_ooxml_bytes(&package_part(
+                "docx",
+                "relationship-target.bin",
+                b" \xef\xbb\xbf<root>"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_safe_refs_and_rejects_custom_xml_like_encodings() {
+        assert_eq!(
+            preflight_ooxml_bytes(&package_part(
+                "docx",
+                "word/document.xml",
+                b"<root>&amp;&#65;&#x41;</root>"
+            )),
+            Ok(Some("docx"))
+        );
+        for part in [utf16("<root/>", false), utf16("<root/>", true)] {
+            assert_eq!(
+                preflight_ooxml_bytes(&package_part("docx", "payload.bin", &part)),
+                Ok(Some("docx"))
+            );
+        }
+        for (i, part) in [
+            b"<!DOCTYPE root [<!ENTITY x 'x'>]><root>&x;</root>".as_slice(),
+            b"<root>&custom;</root>".as_slice(),
+            &utf16("<root>", false),
+            &utf16("<root>", true),
+            b"\xff\xfe\0\0<\0\0\0r\0\0\0".as_slice(),
+            b"\0\0\xfe\xff\0\0\0<\0\0\0r".as_slice(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                preflight_ooxml_bytes(&package_part("docx", "payload.bin", part)).is_err(),
+                "{i}"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_rejects_non_xml_ratio_and_normalized_name_aliases() {
+        assert!(
+            preflight_ooxml_bytes(&deflated_package_part(
+                "docx",
+                "payload.bin",
+                &vec![0; 128 * 1024]
+            ))
+            .is_err()
+        );
+        let (relationships, types) = xml("docx", false);
+        for aliases in [
+            [("A.bin", b"".as_slice()), ("a.BIN", b"")],
+            [("a", b""), ("a/", b"")],
+        ] {
+            let mut entries = vec![(RELS, relationships.as_bytes()), (TYPES, types.as_bytes())];
+            entries.extend(aliases);
+            assert!(preflight_ooxml_bytes(&bytes(&entries)).is_err());
+        }
+    }
+
+    #[test]
+    fn preflight_forces_office2pdf_relationship_xml_targets() {
+        let hostile = format!("junk<root {} />", "a=\"x\" ".repeat(MAX_XML_ATTRIBUTES + 1));
+        let chart_type =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+        for (slide, target, typ, mode) in [
+            (
+                "ppt/slides/slide1.xml",
+                "../charts/chart.bin",
+                Some(chart_type),
+                Some("External"),
+            ),
+            ("ppt/slides/slide1.xml", "../charts/chart.bin", None, None),
+            (
+                "ppt/Slides/Slide1.xml",
+                "../charts/chart.bin",
+                Some(chart_type),
+                None,
+            ),
+            (
+                "ppt/slides/slide1.xml",
+                "../../../../ppt/charts/chart.bin",
+                Some(chart_type),
+                None,
+            ),
+        ] {
+            assert!(
+                preflight_ooxml_bytes(&pptx_slide_target_with(
+                    slide,
+                    "ppt/charts/chart.bin",
+                    target,
+                    typ,
+                    mode,
+                    hostile.as_bytes()
+                ))
+                .is_err()
+            );
+            assert_eq!(
+                preflight_ooxml_bytes(&pptx_slide_target_with(
+                    slide,
+                    "ppt/charts/chart.bin",
+                    target,
+                    typ,
+                    mode,
+                    b"<root/>"
+                )),
+                Ok(Some("pptx"))
+            );
+        }
+        let mut oversized = vec![b' '; MAX_XML_ENTRY_BYTES as usize + 1];
+        oversized.extend_from_slice(hostile.as_bytes());
+        assert!(
+            preflight_ooxml_bytes(&pptx_slide_target(
+                "../charts/chart.bin",
+                chart_type,
+                &oversized
+            ))
+            .is_err()
+        );
+        let image_type =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+        assert_eq!(
+            preflight_ooxml_bytes(&pptx_slide_target(
+                "../media/image.bin",
+                image_type,
+                b"binary"
+            )),
+            Ok(Some("pptx"))
+        );
+    }
+
+    #[test]
+    fn preflight_forces_docx_and_xlsx_relationship_xml_targets() {
+        let hostile = format!("junk<root {} />", "a=\"x\" ".repeat(MAX_XML_ATTRIBUTES + 1));
+        let cases = [
+            (
+                "docx",
+                "word/document.xml",
+                "header.bin",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+                "word/header.bin",
+            ),
+            (
+                "docx",
+                "word/document.xml",
+                "charts/chart.bin",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+                "word/charts/chart.bin",
+            ),
+            (
+                "xlsx",
+                "xl/workbook.xml",
+                "worksheets/sheet.bin",
+                "ignored",
+                "xl/worksheets/sheet.bin",
+            ),
+            (
+                "xlsx",
+                "xl/worksheets/sheet.bin",
+                "../drawings/drawing.bin",
+                "drawing",
+                "xl/drawings/drawing.bin",
+            ),
+            (
+                "xlsx",
+                "xl/drawings/drawing.bin",
+                "../charts/chart.bin",
+                "chart",
+                "xl/charts/chart.bin",
+            ),
+        ];
+        for (kind, owner, target, typ, path) in cases {
+            assert!(
+                preflight_ooxml_bytes(&relationship_package(
+                    kind,
+                    owner,
+                    target,
+                    typ,
+                    path,
+                    hostile.as_bytes()
+                ))
+                .is_err()
+            );
+            assert_eq!(
+                preflight_ooxml_bytes(&relationship_package(
+                    kind, owner, target, typ, path, b"<root/>"
+                )),
+                Ok(Some(kind))
+            );
+        }
+        assert_eq!(
+            preflight_ooxml_bytes(&relationship_package(
+                "xlsx",
+                "xl/drawings/drawing.bin",
+                "../media/image.bin",
+                "image",
+                "xl/media/image.bin",
+                b"binary"
+            )),
+            Ok(Some("xlsx"))
+        );
     }
     fn utf16(s: &str, be: bool) -> Vec<u8> {
         let mut out = if be {
@@ -1099,7 +1786,7 @@ mod tests {
         }
     }
     #[test]
-    fn unrelated_corruption_is_not_read_but_is_counted() {
+    fn unrelated_corruption_is_read_and_rejected() {
         let (r, t) = xml("docx", true);
         let mut b = bytes(&[
             (RELS, r.as_bytes()),
@@ -1107,7 +1794,7 @@ mod tests {
             ("junk", b"payload"),
         ]);
         corrupt_payload(&mut b, "junk");
-        assert_eq!(detect_with_bytes(&b, limits(&b)), Ok(Some("docx")));
+        assert!(detect_with_bytes(&b, limits(&b)).is_err());
         let mut l = limits(&b);
         l.total = (r.len() + t.len() + 6) as u64;
         assert!(detect_with_bytes(&b, l).is_err());
