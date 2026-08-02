@@ -75,7 +75,7 @@ def expected_tags(image, release_tag):
 
 def inspect_tag(tag):
     result = subprocess.run(
-        ["docker", "buildx", "imagetools", "inspect", "--format", "{{.Digest}}", tag],
+        ["docker", "buildx", "imagetools", "inspect", "--format", '{{printf "%s\\n" .Manifest.Digest}}', tag],
         check=False,
         capture_output=True,
         text=True,
