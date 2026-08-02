@@ -6,7 +6,8 @@ service. PDF rendering uses pure Rust; no model is downloaded or run locally.
 
 Compatibility is pinned to the MinerU 3.4.4 `vlm-http-client` transport
 baseline. See [the compatibility contract](docs/compatibility.md) and
-[usage guide](docs/usage.md). This is not a full MinerU compatibility claim.
+[Chinese usage guide](docs/usage.md) and [English usage guide](docs/usage.en.md).
+This is not a full MinerU compatibility claim.
 
 Requires Rust 1.89 or newer.
 
@@ -48,7 +49,8 @@ conversion helper, build with `--features office`:
 cargo install mineru --features office
 ```
 
-See [docs/usage.md](docs/usage.md) for service configuration and complete options.
+See the [Chinese usage guide](docs/usage.md) or [English usage guide](docs/usage.en.md)
+for service configuration and complete options.
 
 ## Python
 

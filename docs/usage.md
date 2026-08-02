@@ -1,5 +1,7 @@
 # 使用说明
 
+[简体中文](usage.md) | [English](usage.en.md)
+
 `mineru-vlm` 将 PDF 用纯 Rust 的 Hayro 在本地以 **200 DPI** 渲染成页面图像，再调用外部、OpenAI 兼容的 MinerU VLM 服务生成版面与内容结果。它不做本地模型推理、不下载模型、不包含 `mineru-api`，且只接受 PDF。
 
 ### Rust 扩展：官方形状输出

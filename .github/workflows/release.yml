@@ -51,7 +51,7 @@ jobs:
           set -e
           python3 .github/scripts/check_cargo_audit.py check \
             --report "$RUNNER_TEMP/cargo-audit.json" --lockfile Cargo.lock --manifest Cargo.toml
-          printf '### cargo-audit exception\n\nAllowed: `RUSTSEC-2026-0194`, `RUSTSEC-2026-0195` (`quick-xml` only). Expires: `2026-09-30` UTC.\n' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "### cargo-audit exception" "" "Allowed: \`RUSTSEC-2026-0194\`, \`RUSTSEC-2026-0195\` (\`quick-xml\` only). Expires: \`2026-09-30\` UTC." >> "$GITHUB_STEP_SUMMARY"
           test "$audit_status" -eq 1
       - name: Verify immutable release identity and package metadata
         id: identity
