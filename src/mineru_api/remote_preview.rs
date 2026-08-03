@@ -33,8 +33,12 @@ pub(super) fn read_artifacts(
     route: &OfficialPdfOptions,
 ) -> Result<Artifacts, String> {
     let (middle, origin, _) = paths(stem, kind)?;
+    let resident = crate::official_route::route_limits(route);
+    let middle_cap = route.max_staged_text_bytes.min(resident.max_response_bytes);
+    let middle_cap =
+        usize::try_from(middle_cap).map_err(|_| "preview middle exceeds resident limit")?;
     Ok(Artifacts {
-        middle: archive::read_relative_capped(root, &middle, route.max_staged_text_bytes)?,
+        middle: archive::read_relative_capped(root, &middle, middle_cap)?,
         origin: archive::read_relative_capped(root, &origin, route.max_pdf_bytes)?,
     })
 }
@@ -51,12 +55,18 @@ pub(super) fn generate_and_publish(
         return Err("preview deadline expired".into());
     }
     let pages = parse_middle(middle, route)?;
+    let resident = crate::official_route::route_limits(route);
+    let asset_cap = route
+        .max_total_asset_bytes
+        .min(resident.max_total_asset_bytes);
+    let asset_cap =
+        usize::try_from(asset_cap).map_err(|_| "preview assets exceed resident limit")?;
     let asset = crate::preview::generate_until(
         source_pdf,
         &pages,
         stem,
         &crate::official_route::route_limits(route),
-        route.max_total_asset_bytes,
+        asset_cap,
         deadline,
     )
     .map_err(|_| "preview generation failed")?;

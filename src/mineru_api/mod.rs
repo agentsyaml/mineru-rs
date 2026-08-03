@@ -95,8 +95,30 @@ pub(crate) async fn run_remote_api_documents_scoped_with_workers(
     events: Option<crate::command::CommandCallback>,
     office: crate::OfficeWorkers,
 ) -> Result<Vec<RemoteApiFailure>, String> {
+    run_remote_api_documents_scoped_with_workers_and_policy(
+        documents,
+        output,
+        api_url,
+        options,
+        env,
+        events,
+        office,
+        crate::DocumentLimitPolicy::defaults(),
+    )
+    .await
+}
+pub(crate) async fn run_remote_api_documents_scoped_with_workers_and_policy(
+    documents: Vec<RemoteApiDocument>,
+    output: PathBuf,
+    api_url: String,
+    options: RemoteApiOptions,
+    env: RemoteApiEnv,
+    events: Option<crate::command::CommandCallback>,
+    office: crate::OfficeWorkers,
+    policy: crate::DocumentLimitPolicy,
+) -> Result<Vec<RemoteApiFailure>, String> {
     runner::run_documents_scoped_with_workers(
-        documents, &output, &api_url, options, env, events, office,
+        documents, &output, &api_url, options, env, events, office, policy,
     )
     .await
 }
@@ -200,6 +222,8 @@ pub(crate) struct RemoteOptions {
     pub(crate) start: u64,
     pub(crate) end: Option<u64>,
     pub(crate) client_side: bool,
+    pub(crate) max_input_bytes: u64,
+    pub(crate) archive_limits: archive::ArchiveLimits,
 }
 impl Default for RemoteOptions {
     fn default() -> Self {
@@ -215,6 +239,10 @@ impl Default for RemoteOptions {
             start: 0,
             end: None,
             client_side: false,
+            max_input_bytes: crate::DocumentLimitPolicy::defaults().max_input_bytes,
+            archive_limits: archive::ArchiveLimits::from_document_limits(
+                crate::DocumentLimitPolicy::defaults(),
+            ),
         }
     }
 }
@@ -629,7 +657,11 @@ mod tests {
                 server_url: None,
                 start: 0,
                 end: None,
-                client_side: false
+                client_side: false,
+                max_input_bytes: crate::DocumentLimitPolicy::defaults().max_input_bytes,
+                archive_limits: archive::ArchiveLimits::from_document_limits(
+                    crate::DocumentLimitPolicy::defaults(),
+                ),
             }
         );
         let mut o = RemoteOptions {

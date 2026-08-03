@@ -469,6 +469,113 @@ async fn retries_once_without_sleep_and_caps_response() {
     ));
 }
 
+#[tokio::test]
+async fn retries_unexpected_chat_finish_reason_once_then_succeeds() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let hits = hits.clone();
+            move || {
+                let hits = hits.clone();
+                async move {
+                    if hits.fetch_add(1, Ordering::Relaxed) == 0 {
+                        Json(json!({"choices":[{"finish_reason":"content_filter","message":{"content":""}}]})).into_response()
+                    } else {
+                        completion("ok").into_response()
+                    }
+                }
+            }
+        }),
+    );
+    let c = VlmHttpClient::connect(VlmHttpConfig {
+        server_url: Some(serve(app).await.parse().unwrap()),
+        model_name: Some("x".into()),
+        skip_model_name_checking: true,
+        max_retries: 1,
+        retry_backoff_factor: 0.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(c.predict(VlmRequest::default()).await.unwrap(), "ok");
+    assert_eq!(hits.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn chat_retry_budget_is_shared_by_transport_and_finish_reason_retries() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let hits = hits.clone();
+            move || {
+                let hits = hits.clone();
+                async move {
+                    match hits.fetch_add(1, Ordering::Relaxed) {
+                        0 => (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "0")],
+                            "busy",
+                        )
+                            .into_response(),
+                        1 => Json(json!({"choices":[{"finish_reason":"content_filter","message":{"content":""}}]})).into_response(),
+                        _ => completion("unexpected third request").into_response(),
+                    }
+                }
+            }
+        }),
+    );
+    let c = VlmHttpClient::connect(VlmHttpConfig {
+        server_url: Some(serve(app).await.parse().unwrap()),
+        model_name: Some("x".into()),
+        skip_model_name_checking: true,
+        max_retries: 1,
+        retry_backoff_factor: 0.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        c.predict(VlmRequest::default()).await,
+        Err(VlmError::Protocol { operation: "chat", message }) if message == "unexpected finish reason"
+    ));
+    assert_eq!(hits.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn unexpected_chat_finish_reason_retry_is_bounded() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let hits = hits.clone();
+            move || {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::Relaxed);
+                    Json(json!({"choices":[{"finish_reason":"content_filter","message":{"content":""}}]}))
+                }
+            }
+        }),
+    );
+    let c = VlmHttpClient::connect(VlmHttpConfig {
+        server_url: Some(serve(app).await.parse().unwrap()),
+        model_name: Some("x".into()),
+        skip_model_name_checking: true,
+        max_retries: 1,
+        retry_backoff_factor: 0.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        c.predict(VlmRequest::default()).await,
+        Err(VlmError::Protocol { operation: "chat", message }) if message == "unexpected finish reason"
+    ));
+    assert_eq!(hits.load(Ordering::Relaxed), 2);
+}
+
 fn sse_response(chunks: Vec<&'static [u8]>) -> Response {
     Response::builder()
         .header("content-type", "text/event-stream")

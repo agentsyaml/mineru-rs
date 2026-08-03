@@ -2,12 +2,12 @@ use crate::vlm_http::ByteBudget;
 use crate::*;
 #[cfg(test)]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures_util::future::try_join_all;
+use futures_util::{StreamExt, future::try_join_all, stream::FuturesUnordered};
 use image::{DynamicImage, ImageFormat, RgbImage, imageops::FilterType};
 use serde_json::Map;
-use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Instant;
+use std::{future::Future, io::Cursor, pin::Pin};
 use tokio::sync::Semaphore;
 
 const COVERED_IMAGE_CAPTION: &str = "_covered_image_caption";
@@ -782,8 +782,9 @@ impl MinerUVlmPreprocessor {
     }
 }
 
-// ponytail: this fixed cap bounds derived official page memory; make it configurable only if profiling proves throughput needs it.
-const OFFICIAL_PAGE_CONCURRENCY: usize = 2;
+// ponytail: public APIs keep this memory-bounded compatibility default; commands
+// may use a bounded route-specific semaphore.
+const OFFICIAL_PAGE_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct MinerUVlmClient {
@@ -791,6 +792,22 @@ pub struct MinerUVlmClient {
     preprocessor: MinerUVlmPreprocessor,
     layout_semaphore: Arc<Semaphore>,
     official_page_semaphore: Arc<Semaphore>,
+    #[cfg(test)]
+    semantic_scheduler_hook: Option<SemanticSchedulerHook>,
+}
+#[cfg(test)]
+#[derive(Clone)]
+struct SemanticSchedulerHook {
+    before_encode: Arc<dyn Fn(usize) + Send + Sync>,
+    after_encode: Arc<dyn Fn(usize) + Send + Sync>,
+    state: Arc<dyn Fn(usize, usize, usize) + Send + Sync>,
+    completed: Arc<dyn Fn(usize) + Send + Sync>,
+}
+#[cfg(test)]
+impl std::fmt::Debug for SemanticSchedulerHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SemanticSchedulerHook")
+    }
 }
 impl MinerUVlmClient {
     pub async fn parse_and_write_official_pdf(
@@ -801,6 +818,26 @@ impl MinerUVlmClient {
         stem: &str,
     ) -> VlmResult<OfficialOutputManifest> {
         crate::official_route::parse_and_write(self, input, options, output_root, stem).await
+    }
+    pub(crate) async fn parse_and_write_official_pdf_with_totals_and_page_concurrency(
+        &self,
+        input: PdfInput,
+        options: OfficialPdfOptions,
+        output_root: &std::path::Path,
+        stem: &str,
+        totals: crate::document_limits::OfficialDocumentTotals,
+        page_concurrency: crate::official_route::OfficialPageConcurrency,
+    ) -> VlmResult<OfficialOutputManifest> {
+        crate::official_route::parse_and_write_with_totals_and_page_concurrency(
+            self,
+            input,
+            options,
+            output_root,
+            stem,
+            totals,
+            page_concurrency,
+        )
+        .await
     }
     pub async fn parse_and_write_official_office_pdf(
         &self,
@@ -841,6 +878,22 @@ impl MinerUVlmClient {
         )
         .await
     }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
+        &self,
+        prepared: crate::input_prepare::PreparedPdf,
+        options: OfficialPdfOptions,
+        output_root: &std::path::Path,
+        stem: &str,
+        events: Option<ProgressCallback>,
+        cleanup_warning: Option<crate::official_route::CleanupWarningCallback>,
+        totals: crate::document_limits::OfficialDocumentTotals,
+        page_concurrency: crate::official_route::OfficialPageConcurrency,
+    ) -> VlmResult<OfficialOutputManifest> {
+        crate::official_route::parse_and_write_prepared_with_events_and_cleanup_warning_with_totals_and_page_concurrency(
+            self, prepared, options, output_root, stem, events, cleanup_warning, totals, page_concurrency,
+        ).await
+    }
     /// Official-route seam: this deliberately snapshots replies before the shared
     /// cleaner mutates them.  It is crate-private so public two-step semantics stay
     /// unchanged.
@@ -869,24 +922,6 @@ impl MinerUVlmClient {
         })?
     }
 
-    fn official_charge(
-        total: &mut usize,
-        bytes: usize,
-        cap: usize,
-        resource: &'static str,
-    ) -> VlmResult<()> {
-        let actual = total.checked_add(bytes).unwrap_or(usize::MAX);
-        if actual > cap {
-            return Err(VlmError::LimitExceeded {
-                resource,
-                limit: cap as u64,
-                actual: actual as u64,
-            });
-        }
-        *total = actual;
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn official_two_step_snapshot_page_core(
         &self,
@@ -902,10 +937,21 @@ impl MinerUVlmClient {
         raw_budget: Arc<ByteBudget>,
         encoded_budget: Arc<ByteBudget>,
         deadline: Instant,
+        page_semaphore: Arc<Semaphore>,
     ) -> VlmResult<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)> {
+        if max_requests_per_batch == 0 {
+            return Err(VlmError::InvalidConfig(
+                "semantic requests per batch must be greater than zero".into(),
+            ));
+        }
+        if max_encoded_request_bytes > max_encoded_batch_bytes {
+            return Err(VlmError::InvalidConfig(
+                "encoded request bytes must not exceed encoded batch bytes".into(),
+            ));
+        }
         let _page_permit = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
-            self.official_page_semaphore.clone().acquire_owned(),
+            page_semaphore.acquire_owned(),
         )
         .await
         .map_err(|_| VlmError::Timeout {
@@ -935,7 +981,7 @@ impl MinerUVlmClient {
                 actual: layout_bytes as u64,
             });
         }
-        encoded_budget.charge(layout_bytes, "encoded document bytes")?;
+        encoded_budget.charge(layout_bytes as u64, "encoded document bytes")?;
         let mut encoded_bytes = layout_bytes;
         let layout_request = self.request(
             VlmImageInput::Bytes {
@@ -956,7 +1002,7 @@ impl MinerUVlmClient {
             .http
             .predict_official_budgeted(
                 layout_request,
-                raw_budget.cap(),
+                self.http.official_response_cap(),
                 Some(raw_budget.clone()),
                 tokio::time::Instant::from_std(deadline),
             )
@@ -976,7 +1022,7 @@ impl MinerUVlmClient {
         .flatten()
         .collect::<Vec<_>>();
         let preprocessor = self.preprocessor.clone();
-        let (mut blocks, candidates) = self
+        let (blocks, candidates) = self
             .official_blocking(deadline, move || {
                 let candidates = preprocessor.semantic_candidates(
                     &mut blocks,
@@ -987,106 +1033,147 @@ impl MinerUVlmClient {
                 Ok((blocks, candidates))
             })
             .await?;
+        let block_count = blocks.len();
         let page = image;
-        for candidates in candidates.chunks(max_requests_per_batch) {
-            let preprocessor = self.preprocessor.clone();
-            let page = page.clone();
-            let candidates = candidates.to_vec();
-            let current_blocks = blocks;
-            let current_encoded_bytes = encoded_bytes;
-            let encoded_budget = encoded_budget.clone();
-            let max_pixels = self.http.max_decoded_pixels();
-            let (next_blocks, prepared, next_encoded_bytes) = self
-                .official_blocking(deadline, move || {
-                    let mut blocks = current_blocks;
-                    let mut batch_bytes = 0;
-                    let mut encoded_bytes = current_encoded_bytes;
-                    let mut prepared = VlmPreparedExtraction {
-                        images: Vec::with_capacity(candidates.len()),
-                        prompts: Vec::with_capacity(candidates.len()),
-                        sampling: Vec::with_capacity(candidates.len()),
-                        block_indices: Vec::with_capacity(candidates.len()),
-                    };
-                    for candidate in candidates {
-                        let (image, prompt, sampling, block_index) = preprocessor
-                            .encode_semantic_candidate_capped(
+        type Encoder = Pin<
+            Box<
+                dyn Future<
+                        Output = VlmResult<(
+                            Vec<VlmLayoutBlock>,
+                            VlmEncodedImage,
+                            String,
+                            Option<SamplingParams>,
+                            usize,
+                            usize,
+                        )>,
+                    > + Send,
+            >,
+        >;
+        type Request =
+            Pin<Box<dyn Future<Output = VlmResult<(usize, usize, String, usize, usize)>> + Send>>;
+        let mut blocks = Some(blocks);
+        let mut replies = vec![None; candidates.len()];
+        let mut encoder: Option<Encoder> = None;
+        let mut requests: FuturesUnordered<Request> = FuturesUnordered::new();
+        let mut next_candidate = 0;
+        let mut resident_bytes = 0usize;
+        let mut encoder_reservation = 0usize;
+        while next_candidate < candidates.len() || encoder.is_some() || !requests.is_empty() {
+            if encoder.is_none()
+                && next_candidate < candidates.len()
+                && requests.len() < max_requests_per_batch
+                && resident_bytes <= max_encoded_batch_bytes - max_encoded_request_bytes
+            {
+                let candidate = candidates[next_candidate].clone();
+                let order = next_candidate;
+                next_candidate += 1;
+                encoder_reservation = max_encoded_request_bytes;
+                resident_bytes += encoder_reservation;
+                let client = self.clone();
+                let page = page.clone();
+                let blocks_for_encode = blocks.take().expect("encoder owns blocks exclusively");
+                let max_pixels = self.http.max_decoded_pixels();
+                let preprocessor = client.preprocessor.clone();
+                #[cfg(test)]
+                let scheduler_hook = self.semantic_scheduler_hook.clone();
+                #[cfg(test)]
+                if let Some(hook) = &scheduler_hook {
+                    (hook.state)(
+                        resident_bytes.saturating_sub(encoder_reservation),
+                        encoder_reservation,
+                        requests.len(),
+                    );
+                }
+                encoder = Some(Box::pin(async move {
+                    client
+                        .official_blocking(deadline, move || {
+                            #[cfg(test)]
+                            if let Some(hook) = &scheduler_hook {
+                                (hook.before_encode)(order);
+                            }
+                            let mut blocks = blocks_for_encode;
+                            let prepared = preprocessor.encode_semantic_candidate_capped(
                                 &page,
                                 &mut blocks,
                                 &candidate,
                                 max_pixels,
                             )?;
-                        let bytes = image.data.len();
-                        if bytes > max_encoded_request_bytes {
-                            return Err(VlmError::LimitExceeded {
-                                resource: "encoded request bytes",
-                                limit: max_encoded_request_bytes as u64,
-                                actual: bytes as u64,
-                            });
-                        }
-                        Self::official_charge(
-                            &mut batch_bytes,
-                            bytes,
-                            max_encoded_batch_bytes,
-                            "encoded batch bytes",
-                        )?;
-                        encoded_budget.charge(bytes, "encoded document bytes")?;
-                        encoded_bytes = encoded_bytes.saturating_add(bytes);
-                        prepared.images.push(image);
-                        prepared.prompts.push(prompt);
-                        prepared.sampling.push(sampling);
-                        prepared.block_indices.push(block_index);
-                    }
-                    Ok((blocks, prepared, encoded_bytes))
-                })
-                .await?;
-            blocks = next_blocks;
-            encoded_bytes = next_encoded_bytes;
-            let requests = prepared
-                .images
-                .into_iter()
-                .zip(prepared.prompts)
-                .zip(prepared.sampling)
-                .zip(prepared.block_indices)
-                .map(|(((image, prompt), sampling), index)| {
-                    (
-                        self.request(
-                            VlmImageInput::Bytes {
-                                data: image.data,
-                                media_type: Some(image.media_type),
-                            },
-                            prompt,
-                            sampling,
-                            None,
-                        ),
-                        index,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let replies = try_join_all(requests.into_iter().map(|(request, index)| {
-                let http = self.http.clone();
-                let semaphore = self.layout_semaphore.clone();
-                let raw_budget = raw_budget.clone();
-                async move {
-                    let _permit = semaphore
-                        .acquire_owned()
+                            #[cfg(test)]
+                            if let Some(hook) = &scheduler_hook {
+                                (hook.after_encode)(order);
+                            }
+                            Ok((
+                                blocks, prepared.0, prepared.1, prepared.2, prepared.3, order,
+                            ))
+                        })
                         .await
-                        .map_err(|_| protocol("official PDF", "semaphore closed"))?;
-                    let (reply, bytes) = http
-                        .predict_official_budgeted(
-                            request,
-                            raw_budget.cap(),
-                            Some(raw_budget),
-                            tokio::time::Instant::from_std(deadline),
-                        )
-                        .await?;
-                    Ok::<_, VlmError>((index, reply, bytes))
-                }
-            }))
-            .await?;
-            for (index, reply, bytes) in replies {
-                raw_bytes = raw_bytes.saturating_add(bytes);
-                blocks[index].content = Some(reply);
+                }));
             }
+            tokio::select! {
+                encoded = async {
+                    match encoder.as_mut() {
+                        Some(encoder) => encoder.as_mut().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let (next_blocks, image, prompt, sampling, block_index, order) = encoded?;
+                    blocks = Some(next_blocks);
+                    resident_bytes = resident_bytes.checked_sub(encoder_reservation).expect("encoder reservation held");
+                    encoder_reservation = 0;
+                    let bytes = image.data.len();
+                    if bytes > max_encoded_request_bytes {
+                        return Err(VlmError::LimitExceeded { resource: "encoded request bytes", limit: max_encoded_request_bytes as u64, actual: bytes as u64 });
+                    }
+                    resident_bytes = resident_bytes.checked_add(bytes).ok_or(VlmError::LimitExceeded { resource: "encoded batch bytes", limit: max_encoded_batch_bytes as u64, actual: u64::MAX })?;
+                    if resident_bytes > max_encoded_batch_bytes {
+                        return Err(VlmError::LimitExceeded { resource: "encoded batch bytes", limit: max_encoded_batch_bytes as u64, actual: resident_bytes as u64 });
+                    }
+                    encoded_budget.charge(bytes as u64, "encoded document bytes")?;
+                    encoded_bytes = encoded_bytes.saturating_add(bytes);
+                    let request = self.request(VlmImageInput::Bytes { data: image.data, media_type: Some(image.media_type) }, prompt, sampling, None);
+                    let http = self.http.clone();
+                    let semaphore = self.layout_semaphore.clone();
+                    let raw_budget = raw_budget.clone();
+                    requests.push(Box::pin(async move {
+                        let _permit = semaphore.acquire_owned().await.map_err(|_| protocol("official PDF", "semaphore closed"))?;
+                        let (reply, raw_bytes) = http.predict_official_budgeted(request, http.official_response_cap(), Some(raw_budget), tokio::time::Instant::from_std(deadline)).await?;
+                        Ok((order, block_index, reply, raw_bytes, bytes))
+                    }));
+                    encoder = None;
+                    #[cfg(test)]
+                    if let Some(hook) = &self.semantic_scheduler_hook {
+                        (hook.state)(
+                            resident_bytes.saturating_sub(encoder_reservation),
+                            encoder_reservation,
+                            requests.len(),
+                        );
+                    }
+                }
+                completed = requests.next(), if !requests.is_empty() => {
+                    let (order, block_index, reply, bytes, lease) = completed.expect("nonempty request queue")?;
+                    resident_bytes = resident_bytes.checked_sub(lease).expect("request lease held");
+                    if order >= replies.len() || block_index >= block_count {
+                        return Err(protocol("official PDF", "semantic reply index is invalid"));
+                    }
+                    raw_bytes = raw_bytes.saturating_add(bytes);
+                    replies[order] = Some((block_index, reply));
+                    #[cfg(test)]
+                    if let Some(hook) = &self.semantic_scheduler_hook {
+                        (hook.completed)(order);
+                        (hook.state)(
+                            resident_bytes.saturating_sub(encoder_reservation),
+                            encoder_reservation,
+                            requests.len(),
+                        );
+                    }
+                }
+            }
+        }
+        let mut blocks = blocks.expect("encoder completed before semantic completion");
+        for reply in replies {
+            let (index, reply) =
+                reply.ok_or_else(|| protocol("official PDF", "semantic reply missing"))?;
+            blocks[index].content = Some(reply);
         }
         let preprocessor = self.preprocessor.clone();
         let (snapshot, cleaned) = self
@@ -1109,6 +1196,7 @@ impl MinerUVlmClient {
         Ok((snapshot, cleaned, raw_bytes, encoded_bytes))
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn official_two_step_snapshot_window(
         &self,
@@ -1125,8 +1213,75 @@ impl MinerUVlmClient {
         remaining_raw_reply_bytes: usize,
         deadline: Instant,
     ) -> VlmResult<Vec<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)>> {
-        let raw = Arc::new(ByteBudget::new(remaining_raw_reply_bytes));
-        let encoded = Arc::new(ByteBudget::new(remaining_encoded_document_bytes));
+        self.official_two_step_snapshot_window_with_budgets(
+            images,
+            image_analysis,
+            formula_enable,
+            table_enable,
+            max_layout_blocks,
+            max_semantic_requests,
+            max_requests_per_batch,
+            max_encoded_request_bytes,
+            max_encoded_batch_bytes,
+            Arc::new(ByteBudget::new(remaining_encoded_document_bytes as u64)),
+            Arc::new(ByteBudget::new(remaining_raw_reply_bytes as u64)),
+            deadline,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn official_two_step_snapshot_window_with_budgets(
+        &self,
+        images: Vec<Arc<RgbImage>>,
+        image_analysis: bool,
+        formula_enable: bool,
+        table_enable: bool,
+        max_layout_blocks: usize,
+        max_semantic_requests: usize,
+        max_requests_per_batch: usize,
+        max_encoded_request_bytes: usize,
+        max_encoded_batch_bytes: usize,
+        encoded_budget: Arc<ByteBudget>,
+        raw_budget: Arc<ByteBudget>,
+        deadline: Instant,
+    ) -> VlmResult<Vec<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)>> {
+        self.official_two_step_snapshot_window_with_budgets_and_page_semaphore(
+            images,
+            image_analysis,
+            formula_enable,
+            table_enable,
+            max_layout_blocks,
+            max_semantic_requests,
+            max_requests_per_batch,
+            max_encoded_request_bytes,
+            max_encoded_batch_bytes,
+            encoded_budget,
+            raw_budget,
+            deadline,
+            self.official_page_semaphore.clone(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn official_two_step_snapshot_window_with_budgets_and_page_semaphore(
+        &self,
+        images: Vec<Arc<RgbImage>>,
+        image_analysis: bool,
+        formula_enable: bool,
+        table_enable: bool,
+        max_layout_blocks: usize,
+        max_semantic_requests: usize,
+        max_requests_per_batch: usize,
+        max_encoded_request_bytes: usize,
+        max_encoded_batch_bytes: usize,
+        encoded_budget: Arc<ByteBudget>,
+        raw_budget: Arc<ByteBudget>,
+        deadline: Instant,
+        page_semaphore: Arc<Semaphore>,
+    ) -> VlmResult<Vec<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)>> {
         try_join_all(images.into_iter().map(|image| {
             self.official_two_step_snapshot_page_core(
                 image,
@@ -1138,9 +1293,10 @@ impl MinerUVlmClient {
                 max_requests_per_batch,
                 max_encoded_request_bytes,
                 max_encoded_batch_bytes,
-                raw.clone(),
-                encoded.clone(),
+                raw_budget.clone(),
+                encoded_budget.clone(),
                 deadline,
+                page_semaphore.clone(),
             )
         }))
         .await
@@ -1163,10 +1319,23 @@ impl MinerUVlmClient {
             preprocessor: MinerUVlmPreprocessor { config },
             layout_semaphore,
             official_page_semaphore,
+            #[cfg(test)]
+            semantic_scheduler_hook: None,
         })
+    }
+    #[cfg(test)]
+    fn set_semantic_scheduler_hook(&mut self, hook: SemanticSchedulerHook) {
+        self.semantic_scheduler_hook = Some(hook);
     }
     pub(crate) fn task_work_lease(&self) -> TaskWorkLease {
         self.http.task_work_lease()
+    }
+    pub(crate) fn official_page_concurrency(
+        &self,
+    ) -> crate::official_route::OfficialPageConcurrency {
+        crate::official_route::OfficialPageConcurrency::from_semaphore(
+            self.official_page_semaphore.clone(),
+        )
     }
     fn request(
         &self,
@@ -1865,10 +2034,11 @@ mod tests {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
+        mpsc as std_mpsc,
     };
     use tokio::{
         net::TcpListener,
-        sync::{Barrier, Mutex, Notify},
+        sync::{Barrier, Mutex, Notify, mpsc},
         time::{Duration, sleep, timeout},
     };
 
@@ -1994,6 +2164,7 @@ mod tests {
         active: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
         layouts: Arc<AtomicUsize>,
+        admission_limit: usize,
         ignored: usize,
     }
 
@@ -2035,13 +2206,13 @@ mod tests {
         let layout = request.to_string().contains("Layout Detection");
         let content = if layout {
             let admission = state.layouts.fetch_add(1, Ordering::SeqCst);
-            if admission < 2 {
+            if admission < state.admission_limit {
                 let released = state.release.notified();
                 tokio::pin!(released);
                 let _ = released.as_mut().enable();
                 state.first_two.wait().await;
                 released.await;
-            } else if admission == 2 {
+            } else if admission == state.admission_limit {
                 state.third_layout.notify_one();
             }
             let (left, right) = if let Some(priority) =
@@ -2082,6 +2253,20 @@ mod tests {
             active: Arc::new(AtomicUsize::new(0)),
             peak: Arc::new(AtomicUsize::new(0)),
             layouts: Arc::new(AtomicUsize::new(0)),
+            admission_limit: 2,
+            ignored: 0,
+        }
+    }
+
+    fn window_state_with_admission_limit(limit: usize) -> WindowState {
+        WindowState {
+            first_two: Arc::new(Barrier::new(limit + 1)),
+            release: Arc::new(Notify::new()),
+            third_layout: Arc::new(Notify::new()),
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+            layouts: Arc::new(AtomicUsize::new(0)),
+            admission_limit: limit,
             ignored: 0,
         }
     }
@@ -2149,6 +2334,413 @@ mod tests {
             layout_peak: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    #[derive(Clone)]
+    struct PipelineState {
+        arrivals: mpsc::UnboundedSender<usize>,
+        semantic: Arc<AtomicUsize>,
+        release: Vec<Arc<Notify>>,
+        hold: Vec<bool>,
+        fail: Option<usize>,
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    async fn pipeline_chat(
+        State(state): State<PipelineState>,
+        Json(request): Json<serde_json::Value>,
+    ) -> axum::response::Response {
+        if request.to_string().contains("Layout Detection") {
+            return Json(json!({"choices":[{"finish_reason":"stop","message":{"content":"<|box_start|>0 0 300 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|><|box_start|>300 0 600 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|><|box_start|>600 0 1000 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>"}}]})).into_response();
+        }
+        let index = state.semantic.fetch_add(1, Ordering::SeqCst);
+        let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
+        state.peak.fetch_max(active, Ordering::SeqCst);
+        let released = state.release[index].notified();
+        tokio::pin!(released);
+        let _ = released.as_mut().enable();
+        let _ = state.arrivals.send(index);
+        if state.hold[index] {
+            released.await;
+        }
+        state.active.fetch_sub(1, Ordering::SeqCst);
+        if state.fail == Some(index) {
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        } else {
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":format!("reply-{index}")}}]})).into_response()
+        }
+    }
+
+    async fn pipeline_client(
+        hold: &[usize],
+        fail: Option<usize>,
+    ) -> (
+        MinerUVlmClient,
+        PipelineState,
+        mpsc::UnboundedReceiver<usize>,
+    ) {
+        let (arrivals, receiver) = mpsc::unbounded_channel();
+        let state = PipelineState {
+            arrivals,
+            semantic: Arc::new(AtomicUsize::new(0)),
+            release: (0..3).map(|_| Arc::new(Notify::new())).collect(),
+            hold: (0..3).map(|index| hold.contains(&index)).collect(),
+            fail,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(pipeline_chat))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 2,
+                ..Default::default()
+            },
+            MinerUVlmConfig::default(),
+        )
+        .await
+        .unwrap();
+        (client, state, receiver)
+    }
+
+    async fn pipeline_page(
+        client: MinerUVlmClient,
+        count: usize,
+        batch_bytes: usize,
+    ) -> VlmResult<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)> {
+        client
+            .official_two_step_snapshot_window(
+                vec![Arc::new(RgbImage::new(32, 32))],
+                false,
+                true,
+                true,
+                8,
+                3,
+                count,
+                1 << 20,
+                batch_bytes,
+                1 << 20,
+                1 << 20,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .await
+            .map(|mut pages| pages.remove(0))
+    }
+
+    #[tokio::test]
+    async fn semantic_pipeline_http_completes_while_encoder_owns_blocks() {
+        let (mut client, state, mut arrivals) = pipeline_client(&[0], None).await;
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+        let (release_encoder_tx, release_encoder_rx) = std_mpsc::channel();
+        let release_encoder_rx = Arc::new(std::sync::Mutex::new(Some(release_encoder_rx)));
+        client.set_semantic_scheduler_hook(SemanticSchedulerHook {
+            before_encode: Arc::new(move |order| {
+                if order == 1 {
+                    let _ = started_tx.send(order);
+                    release_encoder_rx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .recv()
+                        .unwrap();
+                }
+            }),
+            after_encode: Arc::new(|_| {}),
+            state: Arc::new(|_, _, _| {}),
+            completed: Arc::new(move |order| {
+                let _ = completed_tx.send(order);
+            }),
+        });
+        let task = tokio::spawn(pipeline_page(client, 2, 2 << 20));
+        assert_eq!(
+            timeout(Duration::from_secs(2), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        state.release[0].notify_one();
+        assert_eq!(
+            timeout(Duration::from_secs(2), completed_rx.recv())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        release_encoder_tx.send(()).unwrap();
+        let result = timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn semantic_pipeline_replenishes_before_slow_sibling() {
+        let (mut client, state, mut arrivals) = pipeline_client(&[0], None).await;
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (release_encoder_tx, release_encoder_rx) = std_mpsc::channel();
+        let release_encoder_rx = Arc::new(std::sync::Mutex::new(Some(release_encoder_rx)));
+        client.set_semantic_scheduler_hook(SemanticSchedulerHook {
+            before_encode: Arc::new(move |order| {
+                if order == 1 {
+                    let _ = started_tx.send(order);
+                    release_encoder_rx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .recv()
+                        .unwrap();
+                }
+            }),
+            after_encode: Arc::new(|_| {}),
+            state: Arc::new(|_, _, _| {}),
+            completed: Arc::new(|_| {}),
+        });
+        let task = tokio::spawn(pipeline_page(client, 2, 2 << 20));
+        assert_eq!(
+            timeout(Duration::from_secs(2), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        release_encoder_tx.send(()).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        assert!(state.active.load(Ordering::SeqCst) >= 1);
+        state.release[0].notify_one();
+        assert!(
+            timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_pipeline_bounds_count_and_encoded_bytes() {
+        let (mut client, state, mut arrivals) = pipeline_client(&[0, 1], None).await;
+        let observations = Arc::new(std::sync::Mutex::new(vec![]));
+        let observed = observations.clone();
+        client.set_semantic_scheduler_hook(SemanticSchedulerHook {
+            before_encode: Arc::new(|_| {}),
+            after_encode: Arc::new(|_| {}),
+            state: Arc::new(move |resident, reservation, requests| {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((resident, reservation, requests));
+            }),
+            completed: Arc::new(|_| {}),
+        });
+        let batch_cap = 2 << 20;
+        let task = tokio::spawn(pipeline_page(client, 2, batch_cap));
+        assert_eq!(
+            timeout(Duration::from_secs(5), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(5), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        state.release[1].notify_one();
+        assert_eq!(
+            timeout(Duration::from_secs(5), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        state.release[0].notify_one();
+        assert!(
+            timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
+        let observations = observations.lock().unwrap();
+        assert!(
+            observations
+                .iter()
+                .all(
+                    |(resident, reservation, requests)| resident.saturating_add(*reservation)
+                        <= batch_cap
+                        && *requests <= 2
+                )
+        );
+        assert!(state.peak.load(Ordering::SeqCst) <= 2);
+    }
+
+    #[tokio::test]
+    async fn semantic_pipeline_preserves_order() {
+        let (mut client, state, mut arrivals) = pipeline_client(&[0], None).await;
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (release_encoder_tx, release_encoder_rx) = std_mpsc::channel();
+        let release_encoder_rx = Arc::new(std::sync::Mutex::new(Some(release_encoder_rx)));
+        client.set_semantic_scheduler_hook(SemanticSchedulerHook {
+            before_encode: Arc::new(move |order| {
+                if order == 1 {
+                    let _ = started_tx.send(order);
+                    release_encoder_rx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .recv()
+                        .unwrap();
+                }
+            }),
+            after_encode: Arc::new(|_| {}),
+            state: Arc::new(|_, _, _| {}),
+            completed: Arc::new(|_| {}),
+        });
+        let task = tokio::spawn(pipeline_page(client, 2, 2 << 20));
+        assert_eq!(
+            timeout(Duration::from_secs(2), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        release_encoder_tx.send(()).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        state.release[0].notify_one();
+        let (snapshot, _, _, _) = timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .into_iter()
+                .map(|block| block.content.unwrap())
+                .collect::<Vec<_>>(),
+            ["reply-0", "reply-1", "reply-2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_pipeline_fails_fast_and_drops_queued_work() {
+        let (mut client, state, mut arrivals) = pipeline_client(&[0], Some(0)).await;
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (release_encoder_tx, release_encoder_rx) = std_mpsc::channel();
+        let release_encoder_rx = Arc::new(std::sync::Mutex::new(Some(release_encoder_rx)));
+        let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel();
+        client.set_semantic_scheduler_hook(SemanticSchedulerHook {
+            before_encode: Arc::new(move |order| {
+                let _ = started_tx.send(order);
+                if order == 1 {
+                    release_encoder_rx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .recv()
+                        .unwrap();
+                }
+            }),
+            after_encode: Arc::new(move |order| {
+                let _ = encoded_tx.send(order);
+            }),
+            state: Arc::new(|_, _, _| {}),
+            completed: Arc::new(|_| {}),
+        });
+        let task = tokio::spawn(pipeline_page(client, 2, 2 << 20));
+        assert_eq!(
+            timeout(Duration::from_secs(2), arrivals.recv())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        state.release[0].notify_one();
+        let result = timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        release_encoder_tx.send(()).unwrap();
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            timeout(Duration::from_secs(2), encoded_rx.recv())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), encoded_rx.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert!(!matches!(
+            timeout(Duration::from_millis(100), started_rx.recv()).await,
+            Ok(Some(_))
+        ));
+        assert_eq!(state.active.load(Ordering::SeqCst), 0);
     }
 
     fn image_input() -> VlmImageInput {
@@ -3144,6 +3736,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_windows_share_document_budgets() {
+        let state = window_state();
+        state.layouts.store(2, Ordering::SeqCst);
+        let client = window_client(state).await;
+        let image = Arc::new(RgbImage::new(8, 8));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let page_encoded = client
+            .official_two_step_snapshot_window_with_budgets(
+                vec![Arc::clone(&image)],
+                false,
+                true,
+                true,
+                4,
+                2,
+                2,
+                1 << 20,
+                1 << 20,
+                Arc::new(ByteBudget::new(1 << 20)),
+                Arc::new(ByteBudget::new(1 << 20)),
+                deadline,
+            )
+            .await
+            .unwrap()[0]
+            .3 as u64;
+        let encoded = Arc::new(ByteBudget::new(page_encoded * 2 - 1));
+        let raw = Arc::new(ByteBudget::new(1 << 20));
+        client
+            .official_two_step_snapshot_window_with_budgets(
+                vec![Arc::clone(&image)],
+                false,
+                true,
+                true,
+                4,
+                2,
+                2,
+                1 << 20,
+                1 << 20,
+                Arc::clone(&encoded),
+                Arc::clone(&raw),
+                deadline,
+            )
+            .await
+            .unwrap();
+        let result = client
+            .official_two_step_snapshot_window_with_budgets(
+                vec![image],
+                false,
+                true,
+                true,
+                4,
+                2,
+                2,
+                1 << 20,
+                1 << 20,
+                encoded,
+                raw,
+                deadline,
+            )
+            .await;
+        assert!(
+            matches!(
+                &result,
+                Err(VlmError::LimitExceeded {
+                    resource: "encoded document bytes",
+                    limit,
+                    actual,
+                }) if *limit == page_encoded * 2 - 1 && *actual == page_encoded * 2
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn snapshot_window_caps_page_pipelines_and_keeps_page_order() {
         let state = window_state();
         let client = window_client_with_concurrency(state.clone(), 8).await;
@@ -3155,7 +3820,7 @@ mod tests {
             let client = client.clone();
             async move {
                 client
-                    .official_two_step_snapshot_window(
+                    .official_two_step_snapshot_window_with_budgets_and_page_semaphore(
                         pages,
                         false,
                         true,
@@ -3165,9 +3830,10 @@ mod tests {
                         2,
                         1 << 20,
                         1 << 20,
-                        1 << 20,
-                        1 << 20,
+                        Arc::new(ByteBudget::new(1 << 20)),
+                        Arc::new(ByteBudget::new(1 << 20)),
                         Instant::now() + Duration::from_secs(10),
+                        Arc::new(Semaphore::new(2)),
                     )
                     .await
             }
@@ -3203,13 +3869,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_page_semaphore_honors_four_permits_and_bounds_the_next_page() {
+        let state = window_state_with_admission_limit(4);
+        let client = window_client_with_concurrency(state.clone(), 8).await;
+        let pages = (0..5)
+            .map(|n| Arc::new(RgbImage::from_pixel(8, 8, image::Rgb([n, 0, 0]))))
+            .collect();
+        let permits = Arc::new(Semaphore::new(4));
+        let task = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .official_two_step_snapshot_window_with_budgets_and_page_semaphore(
+                        pages,
+                        false,
+                        true,
+                        true,
+                        4,
+                        2,
+                        2,
+                        1 << 20,
+                        1 << 20,
+                        Arc::new(ByteBudget::new(1 << 20)),
+                        Arc::new(ByteBudget::new(1 << 20)),
+                        Instant::now() + Duration::from_secs(10),
+                        permits,
+                    )
+                    .await
+            }
+        });
+        timeout(Duration::from_secs(5), state.first_two.wait())
+            .await
+            .unwrap();
+        assert_eq!(state.layouts.load(Ordering::SeqCst), 4);
+        assert!(
+            timeout(Duration::from_millis(100), state.third_layout.notified())
+                .await
+                .is_err()
+        );
+        state.release.notify_waiters();
+        timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.layouts.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
     async fn official_page_permit_acquisition_respects_deadline() {
         let state = mock_state();
         let client = mock_client(state.clone()).await;
+        let permits = client.official_page_semaphore.available_permits();
         let held = client
             .official_page_semaphore
             .clone()
-            .acquire_many_owned(OFFICIAL_PAGE_CONCURRENCY as u32)
+            .acquire_many_owned(permits as u32)
             .await
             .unwrap();
         assert_eq!(client.official_page_semaphore.available_permits(), 0);
@@ -3229,6 +3944,7 @@ mod tests {
                 Arc::new(ByteBudget::new(1 << 20)),
                 Arc::new(ByteBudget::new(1 << 20)),
                 Instant::now() + Duration::from_millis(20),
+                client.official_page_semaphore.clone(),
             ),
         )
         .await
@@ -3242,10 +3958,7 @@ mod tests {
         assert_eq!(state.requests.load(Ordering::SeqCst), 0);
         assert_eq!(client.official_page_semaphore.available_permits(), 0);
         drop(held);
-        assert_eq!(
-            client.official_page_semaphore.available_permits(),
-            OFFICIAL_PAGE_CONCURRENCY
-        );
+        assert_eq!(client.official_page_semaphore.available_permits(), permits);
     }
 
     #[tokio::test]
@@ -3406,6 +4119,7 @@ mod tests {
                     raw.clone(),
                     encoded.clone(),
                     Instant::now() + Duration::from_secs(10),
+                    client.official_page_semaphore.clone(),
                 )
             }))
             .await
@@ -3477,5 +4191,48 @@ mod tests {
         ));
         assert!(owners.iter().all(|image| Arc::strong_count(image) == 1));
         state.pending.notify_one();
+    }
+
+    #[tokio::test]
+    async fn official_semantic_batch_rejects_invalid_caps() {
+        let client = mock_client(mock_state()).await;
+        let image = Arc::new(RgbImage::new(32, 32));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let zero = client
+            .official_two_step_snapshot_page_core(
+                image.clone(),
+                false,
+                true,
+                true,
+                4,
+                1,
+                0,
+                1,
+                1,
+                Arc::new(ByteBudget::new(1 << 20)),
+                Arc::new(ByteBudget::new(1 << 20)),
+                deadline,
+                client.official_page_semaphore.clone(),
+            )
+            .await;
+        assert!(matches!(zero, Err(VlmError::InvalidConfig(_))));
+        let invalid = client
+            .official_two_step_snapshot_page_core(
+                image.clone(),
+                false,
+                true,
+                true,
+                4,
+                1,
+                1,
+                2,
+                1,
+                Arc::new(ByteBudget::new(1 << 20)),
+                Arc::new(ByteBudget::new(1 << 20)),
+                deadline,
+                client.official_page_semaphore.clone(),
+            )
+            .await;
+        assert!(matches!(invalid, Err(VlmError::InvalidConfig(_))));
     }
 }

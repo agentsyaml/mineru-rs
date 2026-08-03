@@ -3,6 +3,7 @@
 mod client;
 pub mod command;
 mod config;
+mod document_limits;
 mod document_postprocess;
 mod error;
 mod extractor;
@@ -38,6 +39,8 @@ pub mod vlm_api;
 pub use client::MinerUClient;
 pub use command::{RunContext, RunError, RunOptions, RunReport, run, run_with_context};
 pub use config::{BearerToken, ClientConfig, Limits, Timeouts};
+#[doc(hidden)]
+pub use document_limits::{DocumentLimitOverrides, DocumentLimitPolicy};
 pub use error::{Error, ErrorContext, Result, VlmError, VlmResult};
 #[doc(hidden)]
 pub use input_prepare::DocumentKind;

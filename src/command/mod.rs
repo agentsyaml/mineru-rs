@@ -28,9 +28,10 @@ use std::{
 const WARNING_CAP: usize = 64;
 const TEXT_CAP: usize = 512;
 const FAILURE_CAP: usize = 4096;
-const ENV_NAMES: [&str; 17] = [
+const ENV_NAMES: [&str; 21] = [
     "MINERU_LOG_LEVEL",
     "MINERU_PROCESSING_WINDOW_SIZE",
+    "MINERU_OFFICIAL_PAGE_CONCURRENCY",
     "MINERU_PDF_RENDER_THREADS",
     "MINERU_PDF_RENDER_TIMEOUT",
     "MINERU_FORMULA_ENABLE",
@@ -43,6 +44,9 @@ const ENV_NAMES: [&str; 17] = [
     "MINERU_VL_API_KEY",
     "MINERU_VL_DEBUG_ENABLE",
     "MINERU_VLM_END_TOKEN",
+    "MINERU_MAX_INPUT_BYTES",
+    "MINERU_MAX_ENCODED_DOCUMENT_BYTES",
+    "MINERU_MAX_OUTPUT_BYTES",
     "TERM",
     "CI",
     "NO_COLOR",
@@ -234,7 +238,7 @@ pub async fn run_with_context(
         Arc::clone(&collected),
     );
     let warnings = combined_warnings(context.warnings.clone(), Arc::clone(&collected));
-    run_core(options, &context, events, warnings).await?;
+    run_core(options, &context, Default::default(), events, warnings).await?;
     Ok(RunReport {
         warnings: collected
             .lock()
@@ -310,9 +314,27 @@ fn combined_command_events(
 async fn run_core(
     options: RunOptions,
     context: &RunContext,
+    document_limit_overrides: crate::DocumentLimitOverrides,
     events: CommandCallback,
     warnings: direct::WarningCallback,
 ) -> Result<(), RunError> {
+    if options.api_url.is_some()
+        && (document_limit_overrides
+            .max_encoded_document_bytes
+            .is_some()
+            || context
+                .environment
+                .os("MINERU_MAX_ENCODED_DOCUMENT_BYTES")
+                .is_some())
+    {
+        return Err(RunError::new(
+            "max encoded document bytes cannot configure a remote server; configure the server",
+        ));
+    }
+    let document_limits = crate::DocumentLimitPolicy::resolve(&document_limit_overrides, |name| {
+        context.environment.os(name)
+    })
+    .map_err(RunError::new)?;
     if !matches!(options.method.as_str(), "auto" | "txt" | "ocr") {
         return Err(RunError::new(format!(
             "unsupported method: {}",
@@ -344,7 +366,16 @@ async fn run_core(
         warnings("ignored direct options", &message);
     }
     if let Some(api_url) = options.api_url.clone() {
-        run_api(options, api_url, language, context, events, warnings).await
+        run_api(
+            options,
+            api_url,
+            language,
+            document_limits,
+            context,
+            events,
+            warnings,
+        )
+        .await
     } else {
         direct::run_with_scoped_events(
             direct::DirectOptions {
@@ -361,6 +392,7 @@ async fn run_core(
                 no_image_analysis: !options.image_analysis,
                 batch_size: 1,
                 canonical_mixed: true,
+                document_limits,
             },
             context.office_workers(),
             context.environment.clone(),
@@ -376,6 +408,7 @@ async fn run_api(
     options: RunOptions,
     api_url: String,
     language: String,
+    document_limits: crate::DocumentLimitPolicy,
     context: &RunContext,
     events: CommandCallback,
     warnings: direct::WarningCallback,
@@ -387,6 +420,7 @@ async fn run_api(
     }
     let env =
         parse_remote_api_env(|name| context.environment.string(name)).map_err(RunError::new)?;
+    env::official_page_concurrency(|name| context.environment.os(name)).map_err(RunError::new)?;
     let mut route = OfficialPdfOptions::default();
     route.start_page = options.start;
     route.end_page = options.end;
@@ -437,7 +471,7 @@ async fn run_api(
         client_side_output_generation: false,
         route,
     };
-    let failures = crate::mineru_api::run_remote_api_documents_scoped_with_workers(
+    let failures = crate::mineru_api::run_remote_api_documents_scoped_with_workers_and_policy(
         documents,
         options.output,
         api_url,
@@ -445,6 +479,7 @@ async fn run_api(
         env,
         Some(events),
         context.office_workers(),
+        document_limits,
     )
     .await
     .map_err(RunError::new)?;
@@ -555,6 +590,12 @@ struct Cli {
     image_analysis: bool,
     #[arg(long, action = ArgAction::Set, default_value_t = false)]
     client_side_output_generation: bool,
+    #[arg(long)]
+    max_input_bytes: Option<String>,
+    #[arg(long)]
+    max_encoded_document_bytes: Option<String>,
+    #[arg(long)]
+    max_output_bytes: Option<String>,
 }
 
 impl From<Cli> for RunOptions {
@@ -628,8 +669,15 @@ impl CliOutput {
 #[doc(hidden)]
 pub async fn run_cli(argv: Vec<OsString>, context: RunContext) -> i32 {
     let args = std::iter::once(OsString::from("mineru")).chain(argv);
-    let options = match Cli::try_parse_from(args) {
-        Ok(cli) => RunOptions::from(cli),
+    let (options, document_limit_overrides) = match Cli::try_parse_from(args) {
+        Ok(cli) => {
+            let document_limit_overrides = crate::DocumentLimitOverrides {
+                max_input_bytes: cli.max_input_bytes.clone(),
+                max_encoded_document_bytes: cli.max_encoded_document_bytes.clone(),
+                max_output_bytes: cli.max_output_bytes.clone(),
+            };
+            (RunOptions::from(cli), document_limit_overrides)
+        }
         Err(error) => {
             let code = if matches!(
                 error.kind(),
@@ -670,7 +718,14 @@ pub async fn run_cli(argv: Vec<OsString>, context: RunContext) -> i32 {
         })
     };
     let context = context.with_output(Arc::clone(&events), output.warning_callback());
-    let result = run_with_context(options, context).await;
+    let result = run_core(
+        options,
+        &context,
+        document_limit_overrides,
+        events.clone(),
+        output.warning_callback(),
+    )
+    .await;
     if let Err(error) = &result
         && !typed_failure.load(Ordering::Relaxed)
     {
@@ -701,6 +756,7 @@ pub struct LegacyDirectOptions {
     pub no_table: bool,
     pub no_image_analysis: bool,
     pub batch_size: usize,
+    pub document_limits: crate::DocumentLimitPolicy,
 }
 
 #[doc(hidden)]
@@ -720,6 +776,7 @@ pub async fn run_legacy_direct(options: LegacyDirectOptions) -> Result<(), RunEr
             no_image_analysis: options.no_image_analysis,
             batch_size: options.batch_size,
             canonical_mixed: false,
+            document_limits: options.document_limits,
         },
         Environment::process(),
     )
@@ -771,38 +828,46 @@ mod tests {
 
     #[test]
     fn cli_maps_all_run_options() {
-        let options = RunOptions::from(
-            Cli::try_parse_from([
-                "mineru",
-                "-p",
-                "a",
-                "-o",
-                "b",
-                "--api-url",
-                "http://api",
-                "--method",
-                "ocr",
-                "--effort",
-                "high",
-                "--lang",
-                "en",
-                "--url",
-                "http://model",
-                "--start",
-                "2",
-                "--end",
-                "4",
-                "--formula",
-                "false",
-                "--table",
-                "false",
-                "--image-analysis",
-                "false",
-                "--client-side-output-generation",
-                "true",
-            ])
-            .unwrap(),
-        );
+        let cli = Cli::try_parse_from([
+            "mineru",
+            "-p",
+            "a",
+            "-o",
+            "b",
+            "--api-url",
+            "http://api",
+            "--method",
+            "ocr",
+            "--effort",
+            "high",
+            "--lang",
+            "en",
+            "--url",
+            "http://model",
+            "--start",
+            "2",
+            "--end",
+            "4",
+            "--formula",
+            "false",
+            "--table",
+            "false",
+            "--image-analysis",
+            "false",
+            "--client-side-output-generation",
+            "true",
+            "--max-input-bytes",
+            "1_024",
+            "--max-encoded-document-bytes",
+            "2_048",
+            "--max-output-bytes",
+            "4_096",
+        ])
+        .unwrap();
+        assert_eq!(cli.max_input_bytes.as_deref(), Some("1_024"));
+        assert_eq!(cli.max_encoded_document_bytes.as_deref(), Some("2_048"));
+        assert_eq!(cli.max_output_bytes.as_deref(), Some("4_096"));
+        let options = RunOptions::from(cli);
         assert_eq!(options.path, PathBuf::from("a"));
         assert_eq!(options.output, PathBuf::from("b"));
         assert_eq!(options.api_url.as_deref(), Some("http://api"));
@@ -922,6 +987,67 @@ mod tests {
                 None => std::env::remove_var("MINERU_VLM_END_TOKEN"),
             }
         }
+    }
+
+    #[test]
+    fn remote_encoded_limit_is_rejected_in_a_scrubbed_process() {
+        for mode in ["flag", "environment"] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "command::tests::remote_encoded_limit_child",
+                    "--nocapture",
+                ])
+                .env("MINERU_REMOTE_ENCODED_CHILD", mode)
+                .env_remove("MINERU_MAX_INPUT_BYTES")
+                .env_remove("MINERU_MAX_OUTPUT_BYTES")
+                .env_remove("MINERU_MAX_ENCODED_DOCUMENT_BYTES")
+                .envs(
+                    (mode == "environment")
+                        .then_some([("MINERU_MAX_ENCODED_DOCUMENT_BYTES", "malformed")])
+                        .into_iter()
+                        .flatten(),
+                )
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let messages = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                messages.contains("cannot configure a remote server"),
+                "{messages}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_encoded_limit_child() {
+        let Ok(mode) = std::env::var("MINERU_REMOTE_ENCODED_CHILD") else {
+            return;
+        };
+        let context = RunContext::with_office_executable(
+            std::env::current_dir().unwrap().join("unused-helper"),
+        )
+        .unwrap();
+        let mut args = vec![
+            "-p".into(),
+            "missing.pdf".into(),
+            "-o".into(),
+            "output".into(),
+            "--api-url".into(),
+            "http://127.0.0.1:1".into(),
+        ];
+        if mode == "flag" {
+            args.extend(["--max-encoded-document-bytes".into(), "8".into()]);
+        }
+        assert_eq!(run_cli(args, context).await, 1);
     }
 
     #[test]

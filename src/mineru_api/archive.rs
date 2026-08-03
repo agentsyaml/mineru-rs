@@ -27,8 +27,8 @@ use super::zip_scan::{ScanLimits, scan};
 const BODY_CAP: usize = 64 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy, Debug)]
-pub(super) struct ArchiveLimits {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ArchiveLimits {
     pub(super) max_entries: u64,
     pub(super) max_compressed_bytes: u64,
     pub(super) max_expanded_bytes: u64,
@@ -49,6 +49,15 @@ impl Default for ArchiveLimits {
 }
 
 impl ArchiveLimits {
+    pub(super) fn from_document_limits(policy: crate::DocumentLimitPolicy) -> Self {
+        Self {
+            max_entries: 100_000,
+            max_compressed_bytes: policy.download_compressed_bytes,
+            max_expanded_bytes: policy.expanded_archive_bytes,
+            max_entry_bytes: policy.archive_entry_bytes,
+            max_ratio: 1000,
+        }
+    }
     fn validate(self) -> Result<Self, String> {
         if self.max_entries == 0
             || self.max_compressed_bytes == 0

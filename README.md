@@ -6,10 +6,12 @@ Rust client library, command-line tools, and local API server for parsing PDF,
 image, and Office documents with an external OpenAI-compatible MinerU VLM
 service. PDF rendering uses pure Rust; no model is downloaded or run locally.
 
-Compatibility is pinned to the MinerU 3.4.4 `vlm-http-client` transport
-baseline. See [the compatibility contract](docs/compatibility.md) and
-[Chinese usage guide](docs/usage.md) and [English usage guide](docs/usage.en.md).
-This is not a full MinerU compatibility claim.
+Within the MinerU 3.4.4 VLM scope, MinerU Rust is a drop-in replacement for the
+MinerU Python SDK's `vlm-http-client` path and can replace that VLM workflow
+completely. It does not implement or claim compatibility with non-VLM backends.
+See [the compatibility contract](docs/compatibility.md), the
+[Chinese usage guide](docs/usage.md), and the [English usage guide](docs/usage.en.md).
+Document-limit controls and their CLI/API applicability are summarized in the usage guides.
 
 Requires Rust 1.89 or newer.
 

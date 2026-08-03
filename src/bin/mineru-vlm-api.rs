@@ -1,6 +1,9 @@
 use clap::Parser;
-use mineru::command::env::{Decimal, RouteEnv, decimal, nonnegative_decimal, snapshot_route_env};
+use mineru::command::env::{
+    Decimal, RouteEnv, decimal, nonnegative_decimal, official_page_concurrency, snapshot_route_env,
+};
 use mineru::command::plain::{EventSink, LogLevel};
+use mineru::{DocumentLimitOverrides, DocumentLimitPolicy};
 use std::sync::Arc;
 use std::{
     ffi::OsString,
@@ -25,6 +28,12 @@ struct Args {
     concurrency: Option<usize>,
     #[arg(long)]
     shutdown_on_stdin_eof: bool,
+    #[arg(long)]
+    max_input_bytes: Option<String>,
+    #[arg(long)]
+    max_encoded_document_bytes: Option<String>,
+    #[arg(long)]
+    max_output_bytes: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -52,6 +61,8 @@ fn main() -> ExitCode {
             env.route.formula,
             env.route.table,
         )?
+        .document_limits(env.document_limits)
+        .official_page_concurrency(env.official_page_concurrency)?
         .public_policy(env.public_bind_exposed, env.allow_public_http_client)
         .task_lifecycle(env.retention, env.cleanup_interval)?
         .progress_callback(sink.callback());
@@ -135,15 +146,17 @@ fn shutdown(enabled: bool) -> impl Future<Output = ()> {
 struct StartupEnv {
     output_root: PathBuf,
     concurrency: usize,
+    official_page_concurrency: usize,
     retention: Duration,
     cleanup_interval: Duration,
     public_bind_exposed: bool,
     allow_public_http_client: bool,
     shutdown_on_stdin_eof: bool,
     route: RouteEnv,
+    document_limits: DocumentLimitPolicy,
 }
 
-const STARTUP_NAMES: [&str; 12] = [
+const STARTUP_NAMES: [&str; 16] = [
     "MINERU_API_OUTPUT_ROOT",
     "MINERU_API_MAX_CONCURRENT_REQUESTS",
     "MINERU_API_TASK_RETENTION_SECONDS",
@@ -151,11 +164,15 @@ const STARTUP_NAMES: [&str; 12] = [
     "MINERU_API_PUBLIC_BIND_EXPOSED",
     "MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT",
     "MINERU_API_SHUTDOWN_ON_STDIN_EOF",
+    "MINERU_OFFICIAL_PAGE_CONCURRENCY",
     "MINERU_PROCESSING_WINDOW_SIZE",
     "MINERU_PDF_RENDER_THREADS",
     "MINERU_PDF_RENDER_TIMEOUT",
     "MINERU_FORMULA_ENABLE",
     "MINERU_TABLE_ENABLE",
+    "MINERU_MAX_INPUT_BYTES",
+    "MINERU_MAX_ENCODED_DOCUMENT_BYTES",
+    "MINERU_MAX_OUTPUT_BYTES",
 ];
 
 fn api_flag(value: Option<&OsString>) -> bool {
@@ -193,7 +210,17 @@ fn snapshot_startup_env(
             .position(|&n| n == name)
             .and_then(|i| values[i].clone())
     });
+    let document_limits =
+        DocumentLimitPolicy::resolve(&DocumentLimitOverrides::default(), |name| {
+            get(name).cloned()
+        })?;
     let concurrency = service_concurrency(darwin, get("MINERU_API_MAX_CONCURRENT_REQUESTS"))?;
+    let official_page_concurrency = official_page_concurrency(|name| {
+        STARTUP_NAMES
+            .iter()
+            .position(|&n| n == name)
+            .and_then(|i| values[i].clone())
+    })?;
     let retention = get("MINERU_API_TASK_RETENTION_SECONDS")
         .and_then(|v| nonnegative_decimal(v, u64::MAX))
         .unwrap_or(86400);
@@ -210,12 +237,14 @@ fn snapshot_startup_env(
             .map(Into::into)
             .unwrap_or_else(|| PathBuf::from("./output")),
         concurrency,
+        official_page_concurrency,
         retention: Duration::from_secs(retention),
         cleanup_interval: Duration::from_secs(cleanup_interval),
         public_bind_exposed: api_flag(get("MINERU_API_PUBLIC_BIND_EXPOSED")),
         allow_public_http_client: api_flag(get("MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT")),
         shutdown_on_stdin_eof: api_flag(get("MINERU_API_SHUTDOWN_ON_STDIN_EOF")),
         route,
+        document_limits,
     })
 }
 
@@ -226,7 +255,12 @@ fn startup_config(
 ) -> Result<StartupEnv, String> {
     let cli_concurrency = args.concurrency;
     let mut env = snapshot_startup_env(darwin && cli_concurrency.is_none(), |name| {
-        if name == "MINERU_API_MAX_CONCURRENT_REQUESTS" && cli_concurrency.is_some() {
+        if (name == "MINERU_API_MAX_CONCURRENT_REQUESTS" && cli_concurrency.is_some())
+            || (name == "MINERU_MAX_INPUT_BYTES" && args.max_input_bytes.is_some())
+            || (name == "MINERU_MAX_ENCODED_DOCUMENT_BYTES"
+                && args.max_encoded_document_bytes.is_some())
+            || (name == "MINERU_MAX_OUTPUT_BYTES" && args.max_output_bytes.is_some())
+        {
             None
         } else {
             lookup(name)
@@ -244,6 +278,13 @@ fn startup_config(
     if args.shutdown_on_stdin_eof {
         env.shutdown_on_stdin_eof = true;
     }
+    env.document_limits = env
+        .document_limits
+        .with_cli_overrides(&DocumentLimitOverrides {
+            max_input_bytes: args.max_input_bytes.clone(),
+            max_encoded_document_bytes: args.max_encoded_document_bytes.clone(),
+            max_output_bytes: args.max_output_bytes.clone(),
+        })?;
     Ok(env)
 }
 
@@ -315,10 +356,38 @@ mod tests {
     }
 
     #[test]
+    fn document_limit_controls_are_accepted_and_override_environment() {
+        let cli = args(&[
+            "--max-input-bytes",
+            "11",
+            "--max-encoded-document-bytes",
+            "12",
+            "--max-output-bytes",
+            "13",
+        ]);
+        let env = startup_config(&cli, false, |name| match name {
+            "MINERU_MAX_INPUT_BYTES" => Some("bad".into()),
+            "MINERU_MAX_ENCODED_DOCUMENT_BYTES" => Some("bad".into()),
+            "MINERU_MAX_OUTPUT_BYTES" => Some("bad".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            (
+                env.document_limits.max_input_bytes,
+                env.document_limits.max_encoded_document_bytes,
+                env.document_limits.max_output_bytes
+            ),
+            (11, 12, 13)
+        );
+    }
+
+    #[test]
     fn defaults_and_parsers() {
         let env = snapshot(&[]);
         assert_eq!(env.output_root, PathBuf::from("./output"));
         assert_eq!(env.concurrency, 3);
+        assert_eq!(env.official_page_concurrency, 4);
         assert_eq!(env.retention, Duration::from_secs(86400));
         assert_eq!(env.cleanup_interval, Duration::from_secs(300));
         assert!(
@@ -332,6 +401,7 @@ mod tests {
             ("MINERU_API_PUBLIC_BIND_EXPOSED", "YES"),
             ("MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT", "on"),
             ("MINERU_API_SHUTDOWN_ON_STDIN_EOF", "1"),
+            ("MINERU_OFFICIAL_PAGE_CONCURRENCY", "7"),
             ("MINERU_PROCESSING_WINDOW_SIZE", "7"),
             ("MINERU_PDF_RENDER_THREADS", "8"),
             ("MINERU_PDF_RENDER_TIMEOUT", "9"),
@@ -340,6 +410,7 @@ mod tests {
         ]);
         assert_eq!(env.output_root, PathBuf::new());
         assert_eq!(env.concurrency, 1024);
+        assert_eq!(env.official_page_concurrency, 7);
         assert_eq!(env.retention, Duration::ZERO);
         assert_eq!(env.cleanup_interval, Duration::from_secs(12));
         assert!(
@@ -382,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_only_the_twelve_names_once_before_errors() {
+    fn reads_only_the_sixteen_names_once_before_errors() {
         let mut successful_counts = HashMap::new();
         snapshot_startup_env(false, |name| {
             assert!(STARTUP_NAMES.contains(&name));
@@ -429,6 +500,17 @@ mod tests {
             STARTUP_NAMES
                 .iter()
                 .all(|name| darwin_counts.get(*name) == Some(&1))
+        );
+    }
+
+    #[test]
+    fn official_page_concurrency_rejects_invalid_startup_values() {
+        let error = snapshot_startup_env(false, |name| {
+            (name == "MINERU_OFFICIAL_PAGE_CONCURRENCY").then(|| "9".into())
+        });
+        assert_eq!(
+            error.err().as_deref(),
+            Some("MINERU_OFFICIAL_PAGE_CONCURRENCY must be an integer from 1 to 8")
         );
     }
 
@@ -511,5 +593,11 @@ mod tests {
         assert_eq!(env.route.route.render_timeout, Duration::from_secs(300));
         assert_eq!(env.route.formula, Some(false));
         assert_eq!(env.route.table, Some(false));
+        assert!(
+            snapshot_startup_env(false, |name| {
+                (name == "MINERU_OFFICIAL_PAGE_CONCURRENCY").then(|| bad.clone())
+            })
+            .is_err()
+        );
     }
 }

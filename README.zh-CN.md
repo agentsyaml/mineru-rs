@@ -4,9 +4,9 @@
 
 用于通过外部 OpenAI 兼容的 MinerU VLM 服务解析 PDF、图像和 Office 文档的 Rust 客户端库、命令行工具和本地 API 服务。PDF 渲染使用纯 Rust；不会下载或在本地运行模型。
 
-兼容性固定于 MinerU 3.4.4 的 `vlm-http-client` 传输基线。参见[兼容性契约](docs/compatibility.md)、[中文使用指南](docs/usage.md)和[英文使用指南](docs/usage.en.md)。这并非完整的 MinerU 兼容性声明。
+在 MinerU 3.4.4 VLM 范围内，MinerU Rust 是 MinerU Python SDK `vlm-http-client` 路径的可直接替代实现，可以完全替代该 VLM 工作流。本项目不实现、也不声称兼容非 VLM 后端。参见[兼容性契约](docs/compatibility.md)、[中文使用指南](docs/usage.md)和[英文使用指南](docs/usage.en.md)。
 
-需要 Rust 1.89 或更高版本。
+文档大小限制控制项及其 CLI/API 适用范围见使用指南。需要 Rust 1.89 或更高版本。
 
 ## Rust 库
 

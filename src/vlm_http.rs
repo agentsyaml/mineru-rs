@@ -8,33 +8,34 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
 use tokio::{net::lookup_host, sync::Semaphore};
 use url::Url;
 
-/// Shared, monotonic byte allowance for one official document window.
+/// Shared, monotonic byte allowance for one official document.
 #[derive(Debug)]
 pub(crate) struct ByteBudget {
-    cap: usize,
-    used: AtomicUsize,
+    cap: u64,
+    used: AtomicU64,
 }
 
 impl ByteBudget {
-    pub(crate) fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: u64) -> Self {
         Self {
             cap,
-            used: AtomicUsize::new(0),
+            used: AtomicU64::new(0),
         }
     }
 
-    pub(crate) fn cap(&self) -> usize {
-        self.cap
+    #[cfg(test)]
+    pub(crate) fn remaining(&self) -> u64 {
+        self.cap.saturating_sub(self.used.load(Ordering::Acquire))
     }
 
-    pub(crate) fn charge(&self, bytes: usize, resource: &'static str) -> VlmResult<()> {
+    pub(crate) fn charge(&self, bytes: u64, resource: &'static str) -> VlmResult<()> {
         let result = self
             .used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
@@ -42,8 +43,8 @@ impl ByteBudget {
             });
         result.map(|_| ()).map_err(|used| VlmError::LimitExceeded {
             resource,
-            limit: self.cap as u64,
-            actual: used.saturating_add(bytes) as u64,
+            limit: self.cap,
+            actual: used.saturating_add(bytes),
         })
     }
 }
@@ -91,6 +92,10 @@ impl std::fmt::Debug for VlmHttpClient {
 }
 
 impl VlmHttpClient {
+    pub(crate) fn official_response_cap(&self) -> usize {
+        self.config.max_response_bytes
+    }
+
     pub async fn connect(config: VlmHttpConfig) -> VlmResult<Self> {
         Self::connect_for_task(config, TaskWorkLease::default()).await
     }
@@ -308,32 +313,51 @@ impl VlmHttpClient {
         budget: Option<Arc<ByteBudget>>,
         deadline: Option<tokio::time::Instant>,
     ) -> VlmResult<(String, usize)> {
-        let v = self
-            .send_json_limited(
-                "chat",
-                self.url("chat/completions")?,
-                Some(body),
-                cap,
-                budget,
-                deadline,
-            )
-            .await?;
-        let (v, bytes) = v;
-        let text = if deadline.is_some() {
-            let allow_truncated_content = self.config.allow_truncated_content;
-            let end_token = self.config.end_token.clone();
-            json_worker(deadline, "chat", &self.task_work_lease, move || {
-                completion_text(v, allow_truncated_content, &end_token)
-            })
-            .await?
-        } else {
-            completion_text(
-                v,
-                self.config.allow_truncated_content,
-                &self.config.end_token,
-            )?
-        };
-        Ok((text, bytes))
+        let mut retries_used = 0;
+        let mut total_bytes = 0_usize;
+        loop {
+            let (v, bytes) = self
+                .send_json_limited(
+                    "chat",
+                    self.url("chat/completions")?,
+                    Some(body.clone()),
+                    cap,
+                    budget.clone(),
+                    deadline,
+                    &mut retries_used,
+                )
+                .await?;
+            total_bytes = total_bytes
+                .checked_add(bytes)
+                .ok_or_else(|| protocol("chat", "response byte total overflow"))?;
+            let text = if deadline.is_some() {
+                let allow_truncated_content = self.config.allow_truncated_content;
+                let end_token = self.config.end_token.clone();
+                json_worker(deadline, "chat", &self.task_work_lease, move || {
+                    completion_text(v, allow_truncated_content, &end_token)
+                })
+                .await
+            } else {
+                completion_text(
+                    v,
+                    self.config.allow_truncated_content,
+                    &self.config.end_token,
+                )
+            };
+            match text {
+                Ok(text) => return Ok((text, total_bytes)),
+                Err(VlmError::Protocol {
+                    operation: "chat",
+                    message,
+                }) if message == "unexpected finish reason"
+                    && retries_used < self.config.max_retries =>
+                {
+                    retry_wait(retries_used, self.config.retry_backoff_factor, None).await;
+                    retries_used += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
     fn url(&self, suffix: &str) -> VlmResult<Url> {
         let mut u = self.base.clone();
@@ -375,9 +399,18 @@ impl VlmHttpClient {
         r
     }
     async fn send_json(&self, op: &'static str, url: Url, body: Option<Bytes>) -> VlmResult<Value> {
-        self.send_json_limited(op, url, body, self.config.max_response_bytes, None, None)
-            .await
-            .map(|x| x.0)
+        let mut retries_used = 0;
+        self.send_json_limited(
+            op,
+            url,
+            body,
+            self.config.max_response_bytes,
+            None,
+            None,
+            &mut retries_used,
+        )
+        .await
+        .map(|x| x.0)
     }
     async fn send_json_limited(
         &self,
@@ -387,8 +420,8 @@ impl VlmHttpClient {
         cap: usize,
         budget: Option<Arc<ByteBudget>>,
         deadline: Option<tokio::time::Instant>,
+        retries_used: &mut usize,
     ) -> VlmResult<(Value, usize)> {
-        let mut attempt = 0;
         loop {
             let r = if let Some(b) = &body {
                 self.headers(
@@ -414,9 +447,9 @@ impl VlmHttpClient {
                         let bytes = read_limited(r, self.config.max_diagnostic_bytes, "diagnostic")
                             .await
                             .unwrap_or_default();
-                        if retry && attempt < self.config.max_retries {
-                            retry_wait(attempt, self.config.retry_backoff_factor, wait).await;
-                            attempt += 1;
+                        if retry && *retries_used < self.config.max_retries {
+                            retry_wait(*retries_used, self.config.retry_backoff_factor, wait).await;
+                            *retries_used += 1;
                             continue;
                         }
                         return Err(VlmError::Http {
@@ -435,9 +468,9 @@ impl VlmHttpClient {
                         .map(|value| (value, bytes));
                 }
                 Err(e) => {
-                    if retry_error(&e) && attempt < self.config.max_retries {
-                        retry_wait(attempt, self.config.retry_backoff_factor, None).await;
-                        attempt += 1
+                    if retry_error(&e) && *retries_used < self.config.max_retries {
+                        retry_wait(*retries_used, self.config.retry_backoff_factor, None).await;
+                        *retries_used += 1
                     } else {
                         return Err(transport(op, &e));
                     }
@@ -1149,7 +1182,7 @@ async fn read_limited_budgeted(
             return Err(limit(resource, cap, actual));
         }
         if let Some(budget) = budget {
-            budget.charge(chunk.len(), resource)?;
+            budget.charge(chunk.len() as u64, resource)?;
         }
         out.extend_from_slice(&chunk);
     }
@@ -1241,11 +1274,14 @@ fn sse_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{VlmHttpClient, build_body, global, json_worker, model_candidates, strip_end};
+    use super::{
+        ByteBudget, VlmHttpClient, build_body, global, json_worker, model_candidates, strip_end,
+    };
     use crate::{
-        SamplingParams, TaskWorkLease, VlmError, VlmHttpConfig, VlmImageInput,
+        SamplingParams, TaskWorkLease, VlmError, VlmHttpConfig, VlmImageInput, VlmRequest,
         vlm_image::admit_local,
     };
+    use axum::{Router, routing::post};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use bytes::Bytes;
     use image::{DynamicImage, ImageFormat};
@@ -1257,6 +1293,92 @@ mod tests {
         time::Duration,
     };
     use url::Url;
+
+    async fn official_test_client(body: String, max_response_bytes: usize) -> VlmHttpClient {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let body = body.clone();
+                async move { ([("content-type", "application/json")], body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        VlmHttpClient::connect(VlmHttpConfig {
+            server_url: Some(format!("http://{address}").parse().unwrap()),
+            model_name: Some("mock".into()),
+            skip_model_name_checking: true,
+            max_retries: 0,
+            max_response_bytes,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    #[test]
+    fn byte_budget_reports_full_cap_and_cumulative_rejection() {
+        let budget = ByteBudget::new(8);
+        budget.charge(3, "encoded document bytes").unwrap();
+        budget.charge(5, "encoded document bytes").unwrap();
+        assert!(matches!(
+            budget.charge(1, "encoded document bytes"),
+            Err(VlmError::LimitExceeded {
+                limit: 8,
+                actual: 9,
+                ..
+            })
+        ));
+
+        let large = ByteBudget::new(8 * 1024 * 1024 * 1024);
+        large
+            .charge(4 * 1024 * 1024 * 1024, "encoded document bytes")
+            .unwrap();
+        assert_eq!(large.remaining(), 4 * 1024 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn official_response_cap_and_shared_raw_budget_are_independent() {
+        let body = serde_json::json!({"choices":[{"finish_reason":"stop","message":{"content":"x".repeat(128)}}]}).to_string();
+        let oversized = official_test_client(body.clone(), body.len() - 1).await;
+        let high_budget = Arc::new(ByteBudget::new(8 * 1024 * 1024 * 1024));
+        assert!(matches!(
+            oversized
+                .predict_official_budgeted(
+                    VlmRequest::default(),
+                    oversized.official_response_cap(),
+                    Some(high_budget),
+                    tokio::time::Instant::now() + Duration::from_secs(2),
+                )
+                .await,
+            Err(VlmError::LimitExceeded { resource: "response", limit, .. }) if limit == body.len() as u64 - 1
+        ));
+
+        let client = official_test_client(body.clone(), body.len()).await;
+        let raw = Arc::new(ByteBudget::new(body.len() as u64 * 2 - 1));
+        client
+            .predict_official_budgeted(
+                VlmRequest::default(),
+                client.official_response_cap(),
+                Some(Arc::clone(&raw)),
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            client
+                .predict_official_budgeted(
+                    VlmRequest::default(),
+                    client.official_response_cap(),
+                    Some(raw),
+                    tokio::time::Instant::now() + Duration::from_secs(2),
+                )
+                .await,
+            Err(VlmError::LimitExceeded { resource: "response", limit, actual })
+                if limit == body.len() as u64 * 2 - 1 && actual == body.len() as u64 * 2
+        ));
+    }
 
     #[test]
     fn vlm_urls_preserve_base_paths_and_normalize_v1() {

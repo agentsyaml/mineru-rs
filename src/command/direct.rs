@@ -1,5 +1,5 @@
 //! Shared direct VLM runner for the canonical command and legacy CLI boundary.
-use super::env::apply_route_env;
+use super::env::{apply_route_env, official_page_concurrency};
 use crate::{
     MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialPdfOptions, ProgressCallback,
     ProgressEvent, RasterWorkers, VlmHeader, VlmHttpConfig, canonical_stem,
@@ -42,6 +42,21 @@ fn emit_warning(callback: &Option<WarningCallback>, source: &str, message: &str)
     }
 }
 
+fn cleanup_warning_callback(
+    warnings: &Option<WarningCallback>,
+) -> Option<crate::official_route::CleanupWarningCallback> {
+    warnings.as_ref().map(|warnings| {
+        let warnings = Arc::clone(warnings);
+        Arc::new(move || {
+            emit_warning(
+                &Some(Arc::clone(&warnings)),
+                "official output cleanup",
+                "published output cleanup failed",
+            );
+        }) as crate::official_route::CleanupWarningCallback
+    })
+}
+
 fn document_events(
     command_events: &Option<super::CommandCallback>,
     events: &Option<ProgressCallback>,
@@ -73,6 +88,23 @@ pub(super) struct DirectOptions {
     pub no_image_analysis: bool,
     pub batch_size: usize,
     pub canonical_mixed: bool,
+    #[allow(dead_code)] // Phase 2 consumes this at the direct enforcement boundary.
+    pub document_limits: crate::DocumentLimitPolicy,
+}
+
+fn apply_document_limits(route: &mut OfficialPdfOptions, limits: crate::DocumentLimitPolicy) {
+    if let Ok(value) = usize::try_from(limits.max_encoded_document_bytes) {
+        route.max_encoded_document_bytes = route.max_encoded_document_bytes.min(value);
+    }
+    if let Ok(value) = usize::try_from(limits.raw_output_bytes) {
+        route.max_raw_output_bytes = route.max_raw_output_bytes.min(value);
+    }
+    if let Ok(value) = usize::try_from(limits.asset_total_bytes) {
+        route.max_total_asset_bytes = route.max_total_asset_bytes.min(value);
+    }
+    if let Ok(value) = usize::try_from(limits.staged_text_bytes) {
+        route.max_staged_text_bytes = route.max_staged_text_bytes.min(value);
+    }
 }
 
 fn err(s: impl Into<String>) -> DirectError {
@@ -281,7 +313,12 @@ fn open_dir(path: &Path) -> Result<Dir, DirectError> {
     }
     Ok(dir)
 }
-fn snapshot(path: &Path, cap: usize) -> Result<bytes::Bytes, DirectError> {
+#[derive(Debug)]
+struct Snapshot {
+    bytes: bytes::Bytes,
+}
+
+fn snapshot(path: &Path, cap: usize, max_input_bytes: u64) -> Result<Snapshot, DirectError> {
     let path = absolute(path)?;
     let (anchor, names) = anchor_and_names(&path)?;
     let (leaf, parents) = names
@@ -295,16 +332,47 @@ fn snapshot(path: &Path, cap: usize) -> Result<bytes::Bytes, DirectError> {
     options.read(true);
     options.follow(FollowSymlinks::No);
     let mut file = dir.open_with(leaf, &options)?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(err("input is not a regular file"));
     }
-    let mut data = Vec::with_capacity(cap.min(1024 * 1024));
-    (&mut file).take(cap as u64).read_to_end(&mut data)?;
-    let mut probe = [0];
-    if file.read(&mut probe)? != 0 {
-        return Err(err("input exceeds maximum input size"));
+    if metadata.len() > max_input_bytes {
+        return Err(err(format!(
+            "input exceeds configured limit of {max_input_bytes} bytes"
+        )));
     }
-    Ok(data.into())
+    if metadata.len() > cap as u64 {
+        return Err(err("input exceeds resident preparation limit"));
+    }
+    let mut data = Vec::with_capacity(cap.min(1024 * 1024));
+    copy_capped(&mut file, &mut data, cap, max_input_bytes)?;
+    Ok(Snapshot { bytes: data.into() })
+}
+
+fn copy_capped(
+    input: &mut impl Read,
+    output: &mut Vec<u8>,
+    cap: usize,
+    source_cap: u64,
+) -> Result<(), DirectError> {
+    let mut total = 0u64;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(());
+        }
+        total = total.saturating_add(read as u64);
+        if total > source_cap {
+            return Err(err(format!(
+                "input exceeds configured limit of {source_cap} bytes"
+            )));
+        }
+        if output.len().saturating_add(read) > cap {
+            return Err(err("input exceeds maximum input size"));
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
 }
 #[cfg(unix)]
 fn same_dir(a: &Dir, b: &Dir) -> std::io::Result<bool> {
@@ -604,7 +672,12 @@ async fn run_legacy_impl(
     if options.batch_size == 0 {
         return Err(err("--batch-size must be greater than zero"));
     }
+    let configured_page_concurrency =
+        official_page_concurrency(|name| env.os(name)).map_err(err)?;
     let mut route = OfficialPdfOptions::default();
+    apply_document_limits(&mut route, options.document_limits);
+    let totals =
+        crate::document_limits::OfficialDocumentTotals::from_policy(options.document_limits);
     route.start_page = options.page_start.unwrap_or(0);
     route.end_page = options.page_end;
     route.formula_enable = !options.no_formula;
@@ -647,8 +720,13 @@ async fn run_legacy_impl(
     for path in skipped {
         eprintln!("skipped unsupported input: {}", path.display());
     }
-    let client =
-        MinerUVlmClient::connect(config(&options, env)?, MinerUVlmConfig::default()).await?;
+    let http = config(&options, env)?;
+    let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
+        configured_page_concurrency,
+        route.processing_window_size,
+        http.max_concurrency,
+    );
+    let client = MinerUVlmClient::connect(http, MinerUVlmConfig::default()).await?;
     let total = candidates.len();
     let batches = total.div_ceil(options.batch_size);
     let mut progress = Progress::new(std::io::stderr(), std::io::stderr().is_terminal());
@@ -673,14 +751,20 @@ async fn run_legacy_impl(
                 false,
             );
             let result = async {
-                let bytes = snapshot(path, route.max_pdf_bytes)?;
+                let snapshot = snapshot(
+                    path,
+                    route.max_pdf_bytes,
+                    options.document_limits.max_input_bytes,
+                )?;
                 let root = output_chain(&output, stem, input_dir.as_ref(), "vlm")?;
                 client
-                    .parse_and_write_official_pdf(
-                        crate::PdfInput::Bytes(bytes),
+                    .parse_and_write_official_pdf_with_totals_and_page_concurrency(
+                        crate::PdfInput::Bytes(snapshot.bytes),
                         route.clone(),
                         &root,
                         stem,
+                        totals,
+                        page_concurrency.clone(),
                     )
                     .await
                     .map_err(|e| Box::new(e) as DirectError)
@@ -719,7 +803,12 @@ async fn run_inner(
     if options.batch_size == 0 {
         return Err(err("--batch-size must be greater than zero"));
     }
+    let configured_page_concurrency =
+        official_page_concurrency(|name| env.os(name)).map_err(err)?;
     let mut route = OfficialPdfOptions::default();
+    apply_document_limits(&mut route, options.document_limits);
+    let totals =
+        crate::document_limits::OfficialDocumentTotals::from_policy(options.document_limits);
     route.start_page = options.page_start.unwrap_or(0);
     route.end_page = options.page_end;
     route.formula_enable = !options.no_formula;
@@ -775,8 +864,13 @@ async fn run_inner(
             emit_warning(&warnings, "unsupported input", &path.display().to_string());
         }
     }
-    let client =
-        MinerUVlmClient::connect(config(options, env)?, MinerUVlmConfig::default()).await?;
+    let http = config(options, env)?;
+    let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
+        configured_page_concurrency,
+        route.processing_window_size,
+        http.max_concurrency,
+    );
+    let client = MinerUVlmClient::connect(http, MinerUVlmConfig::default()).await?;
     let total = candidates.len();
     let batches = total.div_ceil(options.batch_size);
     let mut progress = Progress::new(std::io::stderr(), std::io::stderr().is_terminal());
@@ -813,11 +907,17 @@ async fn run_inner(
                     },
                 );
             }
+            let cleanup_warning = cleanup_warning_callback(&warnings);
             let result = async {
                 let deadline = Instant::now()
                     .checked_add(route.total_deadline)
                     .ok_or_else(|| err("input deadline overflow"))?;
-                let bytes = snapshot(path, route.max_pdf_bytes)?;
+                let snapshot = snapshot(
+                    path,
+                    route.max_pdf_bytes,
+                    options.document_limits.max_input_bytes,
+                )?;
+                let bytes = snapshot.bytes;
                 let target = if kind.is_office() { "office" } else { "vlm" };
                 let root = output_chain(&output, stem, input_dir.as_ref(), target)?;
                 let remaining = deadline
@@ -862,18 +962,30 @@ async fn run_inner(
                     .ok_or_else(|| err("input deadline expired"))?;
                 if mode == DirectMode::CallbackOutput {
                     client
-                        .parse_and_write_prepared_pdf_with_events(
+                        .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
                             prepared,
                             route,
                             &root,
                             stem,
                             task_events.clone(),
+                            cleanup_warning,
+                            totals,
+                            page_concurrency.clone(),
                         )
                         .await
                         .map_err(|e| -> DirectError { Box::new(e) })
                 } else {
                     client
-                        .parse_and_write_prepared_pdf(prepared, route, &root, stem)
+                        .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
+                            prepared,
+                            route,
+                            &root,
+                            stem,
+                            None,
+                            None,
+                            totals,
+                            page_concurrency.clone(),
+                        )
                         .await
                         .map_err(|e| -> DirectError { Box::new(e) })
                 }
@@ -925,6 +1037,10 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::{ffi::OsString, time::Duration};
+
+    fn snapshot_pdf(path: &Path, cap: usize, max: u64) -> Result<Snapshot, DirectError> {
+        snapshot(path, cap, max)
+    }
 
     #[test]
     fn decimal_matches_python_integer_lexing() {
@@ -1058,12 +1174,50 @@ mod tests {
         let pdf = temp.path().join("large.pdf");
         std::fs::write(&pdf, b"12345").unwrap();
         assert!(
-            snapshot(&pdf, 4)
+            snapshot_pdf(&pdf, 4, 4)
                 .unwrap_err()
                 .to_string()
                 .contains("exceeds")
         );
-        assert_eq!(snapshot(&pdf, 5).unwrap().as_ref(), b"12345");
+        assert_eq!(snapshot_pdf(&pdf, 5, 5).unwrap().bytes.as_ref(), b"12345");
+    }
+
+    #[test]
+    fn oversized_pdf_is_rejected_from_the_opened_descriptor() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let temp = tempfile::tempdir().unwrap();
+        let pdf = temp.path().join("large.pdf");
+        let mut doc = Document::with_version("1.5");
+        let page = doc.add_object(dictionary! {"Type" => "Page", "MediaBox" => vec![0.into(), 0.into(), 1.into(), 1.into()]});
+        let pages = doc.new_object_id();
+        doc.objects.insert(
+            pages,
+            Object::Dictionary(
+                dictionary! {"Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1},
+            ),
+        );
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Parent", pages);
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+        doc.trailer.set("Root", catalog);
+        doc.add_object(Stream::new(dictionary! {}, vec![b'x'; 4096]));
+        let mut source = Vec::new();
+        doc.save_to(&mut source).unwrap();
+        std::fs::write(&pdf, source).unwrap();
+
+        assert!(snapshot(&pdf, 1024, 8192).is_err());
+    }
+
+    #[test]
+    fn non_pdf_over_resident_cap_is_rejected_before_reading() {
+        let temp = tempfile::tempdir().unwrap();
+        let png = temp.path().join("large.png");
+        std::fs::write(&png, [0; 5]).unwrap();
+        assert!(snapshot(&png, 4, 10).is_err());
     }
 
     #[test]
@@ -1154,7 +1308,7 @@ mod tests {
         std::fs::write(&leaf, b"x").unwrap();
         std::fs::remove_file(&leaf).unwrap();
         symlink(&target, &leaf).unwrap();
-        assert!(snapshot(&leaf, 10).is_err());
+        assert!(snapshot_pdf(&leaf, 10, 10).is_err());
 
         let output = temp.path().join("out");
         std::fs::create_dir(&output).unwrap();
@@ -1209,6 +1363,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cleanup_failure_warning_is_generic_and_emitted_once() {
+        use std::sync::Mutex;
+
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let callback = {
+            let warnings = Arc::clone(&warnings);
+            Arc::new(move |source: &str, message: &str| {
+                warnings
+                    .lock()
+                    .unwrap()
+                    .push((source.to_owned(), message.to_owned()))
+            }) as WarningCallback
+        };
+        cleanup_warning_callback(&Some(callback)).unwrap()();
+        assert_eq!(
+            *warnings.lock().unwrap(),
+            vec![(
+                "official output cleanup".into(),
+                "published output cleanup failed".into()
+            )]
+        );
+    }
+
     #[tokio::test]
     async fn callback_runner_stops_after_first_preparation_failure() {
         use std::sync::Mutex;
@@ -1247,6 +1425,7 @@ mod tests {
                 no_image_analysis: false,
                 batch_size: 1,
                 canonical_mixed: true,
+                document_limits: crate::DocumentLimitPolicy::defaults(),
             },
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
             super::super::Environment::process(),
@@ -1370,6 +1549,7 @@ mod tests {
                 no_image_analysis: false,
                 batch_size: 1,
                 canonical_mixed: true,
+                document_limits: crate::DocumentLimitPolicy::defaults(),
             },
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
             super::super::Environment::process(),

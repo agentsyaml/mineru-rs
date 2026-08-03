@@ -211,6 +211,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` | Off | Allow POST parsing requests when publicly bound. |
 | `MINERU_API_SHUTDOWN_ON_STDIN_EOF` | Off | Equivalent to `--shutdown-on-stdin-eof`. |
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
+| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | Official direct-route page concurrency; integer from 1 through 8 (`2` is the low-memory fallback). |
 | `MINERU_PDF_RENDER_THREADS` | `3` | Number of rendering workers. |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | Timeout in seconds for a single render. |
 | `MINERU_FORMULA_ENABLE` | On | Default for formula recognition. |
@@ -326,6 +327,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 When authentication is required, set `BearerToken::new(...)` on the public `bearer_token` of a mutable `ClientConfig` before constructing `MinerUClient`. `check_model()` requests the model list and confirms that it contains the configured model.
 
 ## Default resource limits
+
+### Document-limit controls
+
+`--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`, `--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES`, and `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` accept unsigned decimal bytes (whitespace and `_` are allowed). CLI overrides environment, then the compiled default: 4_293_918_719 input bytes, 8 GiB encoded document bytes, and 8 GiB output bytes. Explicit invalid, zero, or over-ceiling values fail; hard ceilings are 16 GiB, 64 GiB, and 16 GiB respectively.
+
+These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above 512 MiB before `lopdf` loads them, and one VLM response remains capped at 10 MiB. Configure encoded policy on `mineru-vlm-api`; canonical remote mode rejects its encoded override. Ordinary legacy `mineru-vlm` keeps its resident parser cap and requires `--official-output` for an encoded-document override.
 
 | Item | Default |
 | --- | ---: |

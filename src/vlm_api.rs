@@ -41,8 +41,8 @@ use tokio::{
     task::JoinSet,
 };
 
-const FILE_CAP: usize = 512 * 1024 * 1024;
-const BODY_CAP: usize = FILE_CAP + 1024 * 1024;
+const FILE_CAP: u64 = 512 * 1024 * 1024;
+const BODY_CAP: usize = 512 * 1024 * 1024 + 1024 * 1024;
 const TEXT_CAP: usize = 64 * 1024;
 const TEXT_TOTAL_CAP: usize = 256 * 1024;
 const RECORD_CAP: usize = 32;
@@ -63,12 +63,15 @@ struct App {
     env_formula: Option<bool>,
     env_table: Option<bool>,
     concurrency: usize,
+    official_page_concurrency: usize,
     retention: Duration,
     cleanup_interval: Duration,
     workers: Arc<Mutex<Option<WorkerRegistry>>>,
     office_workers: OfficeWorkers,
     raster_workers: RasterWorkers,
     limits: RequestLimits,
+    server_zip_cap: u64,
+    totals: crate::document_limits::OfficialDocumentTotals,
     events: Option<ProgressCallback>,
     #[cfg(test)]
     test_http: Option<VlmHttpConfig>,
@@ -208,7 +211,7 @@ impl Drop for SyncWorkerGuard {
 #[derive(Clone, Copy)]
 struct RequestLimits {
     body: usize,
-    file: usize,
+    file: u64,
     text: usize,
     text_total: usize,
     fields: usize,
@@ -219,9 +222,12 @@ struct WorkerContext {
     route: OfficialPdfOptions,
     env_formula: Option<bool>,
     env_table: Option<bool>,
+    official_page_concurrency: usize,
     office_workers: OfficeWorkers,
     raster_workers: RasterWorkers,
     events: Option<ProgressCallback>,
+    server_zip_cap: u64,
+    totals: crate::document_limits::OfficialDocumentTotals,
     #[cfg(test)]
     test_http: Option<VlmHttpConfig>,
 }
@@ -233,12 +239,14 @@ pub struct ServiceConfig {
     pub route: OfficialPdfOptions,
     pub formula: Option<bool>,
     pub table: Option<bool>,
+    official_page_concurrency: usize,
     public_bind_exposed: bool,
     allow_public_http_client: bool,
     retention: Duration,
     cleanup_interval: Duration,
     record_cap: usize,
     limits: RequestLimits,
+    document_limits: Option<crate::DocumentLimitPolicy>,
     #[doc(hidden)]
     progress_callback: Option<ProgressCallback>,
     #[cfg(test)]
@@ -265,6 +273,7 @@ impl ServiceConfig {
                 route,
                 formula,
                 table,
+                official_page_concurrency: 4,
                 public_bind_exposed: false,
                 allow_public_http_client: false,
                 retention: RETENTION,
@@ -277,6 +286,7 @@ impl ServiceConfig {
                     text_total: TEXT_TOTAL_CAP,
                     fields: 32,
                 },
+                document_limits: None,
                 progress_callback: None,
                 #[cfg(test)]
                 test_http: None,
@@ -288,9 +298,22 @@ impl ServiceConfig {
         }
     }
     #[doc(hidden)]
+    pub fn official_page_concurrency(mut self, concurrency: usize) -> Result<Self, String> {
+        if !(1..=8).contains(&concurrency) {
+            return Err("MINERU_OFFICIAL_PAGE_CONCURRENCY must be an integer from 1 to 8".into());
+        }
+        self.official_page_concurrency = concurrency;
+        Ok(self)
+    }
+    #[doc(hidden)]
     pub fn public_policy(mut self, exposed: bool, allow_http_client: bool) -> Self {
         self.public_bind_exposed = exposed;
         self.allow_public_http_client = allow_http_client;
+        self
+    }
+    #[doc(hidden)]
+    pub fn document_limits(mut self, limits: crate::DocumentLimitPolicy) -> Self {
+        self.document_limits = Some(limits);
         self
     }
     #[doc(hidden)]
@@ -441,6 +464,33 @@ pub async fn serve(
     config: ServiceConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), std::io::Error> {
+    let transport_policy = config
+        .document_limits
+        .unwrap_or_else(crate::DocumentLimitPolicy::defaults);
+    let totals = config
+        .document_limits
+        .map(crate::document_limits::OfficialDocumentTotals::from_policy)
+        .unwrap_or_else(|| {
+            crate::document_limits::OfficialDocumentTotals::from_options(&config.route)
+        });
+    let body = crate::document_limits::usize_with_max(
+        transport_policy.multipart_body_bytes,
+        usize::MAX as u64,
+    )
+    .map_err(std::io::Error::other)?;
+    let policy_limits = RequestLimits {
+        body,
+        file: transport_policy.max_input_bytes,
+        ..config.limits
+    };
+    #[cfg(test)]
+    let limits = if config.limits.body != BODY_CAP || config.limits.file != FILE_CAP {
+        config.limits
+    } else {
+        policy_limits
+    };
+    #[cfg(not(test))]
+    let limits = policy_limits;
     let addr = listener.local_addr()?;
     let public_listener = !addr.ip().is_loopback();
     if public_listener && !config.public_bind_exposed {
@@ -471,13 +521,16 @@ pub async fn serve(
         route: config.route,
         env_formula: config.formula,
         env_table: config.table,
+        official_page_concurrency: config.official_page_concurrency,
         concurrency: config.concurrency,
         retention: config.retention,
         cleanup_interval: config.cleanup_interval,
         workers: Arc::new(Mutex::new(Some(WorkerRegistry::new()))),
         office_workers,
         raster_workers: RasterWorkers::default(),
-        limits: config.limits,
+        limits,
+        server_zip_cap: transport_policy.server_zip_bytes,
+        totals,
         events: config.progress_callback,
         #[cfg(test)]
         test_http: config.test_http,
@@ -963,11 +1016,14 @@ async fn parse_form(
                     "temporary storage failed",
                 )
             })?;
-            let mut n = 0usize;
+            let mut n = 0u64;
             let mut field = field;
             while let Some(chunk) = field.chunk().await.map_err(multipart_error)? {
                 n = n
-                    .checked_add(chunk.len())
+                    .checked_add(
+                        u64::try_from(chunk.len())
+                            .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "input too large"))?,
+                    )
                     .ok_or((StatusCode::PAYLOAD_TOO_LARGE, "input too large"))?;
                 if n > limits.file {
                     return Err((StatusCode::PAYLOAD_TOO_LARGE, "input too large"));
@@ -1128,9 +1184,12 @@ fn worker_context(app: &App) -> WorkerContext {
         route: app.route.clone(),
         env_formula: app.env_formula,
         env_table: app.env_table,
+        official_page_concurrency: app.official_page_concurrency,
         office_workers: app.office_workers.clone(),
         raster_workers: app.raster_workers.clone(),
         events: app.events.clone(),
+        server_zip_cap: app.server_zip_cap,
+        totals: app.totals,
         #[cfg(test)]
         test_http: app.test_http.clone(),
     }
@@ -1474,6 +1533,11 @@ async fn run_task(
         input.options.server_url.as_deref(),
     )
     .map_err(|_| "task URL config: invalid server URL".to_owned())?;
+    let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
+        app.official_page_concurrency,
+        app.route.processing_window_size,
+        config.max_concurrency,
+    );
     let client = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         MinerUVlmClient::connect_for_task(
@@ -1488,12 +1552,15 @@ async fn run_task(
     remaining(deadline)?;
     options.total_deadline = remaining(deadline)?;
     let manifest = client
-        .parse_and_write_prepared_pdf_with_events(
+        .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
             prepared,
             options,
             input.root.path(),
             &input.stem,
             app.events.clone(),
+            None,
+            app.totals,
+            page_concurrency,
         )
         .await
         .map_err(|error| format!("official route: {error}"))?;
@@ -1509,10 +1576,11 @@ async fn run_task(
     let result_job = result.clone();
     let selectors = input.options.clone_selectors();
     let route = app.route.clone();
+    let server_zip_cap = app.server_zip_cap;
     remaining(deadline)?;
     tokio::task::spawn_blocking(move || {
         if selectors.zip {
-            zip_result(
+            zip_result_capped(
                 &root,
                 &stem,
                 kind,
@@ -1520,6 +1588,7 @@ async fn run_task(
                 &result_job,
                 &selectors,
                 &route,
+                server_zip_cap,
                 deadline,
             )
         } else {
@@ -1671,7 +1740,15 @@ fn compact_pdf(
     let mut renamed = false;
     let mut work = || -> Result<(), Box<dyn std::error::Error>> {
         check_deadline(deadline)?;
-        let mut doc = lopdf::Document::load(input)?;
+        let input = std::fs::File::open(input)?;
+        let metadata = input.metadata()?;
+        if !metadata.is_file() {
+            return Err("input is not a regular file".into());
+        }
+        if metadata.len() > u64::try_from(cap)? {
+            return Err("PDF exceeds size limit".into());
+        }
+        let mut doc = lopdf::Document::load_from(input)?;
         check_deadline(deadline)?;
         if doc.is_encrypted() {
             return Err("encrypted PDF".into());
@@ -1775,26 +1852,21 @@ fn inherited_page_value(
         };
     }
 }
-fn zip_result(
+fn zip_result_capped(
     task_root: &FsPath,
     stem: &str,
     kind: DocumentKind,
     origin: &FsPath,
     destination: &FsPath,
     selectors: &Selectors,
-    route: &OfficialPdfOptions,
+    _route: &OfficialPdfOptions,
+    cap: u64,
     deadline: Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let temporary = destination.with_extension("zip.partial");
     let mut renamed = false;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         check_deadline(deadline)?;
-        let cap = route
-            .max_pdf_bytes
-            .checked_add(route.max_total_asset_bytes)
-            .and_then(|n| n.checked_add(route.max_staged_text_bytes))
-            .and_then(|n| n.checked_add(1024 * 1024))
-            .ok_or("ZIP size limit overflow")?;
         let mut zip = zip::ZipWriter::new(CappedFile::new(&temporary, cap, deadline)?);
         for Artifact {
             name,
@@ -1845,6 +1917,35 @@ fn zip_result(
     }
     result
 }
+#[cfg(test)]
+fn zip_result(
+    task_root: &FsPath,
+    stem: &str,
+    kind: DocumentKind,
+    origin: &FsPath,
+    destination: &FsPath,
+    selectors: &Selectors,
+    route: &OfficialPdfOptions,
+    deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cap = u64::try_from(route.max_pdf_bytes)
+        .map_err(|_| "ZIP size limit overflow")?
+        .checked_add(route.max_total_asset_bytes as u64)
+        .and_then(|n| n.checked_add(route.max_staged_text_bytes as u64))
+        .and_then(|n| n.checked_add(1024 * 1024))
+        .ok_or("ZIP size limit overflow")?;
+    zip_result_capped(
+        task_root,
+        stem,
+        kind,
+        origin,
+        destination,
+        selectors,
+        route,
+        cap,
+        deadline,
+    )
+}
 fn json_result(
     task_root: &FsPath,
     stem: &str,
@@ -1861,16 +1962,20 @@ fn json_result(
         let mut files = package_files(task_root, stem, kind, selectors, deadline)?;
         // JSON has one official content_list key; the v2 companion is ZIP-only.
         files.retain(|artifact| !artifact.name.ends_with("_content_list_v2.json"));
-        let mut remaining = route.max_staged_text_bytes;
+        let resident_cap = route.max_staged_text_bytes as u64;
+        if files.iter().any(|artifact| artifact.len > resident_cap) {
+            return Err("JSON artifact exceeds resident staged-text limit".into());
+        }
+        let mut remaining = route.max_staged_text_bytes as u64;
         for Artifact { name, len, .. } in &files {
             check_deadline(deadline)?;
             if !name.starts_with("images/") {
-                let n = usize::try_from(*len)?;
+                let n = *len;
                 remaining = remaining
                     .checked_sub(n)
                     .ok_or("JSON source exceeds size limit")?;
             } else {
-                let n = usize::try_from(*len)?;
+                let n = *len;
                 let encoded = n
                     .checked_add(2)
                     .and_then(|n| n.checked_div(3))
@@ -1879,13 +1984,13 @@ fn json_result(
                 remaining = remaining
                     .checked_sub(
                         encoded
-                            .checked_add(name.len() + 64)
+                            .checked_add(u64::try_from(name.len() + 64)?)
                             .ok_or("JSON source size overflow")?,
                     )
                     .ok_or("JSON source exceeds size limit")?;
             }
         }
-        let mut out = CappedFile::new(&partial, route.max_staged_text_bytes, deadline)?;
+        let mut out = CappedFile::new(&partial, route.max_staged_text_bytes as u64, deadline)?;
         write!(
             out,
             "{{\"backend\":\"vlm-http-client\",\"version\":{},\"results\":{{{}:{{",
@@ -2144,12 +2249,12 @@ fn image_mime(name: &str) -> Option<&'static str> {
 }
 struct CappedFile {
     file: std::fs::File,
-    used: usize,
-    cap: usize,
+    used: u64,
+    cap: u64,
     deadline: Instant,
 }
 impl CappedFile {
-    fn new(path: &FsPath, cap: usize, deadline: Instant) -> std::io::Result<Self> {
+    fn new(path: &FsPath, cap: u64, deadline: Instant) -> std::io::Result<Self> {
         check_deadline(deadline)?;
         let file = std::fs::File::create(path)?;
         check_deadline(deadline)?;
@@ -2170,10 +2275,12 @@ impl CappedFile {
 impl Write for CappedFile {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
         check_deadline(self.deadline)?;
-        let position = usize::try_from(self.file.stream_position()?)
-            .map_err(|_| std::io::Error::other("result exceeds size limit"))?;
+        let position = self.file.stream_position()?;
         let end = position
-            .checked_add(b.len())
+            .checked_add(
+                u64::try_from(b.len())
+                    .map_err(|_| std::io::Error::other("result exceeds size limit"))?,
+            )
             .ok_or_else(|| std::io::Error::other("result exceeds size limit"))?;
         if end > self.cap {
             return Err(std::io::Error::other("result exceeds size limit"));
@@ -2181,7 +2288,10 @@ impl Write for CappedFile {
         let n = self.file.write(b)?;
         self.used = self.used.max(
             position
-                .checked_add(n)
+                .checked_add(
+                    u64::try_from(n)
+                        .map_err(|_| std::io::Error::other("result exceeds size limit"))?,
+                )
                 .ok_or_else(|| std::io::Error::other("result exceeds size limit"))?,
         );
         check_deadline(self.deadline)?;
@@ -3003,9 +3113,14 @@ mod tests {
             route: OfficialPdfOptions::default(),
             env_formula: None,
             env_table: None,
+            official_page_concurrency: 4,
             office_workers: OfficeWorkers::new().unwrap(),
             raster_workers: RasterWorkers::default(),
             events: None,
+            server_zip_cap: crate::DocumentLimitPolicy::defaults().server_zip_bytes,
+            totals: crate::document_limits::OfficialDocumentTotals::from_options(
+                &OfficialPdfOptions::default(),
+            ),
             test_http: None,
         };
         let (sender, receiver) = oneshot::channel();
@@ -3718,14 +3833,11 @@ mod tests {
         let probe = dir.path().join("probe.pdf");
         std::fs::write(&input, nested_fixture()).unwrap();
         compact_pdf(&input, &probe, 1, 99_999, 64 * 1024, far_deadline()).unwrap();
-        let cap = usize::try_from(std::fs::metadata(&probe).unwrap().len()).unwrap();
+        let cap = usize::try_from(std::fs::metadata(&input).unwrap().len()).unwrap();
 
         let exact = dir.path().join("exact.pdf");
         compact_pdf(&input, &exact, 1, 99_999, cap, far_deadline()).unwrap();
-        assert_eq!(
-            usize::try_from(std::fs::metadata(&exact).unwrap().len()).unwrap(),
-            cap
-        );
+        assert!(usize::try_from(std::fs::metadata(&exact).unwrap().len()).unwrap() <= cap);
 
         let failure = dir.path().join("failure.pdf");
         let partial = failure.with_extension("pdf.partial");
@@ -3744,6 +3856,17 @@ mod tests {
         );
         assert_eq!(std::fs::read(&failure).unwrap(), b"sentinel");
         assert!(!partial.exists());
+    }
+
+    #[test]
+    fn compact_pdf_rejects_sparse_source_above_cap_before_lopdf() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("oversize.pdf");
+        let output = dir.path().join("selected.pdf");
+        std::fs::File::create(&input).unwrap().set_len(9).unwrap();
+        let error = compact_pdf(&input, &output, 0, 0, 8, far_deadline()).unwrap_err();
+        assert!(error.to_string().contains("PDF exceeds size limit"));
+        assert!(!output.exists() && !output.with_extension("pdf.partial").exists());
     }
 
     #[test]
@@ -3825,6 +3948,7 @@ mod tests {
             route: OfficialPdfOptions::default(),
             env_formula: None,
             env_table: None,
+            official_page_concurrency: 4,
             concurrency: 1,
             retention: RETENTION,
             cleanup_interval: CLEANUP_INTERVAL,
@@ -3832,6 +3956,10 @@ mod tests {
             office_workers: OfficeWorkers::new().unwrap(),
             raster_workers: RasterWorkers::default(),
             events: None,
+            server_zip_cap: crate::DocumentLimitPolicy::defaults().server_zip_bytes,
+            totals: crate::document_limits::OfficialDocumentTotals::from_options(
+                &OfficialPdfOptions::default(),
+            ),
             limits: RequestLimits {
                 body: BODY_CAP,
                 file: FILE_CAP,
@@ -4015,9 +4143,14 @@ mod tests {
                 route: OfficialPdfOptions::default(),
                 env_formula: None,
                 env_table: None,
+                official_page_concurrency: 4,
                 office_workers: OfficeWorkers::new().unwrap(),
                 raster_workers: RasterWorkers::default(),
                 events: Some(callback.clone()),
+                server_zip_cap: crate::DocumentLimitPolicy::defaults().server_zip_bytes,
+                totals: crate::document_limits::OfficialDocumentTotals::from_options(
+                    &OfficialPdfOptions::default(),
+                ),
                 test_http: None,
             },
             gate_record.clone(),
@@ -4254,9 +4387,14 @@ mod tests {
             route: OfficialPdfOptions::default(),
             env_formula: None,
             env_table: None,
+            official_page_concurrency: 4,
             office_workers: OfficeWorkers::new().unwrap(),
             raster_workers: RasterWorkers::default(),
             events: None,
+            server_zip_cap: crate::DocumentLimitPolicy::defaults().server_zip_bytes,
+            totals: crate::document_limits::OfficialDocumentTotals::from_options(
+                &OfficialPdfOptions::default(),
+            ),
             test_http: None,
         };
         let guard = spawn_sync_worker(&none, context, guard, &None, "input".into()).unwrap_err();
@@ -4882,6 +5020,34 @@ mod tests {
             config.task_lifecycle(Duration::ZERO, Duration::ZERO),
             Err(message) if message == "MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS must be positive"
         ));
+    }
+
+    #[test]
+    fn service_config_page_concurrency_reaches_task_effective_permits() {
+        let mut route = OfficialPdfOptions::default();
+        route.processing_window_size = 8;
+        let configured = ServiceConfig::new(1, PathBuf::new(), route, None, None)
+            .unwrap()
+            .official_page_concurrency(7)
+            .unwrap();
+        assert_eq!(configured.official_page_concurrency, 7);
+        assert_eq!(
+            crate::official_route::effective_page_concurrency(
+                configured.official_page_concurrency,
+                configured.route.processing_window_size,
+                8,
+            ),
+            7
+        );
+        assert_eq!(
+            ServiceConfig::new(1, PathBuf::new(), OfficialPdfOptions::default(), None, None)
+                .unwrap()
+                .official_page_concurrency,
+            4
+        );
+        for value in [0, 9] {
+            assert!(configured.clone().official_page_concurrency(value).is_err());
+        }
     }
 
     #[test]

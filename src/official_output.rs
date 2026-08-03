@@ -46,21 +46,45 @@ pub(crate) struct OfficialOutputStage {
     pages: Vec<usize>,
     preview_pages: Vec<usize>,
     assets: HashSet<PathBuf>,
-    asset_bytes: usize,
-    text_bytes: usize,
-    max_asset_bytes: usize,
-    max_text_bytes: usize,
+    asset_bytes: u64,
+    text_bytes: u64,
+    max_asset_bytes: u64,
+    max_text_bytes: u64,
+    resident_asset_bytes: usize,
+    resident_text_bytes: usize,
     preview_written: bool,
     cleanup: Option<CleanupAdmission>,
 }
 
 impl OfficialOutputStage {
+    #[cfg(test)]
     pub(crate) fn begin(
         root: &Path,
         stem: &str,
         target_name: OfficialOutputTarget,
-        max_asset_bytes: usize,
-        max_text_bytes: usize,
+        max_asset_bytes: u64,
+        max_text_bytes: u64,
+        origin: Option<(Bytes, &'static str)>,
+    ) -> VlmResult<Self> {
+        Self::begin_with_resident(
+            root,
+            stem,
+            target_name,
+            max_asset_bytes,
+            max_text_bytes,
+            usize::try_from(max_asset_bytes).unwrap_or(usize::MAX),
+            usize::try_from(max_text_bytes).unwrap_or(usize::MAX),
+            origin,
+        )
+    }
+    pub(crate) fn begin_with_resident(
+        root: &Path,
+        stem: &str,
+        target_name: OfficialOutputTarget,
+        max_asset_bytes: u64,
+        max_text_bytes: u64,
+        resident_asset_bytes: usize,
+        resident_text_bytes: usize,
         origin: Option<(Bytes, &'static str)>,
     ) -> VlmResult<Self> {
         let stem = canonical_stem(stem)?;
@@ -110,6 +134,8 @@ impl OfficialOutputStage {
             text_bytes: 0,
             max_asset_bytes,
             max_text_bytes,
+            resident_asset_bytes,
+            resident_text_bytes,
             preview_written: false,
             cleanup: Some(cleanup),
         };
@@ -150,14 +176,12 @@ impl OfficialOutputStage {
         table_enable: bool,
         deadline: std::time::Instant,
     ) -> VlmResult<()> {
-        let prepared_bytes = self.pages.iter().try_fold(0usize, |total, page| {
-            let bytes = usize::try_from(
-                self.parts()?
-                    .metadata(format!("{page:020}-prepared.json"))
-                    .map_err(io)?
-                    .len(),
-            )
-            .unwrap_or(usize::MAX);
+        let prepared_bytes = self.pages.iter().try_fold(0u64, |total, page| {
+            let bytes = self
+                .parts()?
+                .metadata(format!("{page:020}-prepared.json"))
+                .map_err(io)?
+                .len();
             Ok::<_, VlmError>(total.saturating_add(bytes))
         })?;
         if prepared_bytes > self.max_text_bytes {
@@ -280,11 +304,19 @@ impl OfficialOutputStage {
             .collect()
     }
 
-    pub(crate) fn remaining_asset_bytes(&self) -> usize {
+    pub(crate) fn remaining_asset_bytes(&self) -> u64 {
         self.max_asset_bytes.saturating_sub(self.asset_bytes)
     }
 
-    pub(crate) fn remaining_text_bytes(&self) -> usize {
+    pub(crate) fn remaining_asset_buffer_bytes(&self) -> usize {
+        usize::try_from(
+            self.remaining_asset_bytes()
+                .min(self.resident_asset_bytes as u64),
+        )
+        .expect("resident asset cap fits usize")
+    }
+
+    pub(crate) fn remaining_text_bytes(&self) -> u64 {
         self.max_text_bytes.saturating_sub(self.text_bytes)
     }
 
@@ -312,7 +344,7 @@ impl OfficialOutputStage {
         Ok(())
     }
 
-    pub(crate) fn commit(mut self) -> VlmResult<OfficialOutputManifest> {
+    pub(crate) fn commit(mut self) -> VlmResult<OfficialCommit> {
         let manifest = OfficialOutputManifest {
             root: self.root.clone(),
             stem: self.stem.clone(),
@@ -333,8 +365,10 @@ impl OfficialOutputStage {
                     .take()
                     .expect("cleanup admitted before stage live");
                 cleanup.job.backup = backup;
-                cleanup.detach(false);
-                Ok(manifest)
+                // Publication is complete, but successful callers must not report completion
+                // while this admitted, capability-safe cleanup still owns private artifacts.
+                let cleanup = cleanup.detach(true);
+                Ok(OfficialCommit { manifest, cleanup })
             }
             Err(error) => {
                 self.cleanup();
@@ -344,15 +378,17 @@ impl OfficialOutputStage {
     }
 
     /// Consumes the stage so cleanup can be scheduled outside an async executor.
-    pub(crate) fn cleanup(mut self) {
-        self.cleanup_now();
+    pub(crate) fn cleanup(mut self) -> CleanupOutcome {
+        self.cleanup_now()
     }
 
-    fn cleanup_now(&mut self) {
+    fn cleanup_now(&mut self) -> CleanupOutcome {
         self.close_stage_handles();
         drop(self.staging_parent.take());
         if let Some(cleanup) = self.cleanup.take() {
-            cleanup.detach(true);
+            cleanup.detach(true)
+        } else {
+            CleanupOutcome::default()
         }
     }
 
@@ -404,15 +440,12 @@ impl OfficialOutputStage {
             }
             return Ok(());
         }
-        let next = self
-            .asset_bytes
-            .checked_add(asset.data.len())
-            .unwrap_or(usize::MAX);
+        let next = self.asset_bytes.saturating_add(asset.data.len() as u64);
         if next > self.max_asset_bytes {
             return Err(VlmError::LimitExceeded {
                 resource: "total asset bytes",
-                limit: self.max_asset_bytes as u64,
-                actual: next as u64,
+                limit: self.max_asset_bytes,
+                actual: next,
             });
         }
         let parent = open_or_create_relative(self.stage()?, path.parent().expect("asset parent"))?;
@@ -425,15 +458,12 @@ impl OfficialOutputStage {
         if origin.is_empty() {
             return invalid("origin must not be empty");
         }
-        let next = self
-            .asset_bytes
-            .checked_add(origin.len())
-            .unwrap_or(usize::MAX);
+        let next = self.asset_bytes.saturating_add(origin.len() as u64);
         if next > self.max_asset_bytes {
             return Err(VlmError::LimitExceeded {
                 resource: "total asset bytes",
-                limit: self.max_asset_bytes as u64,
-                actual: next as u64,
+                limit: self.max_asset_bytes,
+                actual: next,
             });
         }
         write_bytes_in(
@@ -462,14 +492,14 @@ impl OfficialOutputStage {
     ) -> VlmResult<()> {
         let mut output = CappedFile::new(
             directory.create(name).map_err(io)?,
-            self.remaining_text_bytes(),
+            self.remaining_text_buffer_bytes(),
         );
         if let Err(error) = serde_json::to_writer(&mut output, value) {
             if output.attempted > output.limit {
                 return Err(VlmError::LimitExceeded {
                     resource: "staged text/JSON bytes",
-                    limit: self.max_text_bytes as u64,
-                    actual: self.text_bytes.saturating_add(output.attempted) as u64,
+                    limit: self.max_text_bytes,
+                    actual: self.text_bytes.saturating_add(output.attempted as u64),
                 });
             }
             return Err(VlmError::Protocol {
@@ -477,7 +507,7 @@ impl OfficialOutputStage {
                 message: error.to_string(),
             });
         }
-        self.charge_text(output.written)
+        self.charge_text(output.written as u64)
     }
 
     fn write_text_in(
@@ -486,25 +516,32 @@ impl OfficialOutputStage {
         name: impl AsRef<Path>,
         bytes: &[u8],
     ) -> VlmResult<()> {
-        self.charge_text(bytes.len())?;
+        self.charge_text(bytes.len() as u64)?;
         write_bytes_in(directory, name, bytes)
     }
 
     fn append_part<W: Write>(&mut self, output: &mut W, name: impl AsRef<Path>) -> VlmResult<()> {
         let bytes = self.parts()?.metadata(name.as_ref()).map_err(io)?.len();
-        let bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
         self.charge_text(bytes)?;
         stdio::copy(&mut self.parts()?.open(name).map_err(io)?, output).map_err(io)?;
         Ok(())
     }
 
-    fn charge_text(&mut self, bytes: usize) -> VlmResult<()> {
-        let next = self.text_bytes.checked_add(bytes).unwrap_or(usize::MAX);
+    pub(crate) fn remaining_text_buffer_bytes(&self) -> usize {
+        usize::try_from(
+            self.remaining_text_bytes()
+                .min(self.resident_text_bytes as u64),
+        )
+        .expect("resident text cap fits usize")
+    }
+
+    fn charge_text(&mut self, bytes: u64) -> VlmResult<()> {
+        let next = self.text_bytes.saturating_add(bytes);
         if next > self.max_text_bytes {
             return Err(VlmError::LimitExceeded {
                 resource: "staged text/JSON bytes",
-                limit: self.max_text_bytes as u64,
-                actual: next as u64,
+                limit: self.max_text_bytes,
+                actual: next,
             });
         }
         self.text_bytes = next;
@@ -579,7 +616,7 @@ impl OfficialOutputStage {
                 if content_written {
                     self.write_fragment(&mut content, b",")?;
                 }
-                self.charge_text(inner)?;
+                self.charge_text(inner as u64)?;
                 source.seek(SeekFrom::Start(1)).map_err(io)?;
                 stdio::copy(&mut source.take(inner as u64), &mut content).map_err(io)?;
                 content_written = true;
@@ -617,7 +654,7 @@ impl OfficialOutputStage {
             if markdown_written {
                 self.write_fragment(&mut markdown, b"\n\n")?;
             }
-            self.charge_text(bytes)?;
+            self.charge_text(bytes as u64)?;
             stdio::copy(&mut self.parts()?.open(name).map_err(io)?, &mut markdown).map_err(io)?;
             markdown_written = true;
         }
@@ -625,7 +662,7 @@ impl OfficialOutputStage {
     }
 
     fn write_fragment<W: Write>(&mut self, output: &mut W, bytes: &[u8]) -> VlmResult<()> {
-        self.charge_text(bytes.len())?;
+        self.charge_text(bytes.len() as u64)?;
         output.write_all(bytes).map_err(io)
     }
 }
@@ -880,16 +917,52 @@ fn create_private_stage(directory: &Dir) -> VlmResult<(std::ffi::OsString, Dir, 
 }
 
 fn remove_private_stage(directory: &Dir, parent_name: &std::ffi::OsStr, parent: Dir) {
+    let _ = remove_private_stage_outcome(directory, parent_name, parent);
+}
+
+fn remove_private_stage_outcome(
+    directory: &Dir,
+    parent_name: &std::ffi::OsStr,
+    parent: Dir,
+) -> CleanupOutcome {
     // The parent handle reaches only our private staging tree. The outer removal is
     // descriptor-relative and deliberately non-recursive.
-    let _ = parent.remove_dir_all("stage");
+    let mut outcome = CleanupOutcome::default();
+    if let Err(error) = parent.remove_dir_all("stage")
+        && error.kind() != stdio::ErrorKind::NotFound
+    {
+        outcome.failed = true;
+    }
     drop(parent);
-    let _ = directory.remove_dir(parent_name);
+    if directory.remove_dir(parent_name).is_err() {
+        outcome.failed = true;
+    }
+    outcome
+}
+
+pub(crate) struct OfficialCommit {
+    pub(crate) manifest: OfficialOutputManifest,
+    pub(crate) cleanup: CleanupOutcome,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CleanupOutcome {
+    failed: bool,
+}
+
+impl CleanupOutcome {
+    pub(crate) fn failed(self) -> bool {
+        self.failed
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.failed |= other.failed;
+    }
 }
 
 struct CleanupAdmission {
     sender: std::sync::mpsc::SyncSender<CleanupJob>,
-    done: std::sync::mpsc::Receiver<()>,
+    done: std::sync::mpsc::Receiver<CleanupOutcome>,
     job: CleanupJob,
 }
 
@@ -916,8 +989,7 @@ impl CleanupAdmission {
             .name("official-output-cleanup".into())
             .spawn(move || {
                 if let Ok(cleanup) = receiver.recv() {
-                    cleanup.run();
-                    let _ = done_sender.send(());
+                    let _ = done_sender.send(cleanup.run());
                 }
             })
             .map_err(io)?;
@@ -933,30 +1005,38 @@ impl CleanupAdmission {
         })
     }
 
-    fn detach(self, wait: bool) {
+    fn detach(self, wait: bool) -> CleanupOutcome {
         // The worker was admitted before publication and is blocked in recv, so this cannot
         // silently lose the cleanup capability. If it died, retain no leak by cleaning with the
         // same no-follow capabilities in this caller.
         if let Err(error) = self.sender.send(self.job) {
-            error.0.run();
+            error.0.run()
         } else if wait {
-            let _ = self.done.recv();
+            self.done.recv().unwrap_or(CleanupOutcome { failed: true })
+        } else {
+            CleanupOutcome::default()
         }
     }
 }
 
 impl CleanupJob {
-    fn run(self) {
+    fn run(self) -> CleanupOutcome {
         let Self {
             directory,
             backup,
             staging_parent_name,
             staging_parent,
         } = self;
+        let mut outcome = CleanupOutcome::default();
         if let Some(backup) = backup {
-            remove_backup(backup);
+            outcome.merge(remove_backup(backup));
         }
-        remove_private_stage(&directory, &staging_parent_name, staging_parent);
+        outcome.merge(remove_private_stage_outcome(
+            &directory,
+            &staging_parent_name,
+            staging_parent,
+        ));
+        outcome
     }
 }
 
@@ -966,7 +1046,7 @@ struct Backup {
     directory: Dir,
 }
 
-fn remove_backup(backup: Backup) {
+fn remove_backup(backup: Backup) -> CleanupOutcome {
     // The backup was opened no-follow before publication and lives under our private staging
     // parent. Never recurse through its former public pathname.
     let Backup {
@@ -974,17 +1054,34 @@ fn remove_backup(backup: Backup) {
         parent,
         directory,
     } = backup;
-    if let Ok(entries) = directory.read_dir(".") {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let _ = directory.remove_dir_all(&name);
-            let _ = directory.remove_file(name);
+    let mut outcome = CleanupOutcome::default();
+    match directory.read_dir(".") {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let name = entry.file_name();
+                        if directory.remove_dir_all(&name).is_err()
+                            && directory.remove_file(&name).is_err()
+                        {
+                            outcome.failed = true;
+                        }
+                    }
+                    Err(_) => {
+                        outcome.failed = true;
+                    }
+                }
+            }
         }
+        Err(_) => outcome.failed = true,
     }
     // `name` is private to the staging parent, whose retained capability removes only this
     // original entry after its opened directory has been emptied.
     drop(directory);
-    let _ = parent.remove_dir(&name);
+    if parent.remove_dir(&name).is_err() {
+        outcome.failed = true;
+    }
+    outcome
 }
 
 fn install_stage_in(
@@ -1116,6 +1213,7 @@ mod tests {
         OfficialOutputStage, OfficialOutputTarget, OutputTree, create_private_stage,
         install_stage_in, open_or_create_root, remove_private_stage,
     };
+    use crate::VlmError;
     use bytes::Bytes;
     use std::path::Path;
 
@@ -1156,8 +1254,8 @@ mod tests {
             &junction.join("nested/root"),
             "document",
             OfficialOutputTarget::Vlm,
-            usize::MAX,
-            usize::MAX,
+            u64::MAX,
+            u64::MAX,
             None,
         ) {
             Err(_) => true,
@@ -1205,7 +1303,7 @@ mod tests {
             "document",
             OfficialOutputTarget::Vlm,
             3,
-            usize::MAX,
+            u64::MAX,
             Some((Bytes::from_static(b"abc"), "png")),
         )
         .unwrap();
@@ -1228,12 +1326,38 @@ mod tests {
                 "document",
                 OfficialOutputTarget::Vlm,
                 2,
-                usize::MAX,
+                u64::MAX,
                 Some((Bytes::from_static(b"abc"), "png"))
             )
             .is_err()
         );
         assert!(!temp.path().join("document/vlm").exists());
+    }
+
+    #[test]
+    fn output_totals_remain_u64_across_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut stage = OfficialOutputStage::begin(
+            temp.path(),
+            "document",
+            OfficialOutputTarget::Vlm,
+            u64::from(u32::MAX) + 2,
+            u64::from(u32::MAX) + 2,
+            None,
+        )
+        .unwrap();
+        stage.asset_bytes = u64::from(u32::MAX);
+        stage.write_origin(Bytes::from_static(b"a"), "one").unwrap();
+        assert_eq!(stage.asset_bytes, u64::from(u32::MAX) + 1);
+        assert!(matches!(
+            stage.write_origin(Bytes::from_static(b"bc"), "two"),
+            Err(VlmError::LimitExceeded {
+                limit,
+                actual,
+                ..
+            }) if limit == u64::from(u32::MAX) + 2 && actual == u64::from(u32::MAX) + 3
+        ));
+        stage.cleanup();
     }
 
     #[test]
@@ -1244,8 +1368,8 @@ mod tests {
                 temp.path(),
                 "document",
                 OfficialOutputTarget::Vlm,
-                usize::MAX,
-                usize::MAX,
+                u64::MAX,
+                u64::MAX,
                 None,
             )
             .unwrap();
@@ -1267,7 +1391,9 @@ mod tests {
                 .assemble(std::time::Instant::now() + std::time::Duration::from_secs(5))
                 .unwrap();
             assert!(stage.stage().unwrap().symlink_metadata("parts").is_err());
-            let manifest = stage.commit().unwrap();
+            let committed = stage.commit().unwrap();
+            assert!(!committed.cleanup.failed());
+            let manifest = committed.manifest;
             assert_eq!(
                 std::fs::read(manifest.vlm_dir.join("document.md")).unwrap(),
                 contents
@@ -1275,23 +1401,36 @@ mod tests {
             assert!(!manifest.vlm_dir.join("parts").exists());
         }
         let document = temp.path().join("document");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let private = std::fs::read_dir(&document)
-                .unwrap()
-                .filter_map(Result::ok)
-                .map(|entry| entry.file_name())
-                .filter(|name| name.to_string_lossy().starts_with(".vlm-"))
-                .collect::<Vec<_>>();
-            if private.is_empty() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "private official-output artifacts remain: {private:?}"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        let private = std::fs::read_dir(&document)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".vlm-"))
+            .collect::<Vec<_>>();
+        assert!(
+            private.is_empty(),
+            "private official-output artifacts remain: {private:?}"
+        );
+    }
+
+    #[test]
+    fn commit_keeps_publication_when_private_cleanup_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let stage = OfficialOutputStage::begin(
+            temp.path(),
+            "document",
+            OfficialOutputTarget::Vlm,
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        stage.staging_parent().unwrap().create("marker").unwrap();
+        stage.stage().unwrap().create("published").unwrap();
+
+        let committed = stage.commit().unwrap();
+        assert!(committed.cleanup.failed());
+        assert!(committed.manifest.vlm_dir.join("published").is_file());
     }
 
     #[test]
@@ -1302,8 +1441,8 @@ mod tests {
             &root,
             "document",
             OfficialOutputTarget::Vlm,
-            usize::MAX,
-            usize::MAX,
+            u64::MAX,
+            u64::MAX,
             None,
         )
         .unwrap();
@@ -1326,8 +1465,8 @@ mod tests {
                 &linked_root,
                 "document",
                 OfficialOutputTarget::Vlm,
-                usize::MAX,
-                usize::MAX,
+                u64::MAX,
+                u64::MAX,
                 None,
             )
             .is_err()
@@ -1341,8 +1480,8 @@ mod tests {
                 &root,
                 "document",
                 OfficialOutputTarget::Vlm,
-                usize::MAX,
-                usize::MAX,
+                u64::MAX,
+                u64::MAX,
                 None,
             )
             .is_err()

@@ -12,6 +12,30 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::sync::Semaphore;
+
+#[derive(Clone)]
+pub(crate) struct OfficialPageConcurrency(Arc<Semaphore>);
+
+impl OfficialPageConcurrency {
+    pub(crate) fn new(configured: usize, window: usize, http: usize) -> Self {
+        Self(Arc::new(Semaphore::new(effective_page_concurrency(
+            configured, window, http,
+        ))))
+    }
+
+    fn semaphore(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.0)
+    }
+
+    pub(crate) fn from_semaphore(semaphore: Arc<Semaphore>) -> Self {
+        Self(semaphore)
+    }
+}
+
+pub(crate) fn effective_page_concurrency(configured: usize, window: usize, http: usize) -> usize {
+    configured.min(window).min(http).max(1)
+}
 
 fn effective_render_workers(
     available_cpus: usize,
@@ -22,6 +46,232 @@ fn effective_render_workers(
         .min(configured_workers)
         .min(3)
         .min((selected_pages / 30).max(1))
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static AVAILABLE_RENDER_PARALLELISM: usize;
+}
+
+#[cfg(test)]
+async fn scope_available_render_parallelism<T>(
+    available: usize,
+    future: impl Future<Output = T>,
+) -> T {
+    AVAILABLE_RENDER_PARALLELISM.scope(available, future).await
+}
+
+#[cfg(test)]
+fn available_render_parallelism() -> usize {
+    AVAILABLE_RENDER_PARALLELISM
+        .try_with(|available| *available)
+        .unwrap_or_else(|_| std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
+}
+
+#[cfg(not(test))]
+fn available_render_parallelism() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowPlanMode {
+    Slot,
+    FullCapFallback,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PlannedWindow {
+    indexes: Vec<usize>,
+    bytes: usize,
+    mode: WindowPlanMode,
+}
+
+struct WindowState {
+    plan: PlannedWindow,
+    rendered: Vec<pdf::RenderedPage>,
+}
+
+enum PrefetchState {
+    Rendered(WindowState),
+    PendingFallback(PlannedWindow),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderRole {
+    Current,
+    Prefetch,
+    Fallback,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderTestInfo {
+    role: RenderRole,
+    indexes: Vec<usize>,
+    planned_bytes: usize,
+}
+
+#[cfg(test)]
+type RenderBeforeCallback = Arc<
+    dyn Fn(RenderTestInfo) -> std::pin::Pin<Box<dyn Future<Output = VlmResult<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(test)]
+struct WindowRenderTestHook {
+    before: RenderBeforeCallback,
+    after: Arc<dyn Fn(RenderTestInfo, usize) + Send + Sync>,
+    on_drop: Arc<dyn Fn(RenderTestInfo) + Send + Sync>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static WINDOW_RENDER_TEST_HOOK: Arc<WindowRenderTestHook>;
+}
+
+#[cfg(test)]
+async fn scope_window_render_test_hook<T>(
+    hook: Arc<WindowRenderTestHook>,
+    future: impl Future<Output = T>,
+) -> T {
+    WINDOW_RENDER_TEST_HOOK.scope(hook, future).await
+}
+
+#[cfg(test)]
+fn window_render_test_hook() -> Option<Arc<WindowRenderTestHook>> {
+    WINDOW_RENDER_TEST_HOOK.try_with(Arc::clone).ok()
+}
+
+#[cfg(test)]
+struct RenderDropGuard {
+    hook: Arc<WindowRenderTestHook>,
+    info: RenderTestInfo,
+    complete: bool,
+}
+
+#[cfg(test)]
+impl Drop for RenderDropGuard {
+    fn drop(&mut self) {
+        if !self.complete {
+            (self.hook.on_drop)(self.info.clone());
+        }
+    }
+}
+
+#[allow(dead_code)] // Phase 2B consumes the split; Phase 2A verifies its arithmetic.
+fn split_image_slot_caps(full_cap: usize) -> (usize, usize) {
+    let first = full_cap / 2;
+    (first, full_cap - first)
+}
+
+fn in_flight_image_limit(full_cap: usize, actual: usize) -> VlmError {
+    VlmError::LimitExceeded {
+        resource: "in-flight image bytes",
+        limit: full_cap as u64,
+        actual: actual as u64,
+    }
+}
+
+fn retain_window(cursor: &mut usize, window: &PlannedWindow) -> VlmResult<()> {
+    *cursor = cursor
+        .checked_add(window.indexes.len())
+        .ok_or_else(|| in_flight_image_limit(usize::MAX, usize::MAX))?;
+    Ok(())
+}
+
+fn plan_window(
+    indexes: &[usize],
+    cursor: usize,
+    processing_window_size: usize,
+    slot_cap: usize,
+    full_cap: usize,
+    mut page_bytes: impl FnMut(usize) -> VlmResult<usize>,
+) -> VlmResult<PlannedWindow> {
+    if processing_window_size == 0 || slot_cap == 0 || full_cap == 0 || slot_cap > full_cap {
+        return Err(VlmError::InvalidConfig(
+            "invalid official PDF options".into(),
+        ));
+    }
+    if cursor >= indexes.len() {
+        return Err(VlmError::InvalidInput(
+            "window cursor is outside selected pages".into(),
+        ));
+    }
+
+    let mut planned = Vec::new();
+    let mut total = 0usize;
+    while planned.len() < processing_window_size {
+        let position = cursor
+            .checked_add(planned.len())
+            .ok_or_else(|| in_flight_image_limit(full_cap, usize::MAX))?;
+        let Some(&index) = indexes.get(position) else {
+            break;
+        };
+        let bytes = page_bytes(index)?;
+        if bytes > full_cap {
+            return Err(in_flight_image_limit(full_cap, bytes));
+        }
+        if planned.is_empty() && bytes > slot_cap {
+            return Ok(PlannedWindow {
+                indexes: vec![index],
+                bytes,
+                mode: WindowPlanMode::FullCapFallback,
+            });
+        }
+        let next_total = total
+            .checked_add(bytes)
+            .ok_or_else(|| in_flight_image_limit(full_cap, usize::MAX))?;
+        if next_total > slot_cap {
+            break;
+        }
+        total = next_total;
+        planned.push(index);
+    }
+
+    if planned.is_empty() {
+        return Err(in_flight_image_limit(full_cap, usize::MAX));
+    }
+    Ok(PlannedWindow {
+        indexes: planned,
+        bytes: total,
+        mode: WindowPlanMode::Slot,
+    })
+}
+
+fn plan_route_window(
+    parsed: &pdf::ParsedPdf,
+    indexes: &[usize],
+    cursor: usize,
+    options: &OfficialPdfOptions,
+    render_limits: &Limits,
+) -> VlmResult<PlannedWindow> {
+    plan_window(
+        indexes,
+        cursor,
+        options.processing_window_size,
+        options.max_in_flight_image_bytes,
+        options.max_in_flight_image_bytes,
+        |index| pdf::page_image_bytes(parsed, index, render_limits).map_err(map),
+    )
+}
+
+fn plan_route_window_in_slot(
+    parsed: &pdf::ParsedPdf,
+    indexes: &[usize],
+    cursor: usize,
+    options: &OfficialPdfOptions,
+    render_limits: &Limits,
+    slot_cap: usize,
+) -> VlmResult<PlannedWindow> {
+    plan_window(
+        indexes,
+        cursor,
+        options.processing_window_size,
+        slot_cap,
+        options.max_in_flight_image_bytes,
+        |index| pdf::page_image_bytes(parsed, index, render_limits).map_err(map),
+    )
 }
 
 async fn render_with_timeout<T>(
@@ -41,19 +291,95 @@ async fn render_with_timeout<T>(
     }
 }
 
+#[cfg(test)]
+async fn observe_route_render<T>(
+    hook: Option<Arc<WindowRenderTestHook>>,
+    info: RenderTestInfo,
+    render: impl Future<Output = VlmResult<T>>,
+    actual_bytes: impl FnOnce(&T) -> VlmResult<usize>,
+) -> VlmResult<T> {
+    let Some(hook) = hook else {
+        return render.await;
+    };
+    let mut guard = RenderDropGuard {
+        hook: Arc::clone(&hook),
+        info: info.clone(),
+        complete: false,
+    };
+    (hook.before)(info.clone()).await?;
+    let rendered = render.await?;
+    let actual = actual_bytes(&rendered)?;
+    (hook.after)(info, actual);
+    guard.complete = true;
+    Ok(rendered)
+}
+
+async fn render_route_window(
+    role: RenderRole,
+    deadline: RouteDeadline,
+    render_timeout: Duration,
+    parsed: Arc<pdf::ParsedPdf>,
+    plan: PlannedWindow,
+    render_limits: Limits,
+    render_workers: usize,
+    task_work_lease: TaskWorkLease,
+) -> VlmResult<WindowState> {
+    #[cfg(not(test))]
+    let _ = role;
+    #[cfg(test)]
+    let hook = window_render_test_hook();
+    #[cfg(test)]
+    let info = RenderTestInfo {
+        role,
+        indexes: plan.indexes.clone(),
+        planned_bytes: plan.bytes,
+    };
+    let render = render_with_timeout(deadline, render_timeout, async {
+        pdf::render_window_for_task(
+            parsed,
+            plan.indexes.clone(),
+            render_limits,
+            render_workers,
+            task_work_lease,
+        )
+        .await
+        .map_err(map)
+    });
+    #[cfg(test)]
+    let rendered = observe_route_render(hook, info, render, |pages| {
+        pages.iter().try_fold(0usize, |total, page| {
+            total
+                .checked_add(page.image.as_raw().len())
+                .ok_or_else(|| in_flight_image_limit(usize::MAX, usize::MAX))
+        })
+    })
+    .await?;
+    #[cfg(not(test))]
+    let rendered = render.await?;
+
+    if rendered.len() != plan.indexes.len() {
+        return Err(VlmError::Pdf(
+            "PDF renderer returned an unexpected page count".into(),
+        ));
+    }
+    Ok(WindowState { plan, rendered })
+}
+
 pub(crate) fn route_limits(options: &OfficialPdfOptions) -> Limits {
     Limits {
         max_pdf_bytes: options.max_pdf_bytes,
         max_total_asset_bytes: options.max_total_asset_bytes,
         max_pages: options.max_pages,
         max_page_pixels: options.max_page_pixels,
-        max_response_bytes: options.max_raw_output_bytes,
+        max_response_bytes: Limits::default().max_response_bytes,
         max_rendered_image_bytes: options.max_rendered_image_bytes,
         max_in_flight_image_bytes: options.max_in_flight_image_bytes,
         max_blocks_per_page: options.max_layout_blocks_per_page,
         ..Limits::default()
     }
 }
+
+pub(crate) type CleanupWarningCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 fn map(error: crate::Error) -> VlmError {
     match error {
@@ -145,6 +471,7 @@ pub(crate) async fn parse_and_write(
     root: &Path,
     stem: &str,
 ) -> VlmResult<OfficialOutputManifest> {
+    let totals = crate::document_limits::OfficialDocumentTotals::from_options(&options);
     parse_and_write_to(
         client,
         input,
@@ -154,6 +481,34 @@ pub(crate) async fn parse_and_write(
         OfficialOutputTarget::Vlm,
         None,
         None,
+        None,
+        totals,
+        client.official_page_concurrency(),
+    )
+    .await
+}
+
+pub(crate) async fn parse_and_write_with_totals_and_page_concurrency(
+    client: &MinerUVlmClient,
+    input: PdfInput,
+    options: OfficialPdfOptions,
+    root: &Path,
+    stem: &str,
+    totals: crate::document_limits::OfficialDocumentTotals,
+    page_concurrency: OfficialPageConcurrency,
+) -> VlmResult<OfficialOutputManifest> {
+    parse_and_write_to(
+        client,
+        input,
+        options,
+        root,
+        stem,
+        OfficialOutputTarget::Vlm,
+        None,
+        None,
+        None,
+        totals,
+        page_concurrency,
     )
     .await
 }
@@ -165,6 +520,7 @@ pub(crate) async fn parse_and_write_office(
     root: &Path,
     stem: &str,
 ) -> VlmResult<OfficialOutputManifest> {
+    let totals = crate::document_limits::OfficialDocumentTotals::from_options(&options);
     parse_and_write_to(
         client,
         input,
@@ -174,6 +530,9 @@ pub(crate) async fn parse_and_write_office(
         OfficialOutputTarget::Office,
         None,
         None,
+        None,
+        totals,
+        client.official_page_concurrency(),
     )
     .await
 }
@@ -185,16 +544,22 @@ pub(crate) async fn parse_and_write_prepared(
     root: &Path,
     stem: &str,
 ) -> VlmResult<OfficialOutputManifest> {
-    parse_and_write_prepared_with_events(client, prepared, options, root, stem, None).await
+    let totals = crate::document_limits::OfficialDocumentTotals::from_options(&options);
+    parse_and_write_prepared_with_events_and_cleanup_warning_with_totals(
+        client, prepared, options, root, stem, None, None, totals,
+    )
+    .await
 }
 
-pub(crate) async fn parse_and_write_prepared_with_events(
+pub(crate) async fn parse_and_write_prepared_with_events_and_cleanup_warning_with_totals(
     client: &MinerUVlmClient,
     prepared: crate::input_prepare::PreparedPdf,
     mut options: OfficialPdfOptions,
     root: &Path,
     stem: &str,
     events: Option<ProgressCallback>,
+    cleanup_warning: Option<CleanupWarningCallback>,
+    totals: crate::document_limits::OfficialDocumentTotals,
 ) -> VlmResult<OfficialOutputManifest> {
     if !prepared.kind.supports_page_range() {
         options.start_page = 0;
@@ -205,7 +570,6 @@ pub(crate) async fn parse_and_write_prepared_with_events(
     } else {
         OfficialOutputTarget::Vlm
     };
-    let origin = Some((prepared.original, prepared.kind.suffix()));
     parse_and_write_to(
         client,
         PdfInput::Bytes(prepared.bytes),
@@ -213,8 +577,64 @@ pub(crate) async fn parse_and_write_prepared_with_events(
         root,
         stem,
         target,
-        origin,
+        Some((prepared.original, prepared.kind.suffix())),
         events,
+        cleanup_warning,
+        totals,
+        client.official_page_concurrency(),
+    )
+    .await
+}
+
+pub(crate) async fn parse_and_write_prepared_with_events_and_cleanup_warning_with_totals_and_page_concurrency(
+    client: &MinerUVlmClient,
+    prepared: crate::input_prepare::PreparedPdf,
+    options: OfficialPdfOptions,
+    root: &Path,
+    stem: &str,
+    events: Option<ProgressCallback>,
+    cleanup_warning: Option<CleanupWarningCallback>,
+    totals: crate::document_limits::OfficialDocumentTotals,
+    page_concurrency: OfficialPageConcurrency,
+) -> VlmResult<OfficialOutputManifest> {
+    // Keep the existing preparation semantics; only page admission differs.
+    let mut options = options;
+    if !prepared.kind.supports_page_range() {
+        options.start_page = 0;
+        options.end_page = None;
+    }
+    let target = if prepared.kind.is_office() {
+        OfficialOutputTarget::Office
+    } else {
+        OfficialOutputTarget::Vlm
+    };
+    parse_and_write_to(
+        client,
+        PdfInput::Bytes(prepared.bytes),
+        options,
+        root,
+        stem,
+        target,
+        Some((prepared.original, prepared.kind.suffix())),
+        events,
+        cleanup_warning,
+        totals,
+        page_concurrency,
+    )
+    .await
+}
+
+pub(crate) async fn parse_and_write_prepared_with_events(
+    client: &MinerUVlmClient,
+    prepared: crate::input_prepare::PreparedPdf,
+    options: OfficialPdfOptions,
+    root: &Path,
+    stem: &str,
+    events: Option<ProgressCallback>,
+) -> VlmResult<OfficialOutputManifest> {
+    let totals = crate::document_limits::OfficialDocumentTotals::from_options(&options);
+    parse_and_write_prepared_with_events_and_cleanup_warning_with_totals(
+        client, prepared, options, root, stem, events, None, totals,
     )
     .await
 }
@@ -228,6 +648,9 @@ async fn parse_and_write_to(
     target: OfficialOutputTarget,
     origin: Option<(Bytes, &'static str)>,
     events: Option<ProgressCallback>,
+    cleanup_warning: Option<CleanupWarningCallback>,
+    totals: crate::document_limits::OfficialDocumentTotals,
+    page_concurrency: OfficialPageConcurrency,
 ) -> VlmResult<OfficialOutputManifest> {
     options.validate()?;
     let task_work_lease = client.task_work_lease();
@@ -267,141 +690,194 @@ async fn parse_and_write_to(
 
     let root = root.to_path_buf();
     let stage_stem = stem.clone();
-    let max_stage_assets = options.max_total_asset_bytes;
-    let max_stage_text = options.max_staged_text_bytes;
+    let max_stage_assets = totals.assets;
+    let max_stage_text = totals.staged_text;
+    let resident_stage_assets = options.max_total_asset_bytes;
+    let resident_stage_text = options.max_staged_text_bytes;
     let mut stage = deadline
         .blocking(&task_work_lease, move || {
-            OfficialOutputStage::begin(
+            OfficialOutputStage::begin_with_resident(
                 &root,
                 &stage_stem,
                 target,
                 max_stage_assets,
                 max_stage_text,
+                resident_stage_assets,
+                resident_stage_text,
                 origin,
             )
         })
         .await??;
     let total = indexes.len();
     let mut completed = 0usize;
-    let mut raw_reply_bytes = 0usize;
-    let mut encoded_document_bytes = 0usize;
+    let raw_budget = Arc::new(crate::vlm_http::ByteBudget::new(totals.raw));
+    let encoded_budget = Arc::new(crate::vlm_http::ByteBudget::new(totals.encoded));
     let mut cursor = 0usize;
     let mut render_limits = limits.clone();
     render_limits.max_rendered_image_bytes = options
         .max_rendered_image_bytes
         .min(options.max_in_flight_image_bytes);
     let render_workers = effective_render_workers(
-        std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        available_render_parallelism(),
         options.render_workers,
         indexes.len(),
     );
+    let slot_caps = {
+        let (first, second) = split_image_slot_caps(options.max_in_flight_image_bytes);
+        [first, second]
+    };
+    let overlap_enabled = slot_caps[0] != 0 && slot_caps[1] != 0;
+    let mut next_slot = 0usize;
+    let mut prefetch: Option<PrefetchState> = None;
 
-    while cursor < indexes.len() {
+    while cursor < indexes.len() || prefetch.is_some() {
         if let Err(error) = deadline.check() {
             return Err(dispose_stage(stage, error).await);
         }
-        let mut window = Vec::new();
-        let mut window_bytes = 0usize;
-        while cursor + window.len() < indexes.len() && window.len() < options.processing_window_size
-        {
-            let index = indexes[cursor + window.len()];
-            let bytes = match pdf::page_image_bytes(&parsed, index, &render_limits).map_err(map) {
-                Ok(bytes) => bytes,
-                Err(error) => return Err(dispose_stage(stage, error).await),
-            };
-            if bytes > options.max_in_flight_image_bytes {
-                return Err(dispose_stage(
-                    stage,
-                    VlmError::LimitExceeded {
-                        resource: "in-flight image bytes",
-                        limit: options.max_in_flight_image_bytes as u64,
-                        actual: bytes as u64,
-                    },
+        let current = match prefetch.take() {
+            Some(PrefetchState::Rendered(current)) => current,
+            Some(PrefetchState::PendingFallback(plan)) => {
+                match render_route_window(
+                    RenderRole::Fallback,
+                    deadline,
+                    options.render_timeout,
+                    parsed.clone(),
+                    plan,
+                    render_limits.clone(),
+                    render_workers,
+                    task_work_lease.clone(),
                 )
-                .await);
+                .await
+                {
+                    Ok(current) => current,
+                    Err(error) => return Err(dispose_stage(stage, error).await),
+                }
             }
-            if !window.is_empty()
-                && window_bytes.saturating_add(bytes) > options.max_in_flight_image_bytes
-            {
-                break;
+            None => {
+                let plan = match if overlap_enabled {
+                    plan_route_window_in_slot(
+                        &parsed,
+                        &indexes,
+                        cursor,
+                        &options,
+                        &render_limits,
+                        slot_caps[next_slot],
+                    )
+                } else {
+                    plan_route_window(&parsed, &indexes, cursor, &options, &render_limits)
+                } {
+                    Ok(window) => window,
+                    Err(error) => return Err(dispose_stage(stage, error).await),
+                };
+                if let Err(error) = retain_window(&mut cursor, &plan) {
+                    return Err(dispose_stage(stage, error).await);
+                }
+                match render_route_window(
+                    RenderRole::Current,
+                    deadline,
+                    options.render_timeout,
+                    parsed.clone(),
+                    plan,
+                    render_limits.clone(),
+                    render_workers,
+                    task_work_lease.clone(),
+                )
+                .await
+                {
+                    Ok(current) => current,
+                    Err(error) => return Err(dispose_stage(stage, error).await),
+                }
             }
-            window_bytes = window_bytes.saturating_add(bytes);
-            window.push(index);
-        }
-        let rendered = match render_with_timeout(deadline, options.render_timeout, async {
-            pdf::render_window_for_task(
-                parsed.clone(),
-                window.clone(),
-                render_limits.clone(),
-                render_workers,
-                task_work_lease.clone(),
-            )
-            .await
-            .map_err(map)
-        })
-        .await
-        {
-            Ok(rendered) => rendered,
-            Err(error) => return Err(dispose_stage(stage, error).await),
         };
-        cursor += window.len();
 
-        if rendered.len() != window.len() {
-            return Err(dispose_stage(
-                stage,
-                VlmError::Pdf("PDF renderer returned an unexpected page count".into()),
-            )
-            .await);
-        }
-        let images: Vec<_> = rendered
+        let images: Vec<_> = current
+            .rendered
             .iter()
             .map(|page| Arc::clone(&page.image))
             .collect();
-        let remaining_raw = options.max_raw_output_bytes.saturating_sub(raw_reply_bytes);
-        let remaining_encoded = options
-            .max_encoded_document_bytes
-            .saturating_sub(encoded_document_bytes);
-        if remaining_raw == 0 || remaining_encoded == 0 {
-            return Err(dispose_stage(
-                stage,
-                VlmError::LimitExceeded {
-                    resource: if remaining_raw == 0 {
-                        "raw reply bytes"
-                    } else {
-                        "encoded document bytes"
-                    },
-                    limit: if remaining_raw == 0 {
-                        options.max_raw_output_bytes as u64
-                    } else {
-                        options.max_encoded_document_bytes as u64
-                    },
-                    actual: if remaining_raw == 0 {
-                        raw_reply_bytes as u64
-                    } else {
-                        encoded_document_bytes as u64
-                    },
-                },
-            )
-            .await);
-        }
-        let snapshots = match deadline
-            .future(client.official_two_step_snapshot_window(
-                images,
-                options.image_analysis,
-                options.formula_enable,
-                options.table_enable,
-                options.max_layout_blocks_per_page,
-                options.max_semantic_requests_per_page,
-                options.max_requests_per_batch,
-                options.max_encoded_request_bytes,
-                options.max_encoded_batch_bytes,
-                remaining_encoded,
-                remaining_raw,
-                deadline.instant(),
-            ))
-            .await
+        let vlm = client.official_two_step_snapshot_window_with_budgets_and_page_semaphore(
+            images,
+            options.image_analysis,
+            options.formula_enable,
+            options.table_enable,
+            options.max_layout_blocks_per_page,
+            options.max_semantic_requests_per_page,
+            options.max_requests_per_batch,
+            options.max_encoded_request_bytes,
+            options.max_encoded_batch_bytes,
+            Arc::clone(&encoded_budget),
+            Arc::clone(&raw_budget),
+            deadline.instant(),
+            page_concurrency.semaphore(),
+        );
+        let mut pending_fallback = None;
+        let next = if overlap_enabled
+            && current.plan.mode == WindowPlanMode::Slot
+            && cursor < indexes.len()
         {
-            Ok(snapshots) if snapshots.len() == rendered.len() => snapshots,
+            match plan_route_window_in_slot(
+                &parsed,
+                &indexes,
+                cursor,
+                &options,
+                &render_limits,
+                slot_caps[1 - next_slot],
+            ) {
+                Ok(next) if next.mode == WindowPlanMode::Slot => {
+                    if let Err(error) = retain_window(&mut cursor, &next) {
+                        return Err(dispose_stage(stage, error).await);
+                    }
+                    Some(next)
+                }
+                Ok(fallback) => {
+                    if let Err(error) = retain_window(&mut cursor, &fallback) {
+                        return Err(dispose_stage(stage, error).await);
+                    }
+                    // The full-cap fallback consumes both half slots, so resume at A.
+                    next_slot = 0;
+                    pending_fallback = Some(fallback);
+                    None
+                }
+                Err(error) => return Err(dispose_stage(stage, error).await),
+            }
+        } else {
+            None
+        };
+        let snapshots = match if let Some(next) = next {
+            if current
+                .plan
+                .bytes
+                .checked_add(next.bytes)
+                .is_none_or(|bytes| bytes > options.max_in_flight_image_bytes)
+            {
+                return Err(dispose_stage(
+                    stage,
+                    in_flight_image_limit(options.max_in_flight_image_bytes, usize::MAX),
+                )
+                .await);
+            }
+            let render = render_route_window(
+                RenderRole::Prefetch,
+                deadline,
+                options.render_timeout,
+                parsed.clone(),
+                next,
+                render_limits.clone(),
+                render_workers,
+                task_work_lease.clone(),
+            );
+            match tokio::try_join!(deadline.future(vlm), render) {
+                Ok((snapshots, prefetched)) => {
+                    prefetch = Some(PrefetchState::Rendered(prefetched));
+                    next_slot = 1 - next_slot;
+                    Ok(snapshots)
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            deadline.future(vlm).await
+        } {
+            Ok(snapshots) if snapshots.len() == current.rendered.len() => snapshots,
             Ok(_) => {
                 return Err(dispose_stage(
                     stage,
@@ -411,56 +887,9 @@ async fn parse_and_write_to(
             }
             Err(error) => return Err(dispose_stage(stage, error).await),
         };
-        let window_raw = snapshots
-            .iter()
-            .try_fold(0usize, |total, page| total.checked_add(page.2))
-            .ok_or(VlmError::LimitExceeded {
-                resource: "raw reply bytes",
-                limit: options.max_raw_output_bytes as u64,
-                actual: u64::MAX,
-            });
-        let window_encoded = snapshots
-            .iter()
-            .try_fold(0usize, |total, page| total.checked_add(page.3))
-            .ok_or(VlmError::LimitExceeded {
-                resource: "encoded document bytes",
-                limit: options.max_encoded_document_bytes as u64,
-                actual: u64::MAX,
-            });
-        let (window_raw, window_encoded) = match (window_raw, window_encoded) {
-            (Ok(raw), Ok(encoded)) => (raw, encoded),
-            (Err(error), _) | (_, Err(error)) => return Err(dispose_stage(stage, error).await),
-        };
-        raw_reply_bytes = match raw_reply_bytes.checked_add(window_raw) {
-            Some(total) => total,
-            None => {
-                return Err(dispose_stage(
-                    stage,
-                    VlmError::LimitExceeded {
-                        resource: "raw reply bytes",
-                        limit: options.max_raw_output_bytes as u64,
-                        actual: u64::MAX,
-                    },
-                )
-                .await);
-            }
-        };
-        encoded_document_bytes = match encoded_document_bytes.checked_add(window_encoded) {
-            Some(total) => total,
-            None => {
-                return Err(dispose_stage(
-                    stage,
-                    VlmError::LimitExceeded {
-                        resource: "encoded document bytes",
-                        limit: options.max_encoded_document_bytes as u64,
-                        actual: u64::MAX,
-                    },
-                )
-                .await);
-            }
-        };
-
-        for (page, (snapshot, cleaned, _raw, _encoded)) in rendered.into_iter().zip(snapshots) {
+        for (page, (snapshot, cleaned, _raw, _encoded)) in
+            current.rendered.into_iter().zip(snapshots)
+        {
             if let Err(error) = deadline.check() {
                 return Err(dispose_stage(stage, error).await);
             }
@@ -493,8 +922,8 @@ async fn parse_and_write_to(
             if let Err(error) = result {
                 return Err(dispose_stage(stage, error).await);
             }
-            let remaining_assets = stage.remaining_asset_bytes();
-            let remaining_text = stage.remaining_text_bytes();
+            let remaining_assets = stage.remaining_asset_buffer_bytes();
+            let remaining_text = stage.remaining_text_buffer_bytes();
             let image = match Arc::try_unwrap(page.image) {
                 Ok(image) => image,
                 Err(_) => {
@@ -556,6 +985,9 @@ async fn parse_and_write_to(
                 },
             );
         }
+        if let Some(fallback) = pending_fallback {
+            prefetch = Some(PrefetchState::PendingFallback(fallback));
+        }
     }
 
     if let Err(error) = deadline.check() {
@@ -583,7 +1015,7 @@ async fn parse_and_write_to(
                     &preview_pages,
                     &preview_stem,
                     &preview_limits,
-                    stage.remaining_asset_bytes(),
+                    stage.remaining_asset_buffer_bytes(),
                     deadline.instant(),
                 )
                 .map_err(map)?;
@@ -599,14 +1031,20 @@ async fn parse_and_write_to(
     if let Err(error) = deadline.check() {
         return Err(dispose_stage(stage, error).await);
     }
-    commit_stage(stage, deadline, &task_work_lease).await
+    let committed = commit_stage(stage, deadline, &task_work_lease).await?;
+    if committed.cleanup.failed() {
+        if let Some(callback) = cleanup_warning {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback()));
+        }
+    }
+    Ok(committed.manifest)
 }
 
 async fn commit_stage(
     stage: OfficialOutputStage,
     deadline: RouteDeadline,
     task_work_lease: &TaskWorkLease,
-) -> VlmResult<OfficialOutputManifest> {
+) -> VlmResult<crate::official_output::OfficialCommit> {
     let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
     let (permit_tx, permit_rx) = std::sync::mpsc::sync_channel(1);
     let task = tokio::task::spawn_blocking(task_work_lease.wrap(move || {
@@ -636,7 +1074,7 @@ fn admitted_commit(
     stage: OfficialOutputStage,
     permit_rx: std::sync::mpsc::Receiver<()>,
     deadline: RouteDeadline,
-) -> VlmResult<OfficialOutputManifest> {
+) -> VlmResult<crate::official_output::OfficialCommit> {
     match permit_rx.recv() {
         Ok(()) if deadline.check().is_ok() => stage.commit(),
         _ => {
@@ -663,17 +1101,82 @@ async fn dispose_stage(stage: OfficialOutputStage, error: VlmError) -> VlmError 
 #[cfg(test)]
 mod tests {
     use super::{
-        RouteDeadline, admitted_commit, effective_render_workers, map, render_with_timeout,
+        RenderRole, RenderTestInfo, RouteDeadline, WindowPlanMode, WindowRenderTestHook,
+        admitted_commit, effective_page_concurrency, effective_render_workers, map,
+        observe_route_render, plan_window, render_with_timeout, retain_window,
+        scope_available_render_parallelism, scope_window_render_test_hook, split_image_slot_caps,
+        window_render_test_hook,
     };
-    use crate::official_output::OfficialOutputStage;
+    use crate::{TaskWorkLease, official_output::OfficialOutputStage};
+    use axum::{Json, Router, extract::State, routing::post};
+    use bytes::Bytes;
+    use lopdf::{Document, Object, Stream, dictionary};
+    use serde_json::{Value, json};
     use std::{
         sync::{
-            Arc,
+            Arc, Condvar, Mutex,
             atomic::{AtomicBool, Ordering},
             mpsc,
         },
         time::{Duration, Instant},
     };
+    use tokio::sync::Notify;
+
+    fn route_pdf(pages: usize) -> Bytes {
+        let mut pdf = Document::with_version("1.5");
+        let tree = pdf.new_object_id();
+        let ids: Vec<_> = (0..pages).map(|_| pdf.new_object_id()).collect();
+        for id in &ids {
+            let contents = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
+            pdf.objects.insert(*id, Object::Dictionary(dictionary! {
+                "Type" => "Page", "Parent" => tree,
+                "MediaBox" => vec![0.into(), 0.into(), 1.into(), 1.into()], "Contents" => contents,
+            }));
+        }
+        pdf.objects.insert(tree, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => ids.into_iter().map(Object::Reference).collect::<Vec<_>>(), "Count" => pages as i64,
+        }));
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => tree });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        bytes.into()
+    }
+
+    async fn route_client(app: Router) -> crate::MinerUVlmClient {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        crate::MinerUVlmClient::connect(
+            crate::VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 2,
+                ..Default::default()
+            },
+            crate::MinerUVlmConfig {
+                layout_image_size: (8, 8),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    fn route_options() -> crate::OfficialPdfOptions {
+        crate::OfficialPdfOptions {
+            processing_window_size: 1,
+            max_in_flight_image_bytes: 1024 * 1024,
+            max_rendered_image_bytes: 1024 * 1024,
+            max_raw_output_bytes: 1024 * 1024,
+            max_encoded_document_bytes: 1024 * 1024,
+            max_encoded_request_bytes: 1024 * 1024,
+            max_encoded_batch_bytes: 1024 * 1024,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn native_input_and_pdf_failures_are_not_vlm_protocol_failures() {
@@ -685,6 +1188,743 @@ mod tests {
             map(crate::Error::Pdf("bad PDF".into())),
             crate::VlmError::Pdf(_)
         ));
+    }
+
+    fn render_test_hook(
+        before: impl Fn(
+            RenderTestInfo,
+        ) -> std::pin::Pin<Box<dyn Future<Output = crate::VlmResult<()>> + Send>>
+        + Send
+        + Sync
+        + 'static,
+        after: impl Fn(RenderTestInfo, usize) + Send + Sync + 'static,
+        on_drop: impl Fn(RenderTestInfo) + Send + Sync + 'static,
+    ) -> Arc<WindowRenderTestHook> {
+        Arc::new(WindowRenderTestHook {
+            before: Arc::new(before),
+            after: Arc::new(after),
+            on_drop: Arc::new(on_drop),
+        })
+    }
+
+    #[tokio::test]
+    async fn route_prefetch_render_starts_while_current_vlm_is_blocked() {
+        #[derive(Clone)]
+        struct Mock {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+            layouts: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        async fn handler(State(mock): State<Mock>, Json(_): Json<Value>) -> Json<Value> {
+            if mock.layouts.fetch_add(1, Ordering::SeqCst) == 0 {
+                mock.entered.notify_one();
+                mock.release.notified().await;
+            }
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
+        }
+        let mock = Mock {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            layouts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let client = route_client(
+            Router::new()
+                .route("/v1/chat/completions", post(handler))
+                .with_state(mock.clone()),
+        )
+        .await;
+        let prefetch = Arc::new(Notify::new());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let hook = render_test_hook(
+            {
+                let prefetch = Arc::clone(&prefetch);
+                let events = Arc::clone(&events);
+                move |info| {
+                    events.lock().unwrap().push(("before", info.role));
+                    if info.role == RenderRole::Prefetch {
+                        prefetch.notify_one();
+                    }
+                    Box::pin(async { Ok(()) })
+                }
+            },
+            {
+                let events = Arc::clone(&events);
+                move |info, _| events.lock().unwrap().push(("after", info.role))
+            },
+            |_| {},
+        );
+        let output = tempfile::tempdir().unwrap();
+        let task = tokio::spawn(scope_window_render_test_hook(hook, async move {
+            client
+                .parse_and_write_official_pdf(
+                    crate::PdfInput::Bytes(route_pdf(2)),
+                    route_options(),
+                    output.path(),
+                    "two",
+                )
+                .await
+        }));
+        tokio::time::timeout(Duration::from_secs(5), mock.entered.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), prefetch.notified())
+            .await
+            .unwrap();
+        assert!(!task.is_finished());
+        mock.release.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
+        let events = events.lock().unwrap();
+        let current_rendered = events
+            .iter()
+            .position(|event| *event == ("after", RenderRole::Current))
+            .expect("current render completed");
+        let prefetch_started = events
+            .iter()
+            .position(|event| *event == ("before", RenderRole::Prefetch))
+            .expect("prefetch render started");
+        assert!(current_rendered < prefetch_started);
+    }
+
+    #[tokio::test]
+    async fn route_render_hook_proves_combined_rgb_high_water() {
+        async fn handler(Json(_): Json<Value>) -> Json<Value> {
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
+        }
+        let client = route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let hook = render_test_hook(
+            |_| Box::pin(async { Ok(()) }),
+            {
+                let observed = Arc::clone(&observed);
+                move |info, actual| observed.lock().unwrap().push((info, actual))
+            },
+            |_| {},
+        );
+        let options = route_options();
+        let output = tempfile::tempdir().unwrap();
+        let manifest = scope_window_render_test_hook(
+            hook,
+            client.parse_and_write_official_pdf(
+                crate::PdfInput::Bytes(route_pdf(2)),
+                options.clone(),
+                output.path(),
+                "two",
+            ),
+        )
+        .await
+        .unwrap();
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].0.indexes, vec![0]);
+        assert_eq!(observed[1].0.indexes, vec![1]);
+        assert_eq!(observed[0].0.role, RenderRole::Current);
+        assert_eq!(observed[1].0.role, RenderRole::Prefetch);
+        assert!(
+            observed
+                .iter()
+                .all(|(info, actual)| *actual > 0 && *actual == info.planned_bytes)
+        );
+        assert!(observed[0].1 + observed[1].1 <= options.max_in_flight_image_bytes);
+        let middle: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(manifest.vlm_dir.join("two_middle.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            middle["pdf_info"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|page| page["page_idx"].as_u64())
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn route_reverse_render_completion_preserves_source_staging_order() {
+        async fn handler(Json(_): Json<Value>) -> Json<Value> {
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
+        }
+
+        assert_eq!(effective_render_workers(2, 2, 60), 2);
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let completions = Arc::new(Mutex::new(Vec::new()));
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let (release_zero, wait_for_one) = mpsc::sync_channel(1);
+        let wait_for_one = Arc::new(Mutex::new(Some(wait_for_one)));
+        let rest_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_hook = Arc::new(crate::pdf::PageRenderTestHook::new(
+            {
+                let starts = Arc::clone(&starts);
+                let wait_for_one = Arc::clone(&wait_for_one);
+                let rest_gate = Arc::clone(&rest_gate);
+                move |index| {
+                    starts.lock().expect("starts").push(index);
+                    match index {
+                        0 => wait_for_one
+                            .lock()
+                            .expect("zero gate")
+                            .take()
+                            .expect("one releases zero")
+                            .recv()
+                            .expect("one completed"),
+                        1 => {}
+                        _ => {
+                            let (open, ready) = &*rest_gate;
+                            let mut open = open.lock().expect("rest gate");
+                            while !*open {
+                                open = ready.wait(open).expect("rest gate");
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+            },
+            {
+                let completions = Arc::clone(&completions);
+                let errors = Arc::clone(&errors);
+                let rest_gate = Arc::clone(&rest_gate);
+                move |index, result| {
+                    if let Err(error) = result {
+                        errors.lock().expect("errors").push(error.to_string());
+                    }
+                    completions.lock().expect("completions").push(index);
+                    match index {
+                        1 if result.is_ok() => release_zero.send(()).expect("zero worker"),
+                        0 if result.is_ok() => {
+                            let (open, ready) = &*rest_gate;
+                            *open.lock().expect("rest gate") = true;
+                            ready.notify_all();
+                        }
+                        _ => {}
+                    }
+                }
+            },
+        ));
+        let client = route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        let mut options = route_options();
+        options.processing_window_size = 60;
+        options.render_workers = 2;
+        let output = tempfile::tempdir().unwrap();
+        let manifest = tokio::time::timeout(
+            Duration::from_secs(30),
+            scope_available_render_parallelism(
+                2,
+                crate::pdf::scope_page_render_test_hook(
+                    worker_hook,
+                    client.parse_and_write_official_pdf(
+                        crate::PdfInput::Bytes(route_pdf(60)),
+                        options,
+                        output.path(),
+                        "ordered",
+                    ),
+                ),
+            ),
+        )
+        .await
+        .expect("route timed out")
+        .expect("route");
+
+        let starts = starts.lock().expect("starts");
+        assert!(starts.contains(&0));
+        assert!(starts.contains(&1));
+        drop(starts);
+        let completions = completions.lock().expect("completions");
+        assert_eq!(&completions[..2], &[1, 0]);
+        let mut completed = completions.clone();
+        completed.sort_unstable();
+        assert_eq!(completed, (0..60).collect::<Vec<_>>());
+        drop(completions);
+        assert!(errors.lock().expect("errors").is_empty());
+        let middle: Value = serde_json::from_slice(
+            &std::fs::read(manifest.vlm_dir.join("ordered_middle.json")).expect("middle"),
+        )
+        .expect("middle JSON");
+        let pages = middle["pdf_info"].as_array().expect("pdf_info");
+        assert_eq!(pages.len(), 60);
+        assert_eq!(
+            pages
+                .iter()
+                .map(|page| page["page_idx"].as_u64().expect("page index"))
+                .collect::<Vec<_>>(),
+            (0..60).map(|index| index as u64).collect::<Vec<_>>(),
+        );
+    }
+
+    #[tokio::test]
+    async fn route_prefetch_failure_cancels_current_and_cleans_stage() {
+        #[derive(Clone)]
+        struct Mock {
+            current_entered: Arc<Notify>,
+            release_current: Arc<Notify>,
+            response_sent: Arc<AtomicBool>,
+            layouts: Arc<std::sync::atomic::AtomicUsize>,
+            worker_active: mpsc::SyncSender<()>,
+        }
+        async fn handler(State(mock): State<Mock>, Json(_): Json<Value>) -> Json<Value> {
+            if mock.layouts.fetch_add(1, Ordering::SeqCst) == 0 {
+                mock.current_entered.notify_one();
+                mock.worker_active
+                    .send(())
+                    .expect("prefetch worker is waiting");
+                mock.release_current.notified().await;
+                mock.response_sent.store(true, Ordering::SeqCst);
+            }
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
+        }
+
+        let (worker_active, worker_wait) = mpsc::sync_channel(1);
+        let worker_wait = Arc::new(Mutex::new(Some(worker_wait)));
+        let worker_entered = Arc::new(Notify::new());
+        let worker_finished = Arc::new(Notify::new());
+        let worker_events = Arc::new(Mutex::new(Vec::new()));
+        let current_entered = Arc::new(Notify::new());
+        let release_current = Arc::new(Notify::new());
+        let response_sent = Arc::new(AtomicBool::new(false));
+        let layouts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mock = Mock {
+            current_entered: Arc::clone(&current_entered),
+            release_current: Arc::clone(&release_current),
+            response_sent: Arc::clone(&response_sent),
+            layouts: Arc::clone(&layouts),
+            worker_active,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop_server, server_stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/v1/chat/completions", post(handler))
+                    .with_state(mock),
+            )
+            .with_graceful_shutdown(async {
+                let _ = server_stopped.await;
+            })
+            .await
+            .expect("server");
+        });
+
+        let lease_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let root_lease = TaskWorkLease::from_permit(
+            Arc::clone(&lease_semaphore)
+                .acquire_owned()
+                .await
+                .expect("lease permit"),
+        );
+        let client = crate::MinerUVlmClient::connect_for_task(
+            crate::VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 2,
+                ..Default::default()
+            },
+            crate::MinerUVlmConfig {
+                layout_image_size: (8, 8),
+                ..Default::default()
+            },
+            root_lease,
+        )
+        .await
+        .expect("client");
+        let route_events = Arc::new(Mutex::new(Vec::new()));
+        let route_hook = render_test_hook(
+            {
+                let route_events = Arc::clone(&route_events);
+                move |info| {
+                    route_events
+                        .lock()
+                        .expect("route events")
+                        .push(("before", info.role));
+                    Box::pin(async { Ok(()) })
+                }
+            },
+            {
+                let route_events = Arc::clone(&route_events);
+                move |info, _| {
+                    route_events
+                        .lock()
+                        .expect("route events")
+                        .push(("after", info.role))
+                }
+            },
+            {
+                let route_events = Arc::clone(&route_events);
+                move |info| {
+                    route_events
+                        .lock()
+                        .expect("route events")
+                        .push(("drop", info.role))
+                }
+            },
+        );
+        let worker_hook = Arc::new(crate::pdf::PageRenderTestHook::new(
+            {
+                let worker_wait = Arc::clone(&worker_wait);
+                let worker_entered = Arc::clone(&worker_entered);
+                move |index| match index {
+                    0 => Ok(()),
+                    1 => {
+                        worker_entered.notify_one();
+                        worker_wait
+                            .lock()
+                            .expect("worker wait")
+                            .take()
+                            .expect("one prefetch worker")
+                            .recv()
+                            .expect("current VLM handler");
+                        Err(crate::Error::Pdf("injected prefetch render failure".into()))
+                    }
+                    _ => panic!("later page {index} was admitted after prefetch failure"),
+                }
+            },
+            {
+                let worker_events = Arc::clone(&worker_events);
+                let worker_finished = Arc::clone(&worker_finished);
+                move |index, result| {
+                    worker_events
+                        .lock()
+                        .expect("worker events")
+                        .push((index, result.as_ref().err().map(ToString::to_string)));
+                    worker_finished.notify_one();
+                }
+            },
+        ));
+        let output = tempfile::tempdir().unwrap();
+        let output_root = output.path().to_path_buf();
+        let route = tokio::spawn(scope_window_render_test_hook(
+            route_hook,
+            crate::pdf::scope_page_render_test_hook(worker_hook, async move {
+                client
+                    .parse_and_write_official_pdf(
+                        crate::PdfInput::Bytes(route_pdf(3)),
+                        route_options(),
+                        &output_root,
+                        "failed",
+                    )
+                    .await
+            }),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(5), current_entered.notified())
+            .await
+            .expect("current VLM did not enter");
+        tokio::time::timeout(Duration::from_secs(5), worker_entered.notified())
+            .await
+            .expect("prefetch worker did not enter");
+        tokio::time::timeout(Duration::from_secs(5), worker_finished.notified())
+            .await
+            .expect("prefetch worker did not finish");
+        assert!(!response_sent.load(Ordering::SeqCst));
+        let worker_events = worker_events.lock().expect("worker events");
+        assert!(worker_events.contains(&(
+            1,
+            Some("PDF error: injected prefetch render failure".into())
+        )));
+        assert!(!worker_events.iter().any(|(index, _)| *index == 2));
+        drop(worker_events);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), route)
+            .await
+            .expect("route did not stop after prefetch failure")
+            .expect("route task");
+        assert!(matches!(
+            result,
+            Err(crate::VlmError::Pdf(message)) if message == "injected prefetch render failure"
+        ));
+        assert_eq!(layouts.load(Ordering::SeqCst), 1);
+        let route_events = route_events.lock().expect("route events");
+        assert!(route_events.contains(&("before", RenderRole::Prefetch)));
+        assert!(route_events.contains(&("drop", RenderRole::Prefetch)));
+        assert!(!route_events.contains(&("after", RenderRole::Prefetch)));
+        drop(route_events);
+        assert!(!output.path().join("failed/vlm").exists());
+        if let Ok(entries) = std::fs::read_dir(output.path().join("failed")) {
+            assert!(!entries.flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".vlm-staging-parent-")
+            }));
+        }
+        let _permit = tokio::time::timeout(Duration::from_secs(5), lease_semaphore.acquire_owned())
+            .await
+            .expect("tracked task work did not drain")
+            .expect("lease semaphore closed");
+
+        release_current.notify_one();
+        let _ = stop_server.send(());
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server did not stop")
+            .expect("server task");
+    }
+
+    #[tokio::test]
+    async fn render_test_hook_is_task_local_and_scope_isolated() {
+        let first = render_test_hook(|_| Box::pin(async { Ok(()) }), |_, _| {}, |_| {});
+        let second = render_test_hook(|_| Box::pin(async { Ok(()) }), |_, _| {}, |_| {});
+        let first_ptr = Arc::as_ptr(&first) as usize;
+        let second_ptr = Arc::as_ptr(&second) as usize;
+        let (seen_first, seen_second) = tokio::join!(
+            scope_window_render_test_hook(first, async {
+                Arc::as_ptr(&window_render_test_hook().expect("first hook")) as usize
+            }),
+            scope_window_render_test_hook(second, async {
+                Arc::as_ptr(&window_render_test_hook().expect("second hook")) as usize
+            }),
+        );
+
+        assert_eq!(seen_first, first_ptr);
+        assert_eq!(seen_second, second_ptr);
+        assert!(window_render_test_hook().is_none());
+    }
+
+    #[tokio::test]
+    async fn render_test_hook_reports_start_completion_and_actual_rgb_bytes_once() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let hook = render_test_hook(
+            {
+                let events = Arc::clone(&events);
+                move |info| {
+                    events.lock().expect("events").push(("before", info, 0));
+                    Box::pin(async { Ok(()) })
+                }
+            },
+            {
+                let events = Arc::clone(&events);
+                move |info, bytes| events.lock().expect("events").push(("after", info, bytes))
+            },
+            |_| panic!("completed render must not report drop"),
+        );
+        let info = RenderTestInfo {
+            role: RenderRole::Prefetch,
+            indexes: vec![3, 4],
+            planned_bytes: 17,
+        };
+
+        let value = observe_route_render(Some(hook), info.clone(), async { Ok(7usize) }, |value| {
+            Ok(*value * 3)
+        })
+        .await
+        .expect("render observation");
+
+        assert_eq!(value, 7);
+        assert_eq!(
+            *events.lock().expect("events"),
+            vec![("before", info.clone(), 0), ("after", info, 21)]
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_controlled_render_reports_drop_without_completion() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let drops = Arc::new(Mutex::new(Vec::new()));
+        let after = Arc::new(AtomicBool::new(false));
+        let hook = render_test_hook(
+            {
+                let started_tx = Arc::clone(&started_tx);
+                move |_| {
+                    if let Some(started_tx) = started_tx.lock().expect("start sender").take() {
+                        let _ = started_tx.send(());
+                    }
+                    Box::pin(std::future::pending())
+                }
+            },
+            {
+                let after = Arc::clone(&after);
+                move |_, _| after.store(true, Ordering::SeqCst)
+            },
+            {
+                let drops = Arc::clone(&drops);
+                move |info| drops.lock().expect("drops").push(info)
+            },
+        );
+        let info = RenderTestInfo {
+            role: RenderRole::Current,
+            indexes: vec![8],
+            planned_bytes: 9,
+        };
+        let task = tokio::spawn(observe_route_render(
+            Some(hook),
+            info.clone(),
+            async { Ok(()) },
+            |_| Ok(0),
+        ));
+
+        started_rx.await.expect("before started");
+        task.abort();
+        let _ = task.await;
+        assert_eq!(*drops.lock().expect("drops"), vec![info]);
+        assert!(!after.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn window_planner_preserves_order_count_bound_and_byte_sum() {
+        let window = plan_window(&[7, 3, 9], 0, 2, 16, 16, |index| {
+            Ok(match index {
+                7 => 4,
+                3 => 5,
+                9 => 6,
+                _ => unreachable!(),
+            })
+        })
+        .expect("window");
+
+        assert_eq!(window.indexes, vec![7, 3]);
+        assert_eq!(window.bytes, 9);
+        assert_eq!(window.mode, WindowPlanMode::Slot);
+    }
+
+    #[test]
+    fn window_planner_admits_slot_boundary_and_stops_before_next_page() {
+        let window =
+            plan_window(&[0, 1, 2], 0, 3, 10, 10, |index| Ok([7, 3, 1][index])).expect("window");
+        assert_eq!(window.indexes, vec![0, 1]);
+        assert_eq!(window.bytes, 10);
+
+        let next = plan_window(&[0, 1, 2], 2, 3, 10, 10, |index| Ok([7, 3, 1][index]))
+            .expect("next window");
+        assert_eq!(next.indexes, vec![2]);
+        assert_eq!(next.bytes, 1);
+    }
+
+    #[test]
+    fn window_planner_uses_single_page_full_cap_fallback_then_resumes() {
+        let window = plan_window(&[4, 5], 0, 2, 5, 10, |index| Ok([6, 2][index - 4]))
+            .expect("fallback window");
+        assert_eq!(window.indexes, vec![4]);
+        assert_eq!(window.bytes, 6);
+        assert_eq!(window.mode, WindowPlanMode::FullCapFallback);
+
+        let next = plan_window(&[4, 5], 1, 2, 5, 10, |index| Ok([6, 2][index - 4]))
+            .expect("resumed window");
+        assert_eq!(next.indexes, vec![5]);
+        assert_eq!(next.bytes, 2);
+        assert_eq!(next.mode, WindowPlanMode::Slot);
+    }
+
+    #[test]
+    fn window_planner_rejects_full_cap_plus_one_before_admitting_work() {
+        let mut looked_up = Vec::new();
+        let error = plan_window(&[12, 13], 0, 2, 5, 10, |index| {
+            looked_up.push(index);
+            Ok(11)
+        })
+        .expect_err("page exceeds full cap");
+
+        assert_eq!(looked_up, vec![12]);
+        assert!(matches!(
+            error,
+            crate::VlmError::LimitExceeded {
+                resource: "in-flight image bytes",
+                limit: 10,
+                actual: 11,
+            }
+        ));
+    }
+
+    #[test]
+    fn image_slot_caps_split_odd_and_tiny_full_caps_without_overflow() {
+        assert_eq!(split_image_slot_caps(1), (0, 1));
+        let (first, second) = split_image_slot_caps(11);
+        assert_eq!((first, second), (5, 6));
+        assert_eq!(first + second, 11);
+        let (first, second) = split_image_slot_caps(usize::MAX);
+        assert_eq!(first, usize::MAX / 2);
+        assert_eq!(second, usize::MAX - first);
+        assert_eq!(first.checked_add(second), Some(usize::MAX));
+    }
+
+    #[test]
+    fn window_planner_rejects_overflowing_hostile_byte_estimates() {
+        let error = plan_window(&[0, 1], 0, 2, usize::MAX, usize::MAX, |index| {
+            Ok(if index == 0 { usize::MAX } else { 1 })
+        })
+        .expect_err("overflow must not wrap into an empty or undercounted window");
+
+        assert!(matches!(
+            error,
+            crate::VlmError::LimitExceeded {
+                resource: "in-flight image bytes",
+                limit,
+                actual: u64::MAX,
+            } if limit == usize::MAX as u64
+        ));
+    }
+
+    #[test]
+    fn window_ownership_three_window_trace_advances_cursor_once_per_acceptance() {
+        let indexes = [0, 1, 2, 3, 4, 5];
+        let mut cursor = 0;
+        let mut trace = Vec::new();
+
+        let current = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("current");
+        retain_window(&mut cursor, &current).expect("retain current");
+        trace.extend(current.indexes.iter().copied());
+
+        let prefetch = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("prefetch");
+        retain_window(&mut cursor, &prefetch).expect("retain prefetch");
+        trace.extend(prefetch.indexes.iter().copied());
+        let cursor_after_prefetch = cursor;
+        let promoted = prefetch; // Promotion moves ownership; it never changes the cursor.
+        assert_eq!(cursor, cursor_after_prefetch);
+
+        let next = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("next");
+        retain_window(&mut cursor, &next).expect("retain next");
+        trace.extend(next.indexes.iter().copied());
+
+        assert_eq!(promoted.indexes, vec![2, 3]);
+        assert_eq!(trace, indexes);
+        assert_eq!(cursor, indexes.len());
+    }
+
+    #[test]
+    fn last_prefetched_window_is_promoted_without_extra_planning() {
+        let indexes = [0, 1, 2, 3];
+        let mut cursor = 0;
+        let current = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("current");
+        retain_window(&mut cursor, &current).expect("retain current");
+        let prefetch = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("prefetch");
+        retain_window(&mut cursor, &prefetch).expect("retain prefetch");
+
+        let promoted = prefetch;
+        assert_eq!(current.indexes, vec![0, 1]);
+        assert_eq!(promoted.indexes, vec![2, 3]);
+        assert_eq!(cursor, indexes.len());
+    }
+
+    #[test]
+    fn fallback_ownership_is_sequential_then_slot_a_resumes() {
+        let indexes = [0, 1, 2, 3];
+        let bytes = [2, 6, 2, 2];
+        let mut cursor = 0;
+        let current = plan_window(&indexes, cursor, 2, 5, 10, |index| Ok(bytes[index]))
+            .expect("current slot");
+        retain_window(&mut cursor, &current).expect("retain current");
+        let fallback =
+            plan_window(&indexes, cursor, 2, 5, 10, |index| Ok(bytes[index])).expect("fallback");
+        retain_window(&mut cursor, &fallback).expect("retain fallback");
+        let cursor_after_fallback = cursor;
+        let promoted = fallback;
+        assert_eq!(cursor, cursor_after_fallback);
+
+        let resumed = plan_window(&indexes, cursor, 2, 5, 10, |index| Ok(bytes[index]))
+            .expect("resumed slot A");
+        assert_eq!(current.indexes, vec![0]);
+        assert_eq!(promoted.mode, WindowPlanMode::FullCapFallback);
+        assert_eq!(promoted.indexes, vec![1]);
+        assert_eq!(resumed.indexes, vec![2, 3]);
     }
 
     #[tokio::test]
@@ -718,6 +1958,13 @@ mod tests {
         assert_eq!(effective_render_workers(1, 8, 90), 1);
         assert_eq!(effective_render_workers(8, 1, 90), 1);
         assert_eq!(effective_render_workers(8, 99, 90), 3);
+    }
+
+    #[test]
+    fn page_concurrency_obeys_window_and_http_bounds() {
+        assert_eq!(effective_page_concurrency(4, 2, 8), 2);
+        assert_eq!(effective_page_concurrency(4, 8, 3), 3);
+        assert_eq!(effective_page_concurrency(4, 8, 8), 4);
     }
 
     #[tokio::test]
@@ -792,8 +2039,8 @@ mod tests {
             root.path(),
             "document",
             crate::official_output::OfficialOutputTarget::Vlm,
-            usize::MAX,
-            usize::MAX,
+            u64::MAX,
+            u64::MAX,
             None,
         )
         .expect("stage");
@@ -843,8 +2090,8 @@ mod tests {
             root.path(),
             "document",
             crate::official_output::OfficialOutputTarget::Vlm,
-            usize::MAX,
-            usize::MAX,
+            u64::MAX,
+            u64::MAX,
             None,
         )
         .expect("stage");

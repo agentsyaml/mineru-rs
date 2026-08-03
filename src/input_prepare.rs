@@ -167,6 +167,7 @@ impl DocumentKind {
         matches!(self, Self::Pdf)
     }
 }
+
 #[derive(Debug)]
 pub struct PreparedPdf {
     pub bytes: Bytes,

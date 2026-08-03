@@ -4,7 +4,8 @@ use super::{
     normalize_api_url, request_form, validate_health,
 };
 use crate::error::sanitize_vlm_error_bytes;
-use futures_util::StreamExt;
+use bytes::Bytes;
+use futures_util::{StreamExt, stream};
 use reqwest::{
     Client, Response,
     multipart::{Form, Part},
@@ -12,6 +13,7 @@ use reqwest::{
 };
 use serde_json::Value;
 use std::{future::Future, path::Path, time::Duration};
+use tokio::io::AsyncReadExt;
 
 const BODY_CAP: usize = 64 * 1024;
 
@@ -129,9 +131,8 @@ impl MineruApiClient {
                     format!(".{extension}")
                 }
             );
-            let part = Part::file(&document.path)
-                .await
-                .map_err(|_| "unable to open upload file".to_string())?
+            let part = upload_part(document, options.max_input_bytes)
+                .await?
                 .file_name(filename)
                 .mime_str(mime_for(&document.path))
                 .map_err(|_| "invalid upload MIME type".to_string())?;
@@ -275,6 +276,68 @@ impl MineruApiClient {
         }
         Ok(body)
     }
+}
+
+async fn upload_part(document: &InputDocument, max_input_bytes: u64) -> Result<Part, String> {
+    let (file, length) = open_upload(&document.path, max_input_bytes).await?;
+    let stream = exact_upload_stream(file, length);
+    let filename = format!("{}.{}", document.stem, document.suffix);
+    Part::stream_with_length(reqwest::Body::wrap_stream(stream), length)
+        .file_name(filename)
+        .mime_str(mime_for(&document.path))
+        .map_err(|_| "invalid upload MIME type".into())
+}
+
+async fn open_upload(path: &Path, max_input_bytes: u64) -> Result<(tokio::fs::File, u64), String> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| "unable to open upload file".to_string())?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|_| "unable to inspect upload file".to_string())?;
+    if !metadata.is_file() {
+        return Err("upload input is not a regular file".into());
+    }
+    let length = metadata.len();
+    if length > max_input_bytes {
+        return Err(format!(
+            "upload file exceeds configured input limit of {max_input_bytes} bytes"
+        ));
+    }
+    Ok((file, length))
+}
+
+fn exact_upload_stream(
+    file: tokio::fs::File,
+    length: u64,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
+    stream::unfold((file, length), |(mut file, remaining)| async move {
+        if remaining == 0 {
+            let mut probe = [0; 1];
+            return match file.read(&mut probe).await {
+                Ok(0) => None,
+                Ok(_) => Some((
+                    Err(std::io::Error::other("upload file grew during read")),
+                    (file, 0),
+                )),
+                Err(error) => Some((Err(error), (file, 0))),
+            };
+        }
+        let mut buffer = vec![0; usize::try_from(remaining.min(64 * 1024)).unwrap_or(64 * 1024)];
+        match file.read(&mut buffer).await {
+            Ok(0) => Some((
+                Err(std::io::Error::other("upload file shrank during read")),
+                (file, 0),
+            )),
+            Ok(read) => {
+                buffer.truncate(read);
+                let read = u64::try_from(read).expect("read length fits u64");
+                Some((Ok(Bytes::from(buffer)), (file, remaining - read)))
+            }
+            Err(error) => Some((Err(error), (file, 0))),
+        }
+    })
 }
 fn checked_body_len(body_len: usize, chunk_len: usize) -> Result<usize, String> {
     body_len
@@ -451,6 +514,57 @@ fn mime_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn collect_upload(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
+        let (file, length) = open_upload(path, cap).await?;
+        let mut stream = Box::pin(exact_upload_stream(file, length));
+        let mut output = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk.map_err(|error| error.to_string())?);
+        }
+        Ok(output)
+    }
+
+    #[tokio::test]
+    async fn exact_upload_stream_admits_exact_and_rejects_plus_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.pdf");
+        std::fs::write(&path, b"abcd").unwrap();
+        assert_eq!(collect_upload(&path, 4).await.unwrap(), b"abcd");
+        assert_eq!(
+            open_upload(&path, 3).await.unwrap_err(),
+            "upload file exceeds configured input limit of 3 bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_upload_stream_keeps_open_descriptor_and_detects_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.pdf");
+        std::fs::write(&path, b"old").unwrap();
+        let (file, length) = open_upload(&path, 3).await.unwrap();
+        std::fs::rename(&path, dir.path().join("old.pdf")).unwrap();
+        std::fs::write(&path, b"new").unwrap();
+        let bytes = exact_upload_stream(file, length).collect::<Vec<_>>().await;
+        assert_eq!(bytes[0].as_ref().unwrap().as_ref(), b"old");
+
+        let (file, length) = open_upload(&path, 3).await.unwrap();
+        std::fs::write(&path, b"grow").unwrap();
+        let values = exact_upload_stream(file, length).collect::<Vec<_>>().await;
+        assert_eq!(
+            values.last().unwrap().as_ref().unwrap_err().to_string(),
+            "upload file grew during read"
+        );
+
+        std::fs::write(&path, b"long").unwrap();
+        let (file, length) = open_upload(&path, 4).await.unwrap();
+        std::fs::write(&path, b"x").unwrap();
+        let values = exact_upload_stream(file, length).collect::<Vec<_>>().await;
+        assert_eq!(
+            values.last().unwrap().as_ref().unwrap_err().to_string(),
+            "upload file shrank during read"
+        );
+    }
     use axum::{
         Json, Router,
         body::Body,

@@ -211,6 +211,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` | 关闭 | 公开监听时允许处理 POST 解析请求。 |
 | `MINERU_API_SHUTDOWN_ON_STDIN_EOF` | 关闭 | 等价于 `--shutdown-on-stdin-eof`。 |
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
+| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | 官方直接路由页并发；整数范围 1 到 8（`2` 为低内存回退值）。 |
 | `MINERU_PDF_RENDER_THREADS` | `3` | 渲染 worker 数。 |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
 | `MINERU_FORMULA_ENABLE` | 开启 | 公式识别默认值。 |
@@ -326,6 +327,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 需要认证时，在构造 `MinerUClient` 前为可变 `ClientConfig` 的公开 `bearer_token` 设置 `BearerToken::new(...)`。`check_model()` 会请求模型列表并确认配置的模型在其中。
 
 ## 默认资源限制
+
+### 文档大小控制
+
+`--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`、`--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES` 和 `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` 接受无符号十进制字节数（允许空白和 `_`）。优先级为 CLI、环境变量、编译默认值：输入 4_293_918_719 字节、编码文档 8 GiB、输出 8 GiB。显式的非法、零或超过硬上限值会失败；硬上限依次为 16 GiB、64 GiB、16 GiB。
+
+这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过 512 MiB 的源 PDF，单个 VLM 响应仍限制为 10 MiB。编码策略应在 `mineru-vlm-api` 配置；规范远程模式会拒绝编码覆盖项。普通遗留 `mineru-vlm` 保持常驻解析器限制，编码文档覆盖项需要 `--official-output`。
 
 | 项目 | 默认值 |
 | --- | ---: |

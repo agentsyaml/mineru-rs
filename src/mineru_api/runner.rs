@@ -17,9 +17,10 @@ pub(super) async fn run_documents_scoped_with_workers(
     env: super::RemoteApiEnv,
     events: Option<crate::command::CommandCallback>,
     office: OfficeWorkers,
+    policy: crate::DocumentLimitPolicy,
 ) -> Result<Vec<super::RemoteApiFailure>, String> {
     run_documents_impl(
-        documents, output, api_url, options, env, None, events, office,
+        documents, output, api_url, options, env, None, events, office, policy,
     )
     .await
 }
@@ -33,6 +34,7 @@ async fn run_documents_impl(
     events: Option<ProgressCallback>,
     command_events: Option<crate::command::CommandCallback>,
     office: OfficeWorkers,
+    policy: crate::DocumentLimitPolicy,
 ) -> Result<Vec<super::RemoteApiFailure>, String> {
     if options.client_side_output_generation {
         return Err("client-side output generation is unsupported".into());
@@ -124,6 +126,8 @@ async fn run_documents_impl(
         start: options.start,
         end: options.end,
         client_side: false,
+        max_input_bytes: policy.max_input_bytes,
+        archive_limits: ArchiveLimits::from_document_limits(policy),
     };
     archive::preflight_output_root(output)?;
     let raster = RasterWorkers::default();
@@ -254,7 +258,7 @@ async fn run_core(
                     let index = task.index;
                     let stems = stems(&task.documents);
                     let extracted = tokio::task::spawn_blocking(move || {
-                        zip.extract(&destination, ArchiveLimits::default())
+                        zip.extract(&destination, options.archive_limits)
                     })
                     .await
                     .unwrap_or_else(|_| Err("internal archive extraction task failed".into()));
@@ -381,7 +385,7 @@ async fn stage(
             &submitted.result_url,
             &task_label(&task),
             env,
-            ArchiveLimits::default(),
+            options.archive_limits,
         )
         .await
 }
@@ -679,6 +683,7 @@ mod tests {
             },
             Some(callback),
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
+            crate::DocumentLimitPolicy::defaults(),
         )
         .await
         .unwrap();
@@ -734,6 +739,7 @@ mod tests {
             },
             Some(callback),
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
+            crate::DocumentLimitPolicy::defaults(),
         )
         .await
         .unwrap();
@@ -840,6 +846,7 @@ mod tests {
             },
             Some(callback),
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
+            crate::DocumentLimitPolicy::defaults(),
         )
         .await
         .unwrap();

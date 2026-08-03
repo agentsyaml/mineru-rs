@@ -32,6 +32,43 @@ pub(crate) struct RenderedPage {
     pub image: Arc<RgbImage>,
 }
 
+#[cfg(test)]
+pub(crate) struct PageRenderTestHook {
+    before: Arc<dyn Fn(usize) -> Result<()> + Send + Sync>,
+    after: Arc<dyn Fn(usize, &Result<RenderedPage>) + Send + Sync>,
+}
+
+#[cfg(test)]
+impl PageRenderTestHook {
+    pub(crate) fn new(
+        before: impl Fn(usize) -> Result<()> + Send + Sync + 'static,
+        after: impl Fn(usize, &Result<RenderedPage>) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            before: Arc::new(before),
+            after: Arc::new(after),
+        }
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static PAGE_RENDER_TEST_HOOK: Arc<PageRenderTestHook>;
+}
+
+#[cfg(test)]
+pub(crate) async fn scope_page_render_test_hook<T>(
+    hook: Arc<PageRenderTestHook>,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    PAGE_RENDER_TEST_HOOK.scope(hook, future).await
+}
+
+#[cfg(test)]
+pub(crate) fn page_render_test_hook() -> Option<Arc<PageRenderTestHook>> {
+    PAGE_RENDER_TEST_HOOK.try_with(Arc::clone).ok()
+}
+
 /// Owns the source data required by Hayro as well as its single parsed view.
 pub(crate) struct ParsedPdf {
     _bytes: Arc<Bytes>,
@@ -330,6 +367,22 @@ fn spawn_render(
     limits: Limits,
     task_work_lease: TaskWorkLease,
 ) {
+    #[cfg(test)]
+    let hook = page_render_test_hook();
+    #[cfg(test)]
+    tasks.spawn_blocking(task_work_lease.wrap(move || {
+        let result = match &hook {
+            Some(hook) => {
+                (hook.before)(index).and_then(|()| render_page_safe(&document, index, &limits))
+            }
+            None => render_page_safe(&document, index, &limits),
+        };
+        if let Some(hook) = hook {
+            (hook.after)(index, &result);
+        }
+        result
+    }));
+    #[cfg(not(test))]
     tasks.spawn_blocking(task_work_lease.wrap(move || render_page_safe(&document, index, &limits)));
 }
 
@@ -460,12 +513,15 @@ fn check_limit(resource: &'static str, limit: u64, actual: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SCALE, admitted_window, extract_selected_pages_for_preview, page_dimensions,
-        parse_document, premultiplied_rgba_over_white, read_input, source_bytes,
+        PageRenderTestHook, SCALE, admitted_window, extract_selected_pages_for_preview,
+        page_dimensions, page_render_test_hook, parse_document, premultiplied_rgba_over_white,
+        read_input, render_window_for_task, scope_page_render_test_hook, source_bytes,
     };
-    use crate::{Limits, PageResult, PdfInput, preview};
+    use crate::{Limits, PageResult, PdfInput, TaskWorkLease, preview};
     use bytes::Bytes;
     use lopdf::{Dictionary, Document, Object, Stream, dictionary};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     fn in_memory_pdf(actual_pages: usize, declared_pages: i64) -> Vec<u8> {
         let mut document = Document::with_version("1.5");
@@ -673,5 +729,115 @@ mod tests {
         let mut pages = vec![(4, 5), (5, 6), (6, 1)].into_iter().peekable();
         assert_eq!(admitted_window(&mut pages, 10).unwrap(), vec![4]);
         assert_eq!(admitted_window(&mut pages, 10).unwrap(), vec![5, 6]);
+    }
+
+    #[tokio::test]
+    async fn page_render_test_hook_is_task_local_and_scope_isolated() {
+        let first = Arc::new(PageRenderTestHook::new(|_| Ok(()), |_, _| {}));
+        let second = Arc::new(PageRenderTestHook::new(|_| Ok(()), |_, _| {}));
+        let first_ptr = Arc::as_ptr(&first) as usize;
+        let second_ptr = Arc::as_ptr(&second) as usize;
+        let (seen_first, seen_second) = tokio::join!(
+            scope_page_render_test_hook(first, async {
+                Arc::as_ptr(&page_render_test_hook().expect("first hook")) as usize
+            }),
+            scope_page_render_test_hook(second, async {
+                Arc::as_ptr(&page_render_test_hook().expect("second hook")) as usize
+            }),
+        );
+
+        assert_eq!(seen_first, first_ptr);
+        assert_eq!(seen_second, second_ptr);
+        assert!(page_render_test_hook().is_none());
+    }
+
+    #[tokio::test]
+    async fn page_render_test_hook_observes_actual_worker_success_once() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let hook = Arc::new(PageRenderTestHook::new(
+            {
+                let events = Arc::clone(&events);
+                move |index| {
+                    events.lock().expect("events").push(("before", index, true));
+                    Ok(())
+                }
+            },
+            {
+                let events = Arc::clone(&events);
+                move |index, result| {
+                    events
+                        .lock()
+                        .expect("events")
+                        .push(("after", index, result.is_ok()));
+                }
+            },
+        ));
+        let document = parse_document(
+            include_bytes!("../tests/fixtures/pdf/minimal.pdf").to_vec(),
+            &Limits::default(),
+        )
+        .expect("fixture");
+
+        let rendered = scope_page_render_test_hook(
+            hook,
+            render_window_for_task(
+                document,
+                vec![0],
+                Limits::default(),
+                1,
+                TaskWorkLease::default(),
+            ),
+        )
+        .await
+        .expect("render");
+
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(
+            *events.lock().expect("events"),
+            vec![("before", 0, true), ("after", 0, true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_worker_error_reports_after_and_releases_task_lease() {
+        let after = Arc::new(Mutex::new(Vec::new()));
+        let hook = Arc::new(PageRenderTestHook::new(
+            |_| Err(crate::Error::Pdf("injected render worker failure".into())),
+            {
+                let after = Arc::clone(&after);
+                move |index, result| after.lock().expect("after").push((index, result.is_err()))
+            },
+        ));
+        let document = parse_document(
+            include_bytes!("../tests/fixtures/pdf/minimal.pdf").to_vec(),
+            &Limits::default(),
+        )
+        .expect("fixture");
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .expect("permit");
+
+        let result = scope_page_render_test_hook(
+            hook,
+            render_window_for_task(
+                document,
+                vec![0],
+                Limits::default(),
+                1,
+                TaskWorkLease::from_permit(permit),
+            ),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(crate::Error::Pdf(message)) if message == "injected render worker failure")
+        );
+        assert_eq!(*after.lock().expect("after"), vec![(0, true)]);
+        let _permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned())
+            .await
+            .expect("tracked worker lease was not released")
+            .expect("semaphore closed");
     }
 }

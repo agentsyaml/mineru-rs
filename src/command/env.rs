@@ -48,6 +48,20 @@ pub fn decimal(value: &OsString, max: u64) -> Decimal {
     }
 }
 
+pub fn official_page_concurrency(
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Result<usize, &'static str> {
+    match lookup("MINERU_OFFICIAL_PAGE_CONCURRENCY") {
+        None => Ok(4),
+        Some(value) => match decimal(&value, u64::MAX) {
+            Decimal::Positive(value @ 1..=8) => Ok(value as usize),
+            Decimal::Invalid | Decimal::NonPositive | Decimal::Positive(_) => {
+                Err("MINERU_OFFICIAL_PAGE_CONCURRENCY must be an integer from 1 to 8")
+            }
+        },
+    }
+}
+
 #[allow(dead_code)] // The API binary uses this; the canonical CLI compiles the shared module too.
 pub fn nonnegative_decimal(value: &OsString, max: u64) -> Option<u64> {
     let (negative, nonzero, number) = lex_decimal(value, max)?;
@@ -137,6 +151,22 @@ mod tests {
         assert_eq!(nonnegative_decimal(&"-2".into(), 9), None);
         assert_eq!(nonnegative_decimal(&"1__2".into(), 9), None);
         assert_eq!(nonnegative_decimal(&"999".into(), 9), Some(9));
+    }
+
+    #[test]
+    fn official_page_concurrency_is_strict_and_defaults_to_four() {
+        assert_eq!(official_page_concurrency(|_| None), Ok(4));
+        assert_eq!(official_page_concurrency(|_| Some("4".into())), Ok(4));
+        for value in ["0", "9", "bad", "1_0", "-1"] {
+            assert!(official_page_concurrency(|_| Some(value.into())).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn official_page_concurrency_rejects_non_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        assert!(official_page_concurrency(|_| Some(OsString::from_vec(vec![0xff]))).is_err());
     }
 
     #[cfg(unix)]
