@@ -1,5 +1,7 @@
 # MinerU Rust
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Rust client library, command-line tools, and local API server for parsing PDF,
 image, and Office documents with an external OpenAI-compatible MinerU VLM
 service. PDF rendering uses pure Rust; no model is downloaded or run locally.
