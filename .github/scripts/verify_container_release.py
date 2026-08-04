@@ -23,7 +23,7 @@ def fail(message):
 
 
 def validate_digest(digest):
-    if not DIGEST_RE.fullmatch(digest):
+    if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
         fail(f"invalid manifest digest: {digest!r}")
 
 
@@ -38,6 +38,7 @@ def runtime_platforms(index):
     for descriptor in manifests:
         if not isinstance(descriptor, dict):
             fail("manifest index has a non-object descriptor")
+        validate_digest(descriptor.get("digest"))
         platform = descriptor.get("platform")
         annotations = descriptor.get("annotations", {})
         is_attestation = isinstance(annotations, dict) and annotations.get(
@@ -110,15 +111,24 @@ def self_test():
     index = {
         "mediaType": "application/vnd.oci.image.index.v1+json",
         "manifests": [
-            {"platform": {"os": "linux", "architecture": "amd64"}},
-            {"platform": {"os": "linux", "architecture": "arm64"}},
+            {"digest": "sha256:" + "1" * 64, "platform": {"os": "linux", "architecture": "amd64"}},
+            {"digest": "sha256:" + "2" * 64, "platform": {"os": "linux", "architecture": "arm64"}},
             {
+                "digest": "sha256:" + "3" * 64,
                 "platform": {"os": "unknown", "architecture": "unknown"},
                 "annotations": {"vnd.docker.reference.type": "attestation-manifest"},
             },
         ],
     }
     assert runtime_platforms(index) == (EXPECTED_PLATFORMS, 1)
+    malformed = json.loads(json.dumps(index))
+    malformed["manifests"][0]["digest"] = "bad"
+    try:
+        runtime_platforms(malformed)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("malformed child digest must fail")
     assert expected_tags("ghcr.io/agentsyaml/mineru-rs", "v1.2.3") == {
         "ghcr.io/agentsyaml/mineru-rs:1.2.3",
         "ghcr.io/agentsyaml/mineru-rs:1.2",

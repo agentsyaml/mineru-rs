@@ -571,16 +571,28 @@ jobs:
   release-ready:
     needs: [identity, crate-package, python-wheel, node-package]
     runs-on: ubuntu-24.04
+    outputs:
+      recovery-run-id: ${{ steps.registry-recovery.outputs.run-id }}
     steps:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.identity.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.14.6
+      - name: Select one-shot registry recovery
+        id: registry-recovery
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+          COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          run_id="$(python .github/scripts/verify_release.py registry-recovery --version "$VERSION" --commit "$COMMIT")"
+          echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
       - name: Download crate evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -686,6 +698,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: pypi
     permissions:
+      actions: read
       contents: read
       id-token: write
     steps:
@@ -703,10 +716,33 @@ jobs:
         with:
           name: verified-wheels
           path: dist
+      - name: Download exact first-publish wheel witnesses
+        if: needs.release-ready.outputs.recovery-run-id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-wheels
+          path: ${{ runner.temp }}/registry-witness/wheels
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.release-ready.outputs.recovery-run-id }}
+      - name: Select exact wheel bytes
+        id: python-packages
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+          RECOVERY_RUN_ID: ${{ needs.release-ready.outputs.recovery-run-id }}
+        run: |
+          set -euo pipefail
+          directory="$GITHUB_WORKSPACE/dist"
+          if [ -n "$RECOVERY_RUN_ID" ]; then
+            directory="$RUNNER_TEMP/registry-witness/wheels"
+            python .github/scripts/verify_release.py wheel --directory "$directory" --version "$VERSION" --count 5 --platform all
+          fi
+          echo "directory=$directory" >> "$GITHUB_OUTPUT"
       - name: Verify PyPI state and select missing wheels
         env:
           VERSION: ${{ needs.identity.outputs.version }}
-        run: python .github/scripts/verify_release.py pypi-preflight --project mineru-rs --version "$VERSION" --directory dist --missing-directory "$RUNNER_TEMP/pypi-missing"
+          DIRECTORY: ${{ steps.python-packages.outputs.directory }}
+        run: python .github/scripts/verify_release.py pypi-preflight --project mineru-rs --version "$VERSION" --directory "$DIRECTORY" --missing-directory "$RUNNER_TEMP/pypi-missing"
       - name: Detect missing wheels
         id: pypi-missing
         run: python -c "import os; from pathlib import Path; files=list((Path(os.environ['RUNNER_TEMP'])/'pypi-missing').glob('*.whl')); assert all(path.is_file() and not path.is_symlink() for path in files); Path(os.environ['GITHUB_OUTPUT']).open('a').write(f'has-wheels={str(bool(files)).lower()}\n')"
@@ -720,13 +756,15 @@ jobs:
         if: always()
         env:
           VERSION: ${{ needs.identity.outputs.version }}
-        run: python .github/scripts/verify_release.py pypi-postflight --project mineru-rs --version "$VERSION" --directory dist
+          DIRECTORY: ${{ steps.python-packages.outputs.directory }}
+        run: python .github/scripts/verify_release.py pypi-postflight --project mineru-rs --version "$VERSION" --directory "$DIRECTORY"
 
   publish-node:
     needs: [identity, release-ready, require-ci-evidence]
     runs-on: ubuntu-24.04
     environment: npm
     permissions:
+      actions: read
       contents: read
       id-token: write
     steps:
@@ -747,9 +785,32 @@ jobs:
         with:
           name: verified-npm
           path: packages
+      - name: Download exact first-publish npm witnesses
+        if: needs.release-ready.outputs.recovery-run-id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-npm
+          path: ${{ runner.temp }}/registry-witness/npm
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.release-ready.outputs.recovery-run-id }}
+      - name: Select exact npm package bytes
+        id: node-packages
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+          RECOVERY_RUN_ID: ${{ needs.release-ready.outputs.recovery-run-id }}
+        run: |
+          set -euo pipefail
+          directory="$GITHUB_WORKSPACE/packages"
+          if [ -n "$RECOVERY_RUN_ID" ]; then
+            directory="$RUNNER_TEMP/registry-witness/npm"
+            python3 .github/scripts/verify_release.py npm --directory "$directory" --version "$VERSION"
+          fi
+          echo "directory=$directory" >> "$GITHUB_OUTPUT"
       - name: Publish native packages, then root
         env:
           VERSION: ${{ needs.identity.outputs.version }}
+          PACKAGE_DIRECTORY: ${{ steps.node-packages.outputs.directory }}
         run: |
           set -euo pipefail
           publish_verified() {
@@ -774,9 +835,9 @@ jobs:
             fi
           }
           for suffix in darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
-            publish_verified "@alexsun-top/mineru-$suffix" "./packages/alexsun-top-mineru-$suffix-$VERSION.tgz"
+            publish_verified "@alexsun-top/mineru-$suffix" "$PACKAGE_DIRECTORY/alexsun-top-mineru-$suffix-$VERSION.tgz"
           done
-          publish_verified "@alexsun-top/mineru" "./packages/alexsun-top-mineru-$VERSION.tgz"
+          publish_verified "@alexsun-top/mineru" "$PACKAGE_DIRECTORY/alexsun-top-mineru-$VERSION.tgz"
 
   publish-container:
     needs: [identity, build-binary, release-ready, require-ci-evidence]
@@ -920,8 +981,13 @@ jobs:
         run: |
           set -euo pipefail
           for platform in linux/amd64 linux/arm64; do
-            docker pull --platform "$platform" "$IMAGE@$DIGEST"
-            docker run --rm --platform "$platform" --entrypoint /bin/sh "$IMAGE@$DIGEST" -ec '
+            architecture="${platform#linux/}"
+            child_digest="$(jq -er --arg architecture "$architecture" '
+              [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $architecture) | .digest]
+              | if length == 1 then .[0] else error("expected exactly one runtime child manifest") end
+            ' "$RUNNER_TEMP/ghcr-manifest.json")"
+            docker pull --platform "$platform" "$IMAGE@$child_digest"
+            docker run --rm --platform "$platform" --entrypoint /bin/sh "$IMAGE@$child_digest" -ec '
               test "$(id -u)" -ne 0
               for binary in mineru mineru-api mineru-vlm mineru-vlm-api mineru-office-convert; do
                 test -x "/usr/local/bin/$binary"
@@ -929,7 +995,7 @@ jobs:
               mineru --version
               mineru-api --help >/dev/null
             '
-            echo "- \`$platform\`: non-root API and CLI smoke passed" >> "$GITHUB_STEP_SUMMARY"
+            echo "- \`$platform\` (\`$child_digest\`): non-root API and CLI smoke passed" >> "$GITHUB_STEP_SUMMARY"
           done
 
   require-ci-evidence:

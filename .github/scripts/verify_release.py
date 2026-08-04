@@ -66,6 +66,19 @@ CRATES_DOWNLOAD_MAX_BYTES = 16 * 1024 * 1024
 # only difference vs. the published artifact is .cargo_vcs_info.json.git.sha1.
 # Permit exactly this version->first-published-commit pair for that lineage.
 RECOVERY_CRATE_COMMITS = {"0.2.3": "cc3c1d8d2ca0b1c873e401b08423232db139cee1"}
+RECOVERY_REGISTRY_RUNS = {
+    "0.2.3": (
+        "cc3c1d8d2ca0b1c873e401b08423232db139cee1",
+        "d8e61966d2be292b5c231899f28663d84697aeef",
+        "30886924848",
+    )
+}
+RECOVERY_REGISTRY_PATHS = {
+    ".github/scripts/verify_container_release.py",
+    ".github/scripts/verify_release.py",
+    ".github/workflows/release.yml",
+    "Dockerfile.release",
+}
 PYTHON_SCRIPTS = {"mineru": "mineru_rs._cli:main", "mineru-rs": "mineru_rs._cli:main"}
 NODE_ROOT_BIN = {"mineru": "bin/mineru.js", "mineru-rs": "bin/mineru.js"}
 WHEEL_ENTRY_POINTS = b"[console_scripts]\nmineru=mineru_rs._cli:main\nmineru-rs=mineru_rs._cli:main\n"
@@ -827,6 +840,44 @@ def require_commit(commit: str) -> str:
     return commit
 
 
+def registry_recovery_decision(
+    version: str, commit: str, head: str, parents: list[str], changed_paths: set[str]
+) -> str:
+    recovery = RECOVERY_REGISTRY_RUNS.get(version)
+    if recovery is None:
+        return ""
+    _, required_parent, run_id = recovery
+    require_commit(commit)
+    if head != commit:
+        fail(f"registry recovery HEAD {head} does not match dispatch commit {commit}")
+    if parents != [required_parent]:
+        fail(f"registry recovery commit parents {parents!r} != [{required_parent!r}]")
+    unexpected = changed_paths - RECOVERY_REGISTRY_PATHS
+    if unexpected:
+        fail(f"registry recovery includes non-release paths: {sorted(unexpected)!r}")
+    return run_id
+
+
+def registry_recovery(args: argparse.Namespace) -> None:
+    recovery = RECOVERY_REGISTRY_RUNS.get(args.version)
+    if recovery is None:
+        return
+    first_publish, _, _ = recovery
+    commit = require_commit(args.commit)
+    command = ["git", "-C", str(args.root)]
+    try:
+        head = subprocess.check_output([*command, "rev-parse", "HEAD"], text=True).strip()
+        parents = subprocess.check_output([*command, "show", "-s", "--format=%P", commit], text=True).split()
+        changed_paths = set(
+            subprocess.check_output(
+                [*command, "diff", "--name-only", f"{first_publish}..{commit}", "--"], text=True
+            ).splitlines()
+        )
+    except subprocess.CalledProcessError as error:
+        fail(f"could not inspect registry recovery lineage: {error}")
+    print(registry_recovery_decision(args.version, commit, head, parents, changed_paths))
+
+
 def parse_crate_version(payload: object) -> dict[str, object]:
     if not isinstance(payload, dict):
         fail("malformed crates.io JSON: root must be an object")
@@ -1325,6 +1376,39 @@ def self_test(_: argparse.Namespace) -> None:
         must_fail(lambda: require_crate_vcs({"Cargo.toml": b"x"}), "crate missing .cargo_vcs_info.json was accepted")
         assert require_commit("1" * 40) == "1" * 40
         must_fail(lambda: require_commit("ABC"), "invalid commit was accepted")
+        recovery_commit = "3" * 40
+        recovery_parent = RECOVERY_REGISTRY_RUNS["0.2.3"][1]
+        assert registry_recovery_decision("0.2.4", "bad", "wrong", [], {"src/lib.rs"}) == ""
+        assert (
+            registry_recovery_decision(
+                "0.2.3", recovery_commit, recovery_commit, [recovery_parent], {".github/workflows/release.yml"}
+            )
+            == "30886924848"
+        )
+        must_fail(
+            lambda: registry_recovery_decision(
+                "0.2.3", recovery_commit, "4" * 40, [recovery_parent], set()
+            ),
+            "registry recovery with wrong HEAD was accepted",
+        )
+        must_fail(
+            lambda: registry_recovery_decision(
+                "0.2.3", recovery_commit, recovery_commit, [recovery_parent, "5" * 40], set()
+            ),
+            "registry recovery merge commit was accepted",
+        )
+        must_fail(
+            lambda: registry_recovery_decision(
+                "0.2.3", recovery_commit, recovery_commit, ["5" * 40], set()
+            ),
+            "registry recovery with wrong parent was accepted",
+        )
+        must_fail(
+            lambda: registry_recovery_decision(
+                "0.2.3", recovery_commit, recovery_commit, [recovery_parent], {"src/lib.rs"}
+            ),
+            "registry recovery source drift was accepted",
+        )
         must_fail(lambda: parse_crate_version([]), "non-object crates.io payload was accepted")
         must_fail(lambda: parse_crate_version({"version": "not-an-object"}), "malformed crates.io version object was accepted")
         crate_file = Path(tmp) / f"mineru-{version}.crate"
@@ -1604,6 +1688,12 @@ def parser() -> argparse.ArgumentParser:
     crate_post.add_argument("--commit", required=True)
     crate_post.add_argument("--source", type=Path, default=Path("."))
     crate_post.set_defaults(func=crate_postflight)
+
+    recovery = sub.add_parser("registry-recovery")
+    recovery.add_argument("--root", type=Path, default=Path("."))
+    recovery.add_argument("--version", required=True)
+    recovery.add_argument("--commit", required=True)
+    recovery.set_defaults(func=registry_recovery)
 
     npm = sub.add_parser("npm")
     npm.add_argument("--directory", type=Path, required=True)
