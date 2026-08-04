@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Attach verified release artifacts to a published GitHub Release.
-
-Fail-closed, standard library only. Uploads are bound to an explicit release id
-whose tag must match the tag the workflow verified. Re-runs are idempotent for
-byte-identical assets and fail on any same-name digest mismatch; nothing is
-clobbered and no dist-tag or release metadata is modified.
-"""
+"""Seal and attach the exact binary-only GitHub Release asset set."""
 
 from __future__ import annotations
 
@@ -13,7 +7,9 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
+import tempfile
 import typing
 import urllib.error
 import urllib.parse
@@ -24,10 +20,31 @@ API = "https://api.github.com"
 API_VERSION = "2022-11-28"
 USER_AGENT = "mineru-rs-release-attacher/1"
 SUMS_NAME = "SHA256SUMS"
+TARGETS = (
+    ("x86_64-unknown-linux-gnu", ".tar.gz"),
+    ("aarch64-unknown-linux-gnu", ".tar.gz"),
+    ("x86_64-apple-darwin", ".tar.gz"),
+    ("aarch64-apple-darwin", ".tar.gz"),
+    ("x86_64-pc-windows-msvc", ".zip"),
+    ("aarch64-pc-windows-msvc", ".zip"),
+)
+VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def fail(message: str) -> typing.NoReturn:
     raise SystemExit(f"release attachment failed: {message}")
+
+
+def approved_archive_names(version: str) -> set[str]:
+    if not VERSION_RE.fullmatch(version):
+        fail(f"invalid version {version!r}")
+    return {f"mineru-v{version}-{target}{suffix}" for target, suffix in TARGETS}
+
+
+def approved_names(version: str) -> set[str]:
+    return approved_archive_names(version) | {SUMS_NAME}
 
 
 def sha256_bytes(payload: bytes) -> str:
@@ -43,52 +60,85 @@ def sha256_file(path: Path) -> str:
 
 
 def asset_digest(name: str, value: object) -> str:
-    """Return GitHub's immutable SHA-256 asset digest without its algorithm prefix."""
-    prefix = "sha256:"
-    if (
-        not isinstance(value, str)
-        or len(value) != len(prefix) + 64
-        or not value.startswith(prefix)
-        or any(character not in "0123456789abcdef" for character in value[len(prefix):])
-    ):
+    if not isinstance(value, str) or not value.startswith("sha256:") or not SHA256_RE.fullmatch(value[7:]):
         fail(f"asset {name!r} has invalid digest; expected sha256:<64 lowercase hexadecimal characters>")
-    return value[len(prefix):]
+    return value[7:]
 
 
 def plain_files(directory: Path) -> list[Path]:
-    """Top-level regular files only; symlinks and nested entries are rejected."""
+    """Return top-level regular files, rejecting links and all other entries."""
     if directory.is_symlink() or not directory.is_dir():
         fail(f"{directory} must be a real directory")
     entries = sorted(directory.iterdir())
     for entry in entries:
         if entry.is_symlink() or not entry.is_file():
             fail(f"unexpected entry in {directory}: {entry.name}")
-    if not entries:
-        fail(f"{directory} contains no files to attach")
     return entries
 
 
+def require_exact_files(directory: Path, expected: set[str]) -> dict[str, Path]:
+    entries = plain_files(directory)
+    actual = {entry.name for entry in entries}
+    if actual != expected:
+        fail(f"{directory} has wrong asset set: missing={sorted(expected - actual)!r}, extra={sorted(actual - expected)!r}")
+    return {entry.name: entry for entry in entries}
+
+
 def sums_text(hashes: dict[str, str]) -> str:
-    """GNU coreutils binary-mode format, sorted by asset name."""
     return "".join(f"{hashes[name]} *{name}\n" for name in sorted(hashes))
 
 
-def require_tag(release: object, tag: str, release_id: int) -> None:
+def parse_sums(payload: bytes, names: set[str]) -> dict[str, str]:
+    try:
+        text = payload.decode("ascii")
+    except UnicodeDecodeError:
+        fail(f"{SUMS_NAME} is not ASCII")
+    records: dict[str, str] = {}
+    for line in text.splitlines(keepends=True):
+        if not line.endswith("\n") or not re.fullmatch(r"[0-9a-f]{64} \*[^/\\\r\n]+\n", line):
+            fail(f"{SUMS_NAME} has malformed record")
+        digest, name = line[:-1].split(" *", 1)
+        if name in records:
+            fail(f"{SUMS_NAME} lists {name!r} more than once")
+        records[name] = digest
+    if text != sums_text(records) or set(records) != names:
+        fail(f"{SUMS_NAME} does not exactly cover approved archives in sorted order")
+    return records
+
+
+def sealed_hashes(directory: Path, version: str) -> dict[str, str]:
+    archives = approved_archive_names(version)
+    files = require_exact_files(directory, approved_names(version))
+    records = parse_sums(files[SUMS_NAME].read_bytes(), archives)
+    for name in archives:
+        actual = sha256_file(files[name])
+        if records[name] != actual:
+            fail(f"{SUMS_NAME} digest mismatch for {name}")
+    return {name: sha256_file(path) for name, path in files.items()}
+
+
+def require_release(release: object, tag: str, release_id: int, draft: bool, commit: str) -> None:
+    if not COMMIT_RE.fullmatch(commit):
+        fail(f"invalid commit {commit!r}; expected 40 lowercase hexadecimal characters")
     if not isinstance(release, dict):
         fail("malformed release payload")
     mapping = typing.cast(dict[str, object], release)
-    if mapping.get("id") != release_id:
-        fail(f"release id mismatch: requested {release_id}, received {mapping.get('id')!r}")
-    if mapping.get("tag_name") != tag:
-        fail(f"release {release_id} is tagged {mapping.get('tag_name')!r}, expected {tag!r}")
+    if mapping.get("id") != release_id or mapping.get("tag_name") != tag:
+        fail(f"release identity mismatch for id={release_id}, tag={tag!r}")
+    if mapping.get("draft") is not draft or mapping.get("prerelease") is not False:
+        fail(f"release {release_id} must have draft={draft!r} and prerelease=false")
+    if mapping.get("target_commitish") != commit:
+        fail(f"release {release_id} target_commitish does not match requested commit")
 
 
 def plan_uploads(local: dict[str, str], remote: dict[str, str]) -> list[str]:
-    """Names still needing upload. Identical assets are skipped, conflicts fail."""
-    for name, digest in sorted(remote.items()):
-        if name in local and local[name] != digest:
+    extras = set(remote) - set(local)
+    if extras:
+        fail(f"remote release has unapproved assets: {sorted(extras)!r}")
+    for name in sorted(set(local) & set(remote)):
+        if local[name] != remote[name]:
             fail(f"{name} already attached with a different digest; refusing to replace it")
-    return [name for name in sorted(local) if name not in remote]
+    return sorted(set(local) - set(remote))
 
 
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -98,18 +148,13 @@ class RejectRedirects(urllib.request.HTTPRedirectHandler):
 
 def request(url: str, token: str, method: str = "GET", body: bytes | None = None,
             content_type: str | None = None, accept: str = "application/vnd.github+json") -> bytes:
-    headers = {
-        "Accept": accept,
-        "Authorization": f"Bearer {token}",
-        "X-GitHub-Api-Version": API_VERSION,
-        "User-Agent": USER_AGENT,
-    }
+    headers = {"Accept": accept, "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": API_VERSION,
+               "User-Agent": USER_AGENT}
     if content_type:
         headers["Content-Type"] = content_type
     call = urllib.request.Request(url, data=body, headers=headers, method=method)
-    opener = urllib.request.build_opener(RejectRedirects())
     try:
-        with opener.open(call, timeout=120) as response:
+        with urllib.request.build_opener(RejectRedirects()).open(call, timeout=120) as response:
             return response.read()
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:400]
@@ -125,11 +170,9 @@ def load(payload: bytes, url: str) -> object:
         fail(f"malformed JSON from {url}: {error}")
 
 
-def _fetch_assets(repository: str, release_id: int, token: str) -> dict[str, tuple[str, str]]:
-    """Return {name: (state, digest)} for every asset in the release."""
-    assets: dict[str, tuple[str, str]] = {}
-    page = 1
-    while True:
+def _fetch_asset_entries(repository: str, release_id: int, token: str) -> dict[str, dict[str, object]]:
+    assets: dict[str, dict[str, object]] = {}
+    for page in range(1, 101):
         url = f"{API}/repos/{repository}/releases/{release_id}/assets?per_page=100&page={page}"
         raw = load(request(url, token), url)
         if not isinstance(raw, list):
@@ -138,28 +181,27 @@ def _fetch_assets(repository: str, release_id: int, token: str) -> dict[str, tup
             if not isinstance(entry, dict):
                 fail(f"malformed asset entry from {url}")
             item = typing.cast(dict[str, object], entry)
-            name, state = item.get("name"), item.get("state")
-            if not isinstance(name, str) or not isinstance(state, str):
+            if not isinstance(item.get("name"), str) or not isinstance(item.get("state"), str):
                 fail(f"malformed asset entry from {url}")
+            name = typing.cast(str, item["name"])
             if name in assets:
                 fail(f"release {release_id} lists {name} more than once")
-            assets[name] = (state, asset_digest(name, item.get("digest")))
-        if len(typing.cast(list[object], raw)) < 100:
+            asset_digest(name, item.get("digest"))
+            assets[name] = item
+        if len(raw) < 100:
             return assets
-        page += 1
+    fail("asset pagination exceeded limit")
 
 
-def remote_hashes(repository: str, release_id: int, token: str) -> dict[str, str]:
-    """Return GitHub's immutable SHA-256 digest for every existing asset."""
-    return {name: digest for name, (state, digest) in _fetch_assets(repository, release_id, token).items()}
+def _fetch_assets(repository: str, release_id: int, token: str) -> dict[str, tuple[str, str]]:
+    return {name: (typing.cast(str, item["state"]), asset_digest(name, item.get("digest")))
+            for name, item in _fetch_asset_entries(repository, release_id, token).items()}
 
 
-# ponytail: pure function for testability, no network I/O
 def verify_remote_assets(expected: dict[str, str], remote: dict[str, tuple[str, str]]) -> None:
-    """Fail unless every expected name exists remotely with state='uploaded' and matching digest."""
+    if set(expected) != set(remote):
+        fail(f"remote asset set mismatch: missing={sorted(set(expected) - set(remote))!r}, extra={sorted(set(remote) - set(expected))!r}")
     for name, expected_digest in sorted(expected.items()):
-        if name not in remote:
-            fail(f"asset {name!r} not found in remote release")
         state, remote_digest = remote[name]
         if state != "uploaded":
             fail(f"asset {name!r} has state {state!r}, expected 'uploaded'")
@@ -169,6 +211,8 @@ def verify_remote_assets(expected: dict[str, str], remote: dict[str, tuple[str, 
 
 def stage(args: argparse.Namespace) -> None:
     destination = args.destination
+    if any(source.is_symlink() for source in args.source):
+        fail("payload source must not be a symlink")
     sources = [source.resolve() for source in args.source]
     resolved = destination.resolve()
     for source in sources:
@@ -176,226 +220,260 @@ def stage(args: argparse.Namespace) -> None:
             fail(f"destination {destination} must not overlap source {source}")
     if destination.exists():
         fail(f"{destination} already exists")
-    destination.mkdir(parents=True)
-    staged: set[str] = set()
+    staged: dict[str, Path] = {}
     for source in sources:
         for path in plain_files(source):
             if path.name == SUMS_NAME:
-                fail(f"{SUMS_NAME} must not come from a verified payload directory")
+                fail(f"{SUMS_NAME} must not come from a payload directory")
             if path.name in staged:
                 fail(f"duplicate asset name across sources: {path.name}")
-            staged.add(path.name)
-            shutil.copyfile(path, destination / path.name)
+            staged[path.name] = path
+    expected = approved_archive_names(args.version)
+    if set(staged) != expected:
+        fail(f"staged assets are not the approved archive set: missing={sorted(expected-set(staged))!r}, extra={sorted(set(staged)-expected)!r}")
+    destination.mkdir(parents=True)
+    for name, path in staged.items():
+        shutil.copyfile(path, destination / name)
     print("\n".join(sorted(staged)))
 
 
-def attach(args: argparse.Namespace) -> None:
-    # Read the credential from the environment; argv is world-readable on the runner.
+def seal(args: argparse.Namespace) -> None:
+    archives = approved_archive_names(args.version)
+    if (args.directory / SUMS_NAME).exists():
+        fail(f"{args.directory / SUMS_NAME} already exists")
+    files = require_exact_files(args.directory, archives)
+    hashes = {name: sha256_file(path) for name, path in files.items()}
+    (args.directory / SUMS_NAME).write_text(sums_text(hashes), encoding="ascii", newline="\n")
+    sealed_hashes(args.directory, args.version)
+    print(SUMS_NAME)
+
+
+def token_from(args: argparse.Namespace) -> str:
     token = os.environ.get(args.token_env, "")
     if not token:
         fail(f"{args.token_env} is unset or empty")
-    sums = args.directory / SUMS_NAME
-    if sums.exists():
-        fail(f"{sums} already exists; stage a clean attachment directory")
-    hashes = {path.name: sha256_file(path) for path in plain_files(args.directory)}
-    sums.write_text(sums_text(hashes), encoding="utf-8")
-    hashes[SUMS_NAME] = sha256_file(sums)
+    return token
 
+
+def attach(args: argparse.Namespace) -> None:
+    token, hashes = token_from(args), sealed_hashes(args.directory, args.version)
     url = f"{API}/repos/{args.repository}/releases/{args.release_id}"
-    require_tag(load(request(url, token), url), args.tag, args.release_id)
-    pending = plan_uploads(hashes, remote_hashes(args.repository, args.release_id, token))
+    require_release(load(request(url, token), url), args.tag, args.release_id, True, args.commit)
+    pending = plan_uploads(hashes, {name: digest for name, (_, digest) in _fetch_assets(args.repository, args.release_id, token).items()})
     for name in pending:
-        upload = "{}/repos/{}/releases/{}/assets?name={}".format(
-            "https://uploads.github.com", args.repository, args.release_id,
-            urllib.parse.quote(name, safe=""),
-        )
-        request(upload, token, method="POST", body=(args.directory / name).read_bytes(),
-                content_type="application/octet-stream")
+        upload = f"https://uploads.github.com/repos/{args.repository}/releases/{args.release_id}/assets?name={urllib.parse.quote(name, safe='')}"
+        request(upload, token, method="POST", body=(args.directory / name).read_bytes(), content_type="application/octet-stream")
         print(f"attached {name}")
-    for name in sorted(set(hashes) - set(pending)):
-        print(f"already attached with matching digest: {name}")
-    # Post-upload verification: every expected asset must be present with
-    # state=uploaded and matching digest.
     verify_remote_assets(hashes, _fetch_assets(args.repository, args.release_id, token))
 
 
-def self_test(_: argparse.Namespace) -> None:
-    import tempfile
+def safe_download_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme == "https" and bool(parsed.hostname) and (parsed.hostname == "github.com" or parsed.hostname.endswith(".githubusercontent.com"))
 
-    def must_fail(call: typing.Callable[[], object], message: str) -> None:
+
+def download_asset(repository: str, asset: dict[str, object], token: str) -> bytes:
+    asset_id = asset.get("id")
+    if not isinstance(asset_id, int):
+        fail("remote asset has invalid id")
+    url = f"{API}/repos/{repository}/releases/assets/{asset_id}"
+    headers = {"Accept": "application/octet-stream", "Authorization": f"Bearer {token}", "User-Agent": USER_AGENT,
+               "X-GitHub-Api-Version": API_VERSION}
+    try:
+        with urllib.request.build_opener(RejectRedirects()).open(urllib.request.Request(url, headers=headers), timeout=120) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        if error.code not in (301, 302, 303, 307, 308):
+            fail(f"asset download returned HTTP {error.code}")
+        location = error.headers.get("Location")
+        if not isinstance(location, str) or not safe_download_url(location):
+            fail("asset download redirect is not an approved HTTPS GitHub host")
+        # Never send the bearer token to the redirected origin.
+        try:
+            with urllib.request.build_opener(RejectRedirects()).open(
+                urllib.request.Request(location, headers={"User-Agent": USER_AGENT}), timeout=120
+            ) as response:
+                return response.read()
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as nested:
+            fail(f"redirected asset download failed: {nested}")
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        fail(f"asset download failed: {error}")
+
+
+def peel_tag_payloads(ref: object, tag_objects: dict[str, object], commit: str) -> None:
+    if not COMMIT_RE.fullmatch(commit) or not isinstance(ref, dict):
+        fail("malformed tag reference")
+    mapping = typing.cast(dict[str, object], ref)
+    if not isinstance(mapping.get("object"), dict):
+        fail("malformed tag reference")
+    target = typing.cast(dict[str, object], mapping["object"])
+    seen: set[str] = set()
+    for _ in range(16):
+        kind, sha = target.get("type"), target.get("sha")
+        if not isinstance(kind, str) or not isinstance(sha, str) or not COMMIT_RE.fullmatch(sha):
+            fail("malformed tag object")
+        if kind == "commit":
+            if sha != commit:
+                fail(f"tag resolves to {sha}, expected {commit}")
+            return
+        if kind != "tag" or sha in seen or sha not in tag_objects:
+            fail("tag does not safely resolve to a commit")
+        seen.add(sha)
+        payload = tag_objects[sha]
+        if not isinstance(payload, dict):
+            fail("malformed annotated tag payload")
+        mapping = typing.cast(dict[str, object], payload)
+        if not isinstance(mapping.get("object"), dict):
+            fail("malformed annotated tag payload")
+        target = typing.cast(dict[str, object], mapping["object"])
+    fail("tag annotation chain is too deep")
+
+
+def verify_tag(repository: str, tag: str, commit: str, token: str) -> None:
+    ref_url = f"{API}/repos/{repository}/git/ref/tags/{urllib.parse.quote(tag, safe='')}"
+    ref = load(request(ref_url, token), ref_url)
+    if not COMMIT_RE.fullmatch(commit) or not isinstance(ref, dict):
+        fail("malformed tag reference")
+    mapping = typing.cast(dict[str, object], ref)
+    if not isinstance(mapping.get("object"), dict):
+        fail("malformed tag reference")
+    target = typing.cast(dict[str, object], mapping["object"])
+    tag_objects: dict[str, object] = {}
+    for _ in range(16):
+        if target.get("type") != "tag":
+            break
+        sha = target.get("sha")
+        if not isinstance(sha, str) or not COMMIT_RE.fullmatch(sha) or sha in tag_objects:
+            break
+        url = f"{API}/repos/{repository}/git/tags/{sha}"
+        payload = load(request(url, token), url)
+        tag_objects[sha] = payload
+        if not isinstance(payload, dict):
+            break
+        mapping = typing.cast(dict[str, object], payload)
+        if not isinstance(mapping.get("object"), dict):
+            break
+        target = typing.cast(dict[str, object], mapping["object"])
+    peel_tag_payloads(ref, tag_objects, commit)
+
+
+def verify_release(args: argparse.Namespace) -> None:
+    token, hashes = token_from(args), sealed_hashes(args.directory, args.version)
+    url = f"{API}/repos/{args.repository}/releases/{args.release_id}"
+    require_release(load(request(url, token), url), args.tag, args.release_id, args.draft, args.commit)
+    entries = _fetch_asset_entries(args.repository, args.release_id, token)
+    verify_remote_assets(hashes, {name: (typing.cast(str, item["state"]), asset_digest(name, item.get("digest"))) for name, item in entries.items()})
+    if not args.draft:
+        verify_tag(args.repository, args.tag, args.commit, token)
+    downloaded: dict[str, bytes] = {name: download_asset(args.repository, entries[name], token) for name in sorted(hashes)}
+    if {name: sha256_bytes(data) for name, data in downloaded.items()} != hashes:
+        fail("downloaded asset digest mismatch")
+    records = parse_sums(downloaded[SUMS_NAME], approved_archive_names(args.version))
+    for name in approved_archive_names(args.version):
+        if records[name] != sha256_bytes(downloaded[name]):
+            fail(f"downloaded {SUMS_NAME} digest mismatch for {name}")
+
+
+def self_test(_: argparse.Namespace) -> None:
+    def must_fail(call: typing.Callable[[], object]) -> None:
         try:
             call()
         except SystemExit:
             return
-        raise AssertionError(message)
+        raise AssertionError("expected failure")
 
-    assert sums_text({"b.whl": "2" * 64, "a.crate": "1" * 64}) == (
-        f"{'1' * 64} *a.crate\n{'2' * 64} *b.whl\n"
-    )
-    assert asset_digest("valid.whl", f"sha256:{'a' * 64}") == "a" * 64
-    invalid_digests = (
-        ("null", None),
-        ("missing", {}.get("digest")),
-        ("malformed", f"sha256:{'a' * 63}"),
-        ("uppercase", f"sha256:{'A' * 64}"),
-        ("other algorithm", f"sha512:{'a' * 64}"),
-        ("invalid type", 123),
-    )
-    for case, digest in invalid_digests:
-        must_fail(
-            lambda digest=digest: asset_digest("invalid.whl", digest),
-            f"{case} asset digest was accepted",
-        )
-
-    redirect_handler = RejectRedirects()
-    for method, body, code in (("GET", None, 302), ("POST", b"upload", 307)):
-        original = urllib.request.Request(
-            "https://api.github.com/original",
-            data=body,
-            headers={"Authorization": "Bearer secret"},
-            method=method,
-        )
-        assert original.get_header("Authorization") == "Bearer secret"
-        try:
-            redirected = redirect_handler.redirect_request(
-                original, None, code, "Redirect", {}, "https://example.com/redirected"
-            )
-        except urllib.error.HTTPError as error:
-            assert error.code == code
-        else:
-            raise AssertionError(f"{method} redirect returned a request: {redirected!r}")
-
-    assert plan_uploads({"a": "1" * 64}, {}) == ["a"]
-    assert plan_uploads({"a": "1" * 64}, {"a": "1" * 64}) == []
-    assert plan_uploads({"a": "1" * 64, "b": "2" * 64}, {"a": "1" * 64}) == ["b"]
-    assert plan_uploads({"a": "1" * 64}, {"other": "9" * 64}) == ["a"]
-    must_fail(
-        lambda: plan_uploads({"a": "1" * 64}, {"a": "2" * 64}),
-        "same-name digest mismatch was accepted",
-    )
-
-    # verify_remote_assets — pure function tests
-    d_a, d_b, d_s = "1" * 64, "2" * 64, "3" * 64
-    verify_remote_assets({"a": d_a}, {"a": ("uploaded", d_a)})
-    verify_remote_assets(
-        {"a": d_a, "b": d_b},
-        {"a": ("uploaded", d_a), "b": ("uploaded", d_b)},
-    )
-    verify_remote_assets(
-        {"a": d_a, SUMS_NAME: d_s},
-        {"a": ("uploaded", d_a), SUMS_NAME: ("uploaded", d_s)},
-    )
-    must_fail(
-        lambda: verify_remote_assets({"a": d_a}, {}),
-        "missing asset was accepted",
-    )
-    must_fail(
-        lambda: verify_remote_assets({"a": d_a}, {"a": ("pending", d_a)}),
-        "non-uploaded state was accepted",
-    )
-    must_fail(
-        lambda: verify_remote_assets({"a": d_a}, {"a": ("uploaded", d_b)}),
-        "digest mismatch was accepted",
-    )
-    must_fail(
-        lambda: verify_remote_assets({"a": d_a, "b": d_b}, {"a": ("uploaded", d_a), "b": ("stale", d_b)}),
-        "partial non-uploaded was accepted",
-    )
-
-    release = {"id": 7, "tag_name": "v1.2.3"}
-    require_tag(release, "v1.2.3", 7)
-    must_fail(lambda: require_tag(release, "v1.2.4", 7), "tag mismatch was accepted")
-    must_fail(lambda: require_tag(release, "v1.2.3", 8), "release id mismatch was accepted")
-    must_fail(lambda: require_tag([], "v1.2.3", 7), "malformed release payload was accepted")
-
+    names = approved_archive_names("1.2.3")
+    assert len(names) == 6 and all("v1.2.3-" in name for name in names)
+    for invalid_version in ("1.2.3-rc.1", "1.2.3+meta", "01.2.3", "../1"):
+        must_fail(lambda invalid_version=invalid_version: approved_archive_names(invalid_version))
+    d = "a" * 64
+    assert sums_text({"b": d, "a": "b" * 64}) == f"{'b'*64} *a\n{d} *b\n"
+    assert asset_digest("a", f"sha256:{d}") == d
+    must_fail(lambda: asset_digest("a", "sha256:" + "A" * 64))
+    redirect = RejectRedirects()
+    try:
+        redirect.redirect_request(urllib.request.Request("https://api.github.com/x", headers={"Authorization": "Bearer secret"}), None, 302, "x", {}, "https://evil.example/x")
+    except urllib.error.HTTPError:
+        pass
+    else:
+        raise AssertionError("redirect accepted")
+    assert safe_download_url("https://github-releases.githubusercontent.com/x") and not safe_download_url("http://github.com/x") and not safe_download_url("https://evilgithubusercontent.com/x")
+    local = {name: d for name in approved_names("1.2.3")}
+    assert plan_uploads(local, {}) == sorted(local)
+    assert plan_uploads(local, local) == []
+    must_fail(lambda: plan_uploads(local, {**local, "extra": d}))
+    must_fail(lambda: plan_uploads(local, {**local, SUMS_NAME: "b" * 64}))
+    remote = {name: ("uploaded", digest) for name, digest in local.items()}
+    verify_remote_assets(local, remote)
+    must_fail(lambda: verify_remote_assets(local, {key: value for key, value in remote.items() if key != SUMS_NAME}))
+    must_fail(lambda: verify_remote_assets(local, {**remote, "extra": ("uploaded", d)}))
+    must_fail(lambda: verify_remote_assets(local, {name: ("pending", digest) for name, digest in local.items()}))
+    must_fail(lambda: verify_remote_assets(local, {**remote, SUMS_NAME: ("uploaded", "b" * 64)}))
+    commit, tag_sha = "1" * 40, "2" * 40
+    draft_release = {"id": 1, "tag_name": "v1", "draft": True, "prerelease": False, "target_commitish": commit}
+    require_release(draft_release, "v1", 1, True, commit)
+    must_fail(lambda: require_release({"id": 1, "tag_name": "v1", "draft": False, "prerelease": False, "target_commitish": commit}, "v1", 1, True, commit))
+    must_fail(lambda: require_release({"id": 1, "tag_name": "v1", "draft": True, "prerelease": True, "target_commitish": commit}, "v1", 1, True, commit))
+    must_fail(lambda: require_release({"id": 1, "tag_name": "v1", "draft": True, "prerelease": False}, "v1", 1, True, commit))
+    must_fail(lambda: require_release({"id": 1, "tag_name": "v1", "draft": True, "prerelease": False, "target_commitish": "not-a-sha"}, "v1", 1, True, commit))
+    must_fail(lambda: require_release({**draft_release, "target_commitish": tag_sha}, "v1", 1, True, commit))
+    must_fail(lambda: require_release(draft_release, "v1", 1, True, "not-a-sha"))
+    peel_tag_payloads({"object": {"type": "commit", "sha": commit}}, {}, commit)
+    peel_tag_payloads({"object": {"type": "tag", "sha": tag_sha}}, {tag_sha: {"object": {"type": "commit", "sha": commit}}}, commit)
+    must_fail(lambda: peel_tag_payloads({"object": {"type": "tag", "sha": tag_sha}}, {}, commit))
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        crate = root / "crate"
-        wheels = root / "wheels"
-        crate.mkdir()
-        wheels.mkdir()
-        (crate / "mineru-1.2.3.crate").write_bytes(b"crate")
-        (wheels / "mineru_rs-1.2.3.whl").write_bytes(b"wheel")
-
-        assert sha256_file(crate / "mineru-1.2.3.crate") == sha256_bytes(b"crate")
-        must_fail(lambda: plain_files(root / "missing"), "missing directory was accepted")
-        empty = root / "empty"
-        empty.mkdir()
-        must_fail(lambda: plain_files(empty), "empty directory was accepted")
-        nested = root / "nested"
-        (nested / "inner").mkdir(parents=True)
-        must_fail(lambda: plain_files(nested), "nested directory was accepted")
-
-        upload = root / "upload"
-        stage(argparse.Namespace(destination=upload, source=[crate, wheels]))
-        assert sorted(p.name for p in upload.iterdir()) == [
-            "mineru-1.2.3.crate", "mineru_rs-1.2.3.whl",
-        ]
-        must_fail(
-            lambda: stage(argparse.Namespace(destination=upload, source=[crate])),
-            "existing destination was accepted",
-        )
-        must_fail(
-            lambda: stage(argparse.Namespace(destination=root / "inside", source=[root])),
-            "overlapping destination was accepted",
-        )
-        duplicate = root / "duplicate"
-        duplicate.mkdir()
-        (duplicate / "mineru-1.2.3.crate").write_bytes(b"other")
-        must_fail(
-            lambda: stage(argparse.Namespace(destination=root / "dupe-out", source=[crate, duplicate])),
-            "duplicate asset name was accepted",
-        )
-        polluted = root / "polluted"
-        polluted.mkdir()
-        (polluted / SUMS_NAME).write_text("x\n", encoding="utf-8")
-        must_fail(
-            lambda: stage(argparse.Namespace(destination=root / "sums-out", source=[polluted])),
-            f"{SUMS_NAME} inside a payload directory was accepted",
-        )
-
-        # A pre-existing SHA256SUMS in the attachment directory is a staging bug.
-        (upload / SUMS_NAME).write_text("stale\n", encoding="utf-8")
-        must_fail(
-            lambda: attach(argparse.Namespace(
-                directory=upload, repository="o/r", release_id=1, tag="v1.2.3",
-                token_env="MINERU_SELF_TEST_ABSENT_TOKEN",
-            )),
-            "stale SHA256SUMS was accepted",
-        )
-        (upload / SUMS_NAME).unlink()
-        must_fail(
-            lambda: attach(argparse.Namespace(
-                directory=upload, repository="o/r", release_id=1, tag="v1.2.3",
-                token_env="MINERU_SELF_TEST_ABSENT_TOKEN",
-            )),
-            "absent credential was accepted",
-        )
+        incoming = root / "incoming"; incoming.mkdir()
+        for name in names: (incoming / name).write_bytes(name.encode())
+        staged = root / "staged"
+        stage(argparse.Namespace(destination=staged, source=[incoming], version="1.2.3"))
+        must_fail(lambda: stage(argparse.Namespace(destination=staged, source=[incoming], version="1.2.3")))
+        must_fail(lambda: stage(argparse.Namespace(destination=root / "duplicate", source=[incoming, incoming], version="1.2.3")))
+        must_fail(lambda: stage(argparse.Namespace(destination=root / "inside", source=[root], version="1.2.3")))
+        seal(argparse.Namespace(directory=staged, version="1.2.3"))
+        first = (staged / SUMS_NAME).read_bytes(); sealed_hashes(staged, "1.2.3"); assert first == (staged / SUMS_NAME).read_bytes()
+        (staged / next(iter(names))).write_bytes(b"drift")
+        must_fail(lambda: sealed_hashes(staged, "1.2.3"))
+        (incoming / "bad.whl").write_bytes(b"x")
+        must_fail(lambda: stage(argparse.Namespace(destination=root / "bad", source=[incoming], version="1.2.3")))
+        (incoming / "bad.whl").unlink()
+        (incoming / SUMS_NAME).write_text("stale\n", encoding="ascii")
+        must_fail(lambda: stage(argparse.Namespace(destination=root / "stale", source=[incoming], version="1.2.3")))
+        (incoming / SUMS_NAME).unlink()
+        (incoming / "nested").mkdir()
+        must_fail(lambda: stage(argparse.Namespace(destination=root / "nested", source=[incoming], version="1.2.3")))
+        (incoming / "nested").rmdir()
+        must_fail(lambda: stage(argparse.Namespace(destination=root / "missing", source=[incoming / "missing"], version="1.2.3")))
+        linked = root / "linked"; linked.mkdir(); (linked / "x").symlink_to(incoming / next(iter(names)))
+        must_fail(lambda: plain_files(linked))
+        malformed = root / "malformed"; malformed.mkdir()
+        for name in names: (malformed / name).write_bytes(b"x")
+        (malformed / SUMS_NAME).write_text("not a checksum\n", encoding="ascii")
+        must_fail(lambda: sealed_hashes(malformed, "1.2.3"))
     print("attach_release_assets self-test passed")
 
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="mode", required=True)
-
-    staging = sub.add_parser("stage")
-    staging.add_argument("--destination", type=Path, required=True)
-    staging.add_argument("--source", type=Path, action="append", required=True)
-    staging.set_defaults(func=stage)
-
+    staging = sub.add_parser("stage"); staging.add_argument("--destination", type=Path, required=True); staging.add_argument("--source", type=Path, action="append", required=True); staging.add_argument("--version", required=True); staging.set_defaults(func=stage)
+    sealing = sub.add_parser("seal"); sealing.add_argument("--directory", type=Path, required=True); sealing.add_argument("--version", required=True); sealing.set_defaults(func=seal)
     upload = sub.add_parser("attach")
-    upload.add_argument("--repository", required=True)
-    upload.add_argument("--release-id", type=int, required=True)
-    upload.add_argument("--tag", required=True)
+    upload.add_argument("--repository", required=True); upload.add_argument("--release-id", type=int, required=True)
+    upload.add_argument("--tag", required=True); upload.add_argument("--commit", required=True); upload.add_argument("--version", required=True)
     upload.add_argument("--directory", type=Path, required=True)
-    upload.add_argument("--token-env", default="GH_TOKEN")
-    upload.set_defaults(func=attach)
-
-    test = sub.add_parser("self-test")
-    test.set_defaults(func=self_test)
+    upload.add_argument("--token-env", default="GH_TOKEN"); upload.set_defaults(func=attach)
+    verify = sub.add_parser("verify-release")
+    verify.add_argument("--repository", required=True); verify.add_argument("--release-id", type=int, required=True)
+    verify.add_argument("--tag", required=True); verify.add_argument("--commit", required=True)
+    verify.add_argument("--version", required=True); verify.add_argument("--directory", type=Path, required=True)
+    verify.add_argument("--draft", choices=("true", "false"), required=True); verify.add_argument("--token-env", default="GH_TOKEN"); verify.set_defaults(func=verify_release)
+    test = sub.add_parser("self-test"); test.set_defaults(func=self_test)
     return p
 
 
 if __name__ == "__main__":
     arguments = parser().parse_args()
+    if getattr(arguments, "draft", None) is not None:
+        arguments.draft = arguments.draft == "true"
     arguments.func(arguments)

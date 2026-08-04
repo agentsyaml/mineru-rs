@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import argparse
 import email.parser
+import gzip
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
+import stat
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -49,7 +53,7 @@ WHEEL_SLOTS = {
     "macos-arm64": "macosx_11_0_arm64",
     "windows-x64": "win_amd64",
 }
-TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 NPM_DEV_DEPENDENCIES = {"@napi-rs/cli": "^3.8.2"}
 PYPI_USER_AGENT = "mineru-rs-release-verifier/1"
@@ -67,6 +71,15 @@ CRATE_FIXTURES = {
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg",
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg",
 }
+BINARY_TARGETS = {
+    "x86_64-unknown-linux-gnu": ("linux", 62),
+    "aarch64-unknown-linux-gnu": ("linux", 183),
+    "x86_64-apple-darwin": ("darwin", 0x01000007),
+    "aarch64-apple-darwin": ("darwin", 0x0100000C),
+    "x86_64-pc-windows-msvc": ("windows", 0x8664),
+    "aarch64-pc-windows-msvc": ("windows", 0xAA64),
+}
+BINARY_TIMESTAMP = 315532800  # 1980-01-01, valid for both gzip and ZIP.
 
 
 def fail(message: str) -> typing.NoReturn:
@@ -137,19 +150,14 @@ def validate_node_root(npm: dict, lock: dict, version: str) -> None:
 
 
 def check_identity(args: argparse.Namespace) -> None:
-    tag = args.tag
-    match = TAG_RE.fullmatch(tag)
-    if not match:
-        fail(f"release tag is not a plain stable vX.Y.Z: {tag!r}")
-    version = tag[1:]
-    if args.draft == "true" or args.prerelease == "true":
-        fail("draft and prerelease releases cannot publish")
-    if args.ref != f"refs/tags/{tag}":
-        fail(f"event ref {args.ref!r} does not exactly match release tag")
-    head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    peeled = subprocess.check_output(["git", "rev-parse", "--verify", f"{tag}^{{commit}}"], text=True).strip()
-    if len(args.sha) != 40 or head != args.sha or peeled != args.sha:
-        fail(f"release identity differs: tag={peeled}, HEAD={head}, event={args.sha}")
+    version = args.version
+    if not VERSION_RE.fullmatch(version):
+        fail(f"version is not a plain stable X.Y.Z: {version!r}")
+    if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
+        fail(f"SHA is not a full lowercase hexadecimal commit: {args.sha!r}")
+    head = subprocess.check_output(["git", "-C", str(args.root), "rev-parse", "HEAD"], text=True).strip()
+    if head != args.sha:
+        fail(f"release identity differs: HEAD={head}, requested={args.sha}")
 
     metadata = load_json(args.metadata)
     packages = {p["name"]: p for p in metadata["packages"]}
@@ -195,6 +203,219 @@ def check_identity(args: argparse.Namespace) -> None:
     ):
         fail("PyPI distribution/module metadata differs")
     print(version)
+
+
+def binary_names(target: str) -> tuple[str, str, str]:
+    try:
+        os_name, _ = BINARY_TARGETS[target]
+    except KeyError:
+        fail(f"unsupported binary target {target!r}")
+    extension = ".zip" if os_name == "windows" else ".tar.gz"
+    suffix = ".exe" if os_name == "windows" else ""
+    return extension, f"mineru{suffix}", f"mineru-office-convert{suffix}"
+
+
+def binary_asset_name(target: str, version: str) -> str:
+    if not VERSION_RE.fullmatch(version):
+        fail(f"version is not a plain stable X.Y.Z: {version!r}")
+    extension, _, _ = binary_names(target)
+    return f"mineru-v{version}-{target}{extension}"
+
+
+def binary_data(data: bytes, target: str, label: str) -> None:
+    if not data:
+        fail(f"empty binary payload: {label}")
+    os_name, machine = BINARY_TARGETS[target]
+    if os_name == "linux":
+        if len(data) < 20 or data[:4] != b"\x7fELF" or data[4:7] != b"\x02\x01\x01" or struct.unpack("<H", data[18:20])[0] != machine:
+            fail(f"ELF architecture does not match target: {label}")
+    elif os_name == "darwin":
+        thin_magic = {b"\xcf\xfa\xed\xfe": "<", b"\xfe\xed\xfa\xcf": ">"}
+        endian = thin_magic.get(data[:4])
+        if endian:
+            if len(data) < 8 or struct.unpack(f"{endian}I", data[4:8])[0] != machine:
+                fail(f"Mach-O architecture does not match target: {label}")
+        else:
+            fat_magic = {b"\xca\xfe\xba\xbe": (">", False), b"\xbe\xba\xfe\xca": ("<", False), b"\xca\xfe\xba\xbf": (">", True), b"\xbf\xba\xfe\xca": ("<", True)}
+            fat = fat_magic.get(data[:4])
+            if not fat or len(data) < 8:
+                fail(f"Mach-O architecture does not match target: {label}")
+            fat_endian, is_64 = fat
+            count = struct.unpack(f"{fat_endian}I", data[4:8])[0]
+            entry_size = 32 if is_64 else 20
+            if not 1 <= count <= 32 or len(data) < 8 + count * entry_size:
+                fail(f"invalid Mach-O universal header: {label}")
+            for index in range(count):
+                entry = data[8 + index * entry_size : 8 + (index + 1) * entry_size]
+                cpu = struct.unpack(f"{fat_endian}I", entry[:4])[0]
+                offset, size = struct.unpack(f"{fat_endian}{'QQ' if is_64 else 'II'}", entry[8:24] if is_64 else entry[8:16])
+                if cpu == machine and size >= 8 and offset <= len(data) and size <= len(data) - offset:
+                    slice_endian = thin_magic.get(data[offset : offset + 4])
+                    if slice_endian and struct.unpack(f"{slice_endian}I", data[offset + 4 : offset + 8])[0] == machine:
+                        break
+            else:
+                fail(f"Mach-O universal binary lacks target architecture: {label}")
+    else:
+        if len(data) < 64 or data[:2] != b"MZ":
+            fail(f"missing PE DOS header: {label}")
+        offset = struct.unpack("<I", data[60:64])[0]
+        if offset > len(data) or len(data) - offset < 26:
+            fail(f"invalid PE header offset: {label}")
+        header = data[offset : offset + 26]
+        if header[:4] != b"PE\0\0" or struct.unpack("<H", header[4:6])[0] != machine or struct.unpack("<H", header[24:26])[0] != 0x20B:
+            fail(f"PE architecture does not match target: {label}")
+
+
+def input_binary(path: Path, target: str, expected_name: str) -> bytes:
+    if path.name != expected_name:
+        fail(f"input binary basename {path.name!r} != {expected_name!r}")
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"input binary does not exist: {path}")
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"input binary is not a regular non-symlink file: {path}")
+    data = path.read_bytes()
+    binary_data(data, target, str(path))
+    return data
+
+
+def binary_root(asset_name: str) -> str:
+    return asset_name.removesuffix(".tar.gz").removesuffix(".zip")
+
+
+def validate_binary_tar(path: Path, target: str, version: str) -> None:
+    asset_name = binary_asset_name(target, version)
+    if path.name != asset_name:
+        fail(f"binary archive filename {path.name!r} != {asset_name!r}")
+    raw = path.read_bytes()
+    if len(raw) < 10 or raw[:2] != b"\x1f\x8b" or struct.unpack("<I", raw[4:8])[0] != BINARY_TIMESTAMP:
+        fail(f"binary gzip timestamp differs: {path}")
+    root = binary_root(asset_name)
+    _, mineru, helper = binary_names(target)
+    expected = sorted([root, f"{root}/{mineru}", f"{root}/{helper}"])
+    with tarfile.open(path, "r:gz") as archive:
+        members = archive.getmembers()
+        names = []
+        for member in members:
+            pure = PurePosixPath(member.name)
+            if pure.is_absolute() or ".." in pure.parts or not pure.parts or member.issym() or member.islnk():
+                fail(f"unsafe binary tar member {member.name!r}")
+            name = pure.as_posix()
+            if name != member.name or name in names:
+                fail(f"non-canonical or duplicate binary tar member {member.name!r}")
+            if member.mtime != BINARY_TIMESTAMP or member.uid != 0 or member.gid != 0 or member.uname or member.gname:
+                fail(f"non-deterministic binary tar metadata: {member.name!r}")
+            names.append(name)
+        if names != sorted(names) or names != expected:
+            fail(f"binary tar payload differs: {names}")
+        for member in members:
+            if member.name == root:
+                if not member.isdir() or (member.mode & 0o777) != 0o755:
+                    fail("binary tar root directory mode/type differs")
+                continue
+            if not member.isfile() or (member.mode & 0o777) != 0o755:
+                fail(f"binary tar file mode/type differs: {member.name}")
+            stream = archive.extractfile(member)
+            if stream is None:
+                fail(f"cannot read binary tar member {member.name!r}")
+            binary_data(stream.read(), target, member.name)
+
+
+def validate_binary_zip(path: Path, target: str, version: str) -> None:
+    asset_name = binary_asset_name(target, version)
+    if path.name != asset_name:
+        fail(f"binary archive filename {path.name!r} != {asset_name!r}")
+    root = binary_root(asset_name)
+    _, mineru, helper = binary_names(target)
+    expected = sorted([f"{root}/", f"{root}/{mineru}", f"{root}/{helper}"])
+    with zipfile.ZipFile(path) as archive:
+        members = archive.infolist()
+        names = []
+        for member in members:
+            pure = PurePosixPath(member.filename)
+            mode = (member.external_attr >> 16) & 0o177777
+            if pure.is_absolute() or ".." in pure.parts or not pure.parts or pure.as_posix() != member.filename.rstrip("/"):
+                fail(f"unsafe binary ZIP member {member.filename!r}")
+            if stat.S_IFMT(mode) == stat.S_IFLNK:
+                fail(f"binary ZIP link is forbidden: {member.filename!r}")
+            if member.date_time != (1980, 1, 1, 0, 0, 0) or member.filename in names:
+                fail(f"non-deterministic or duplicate binary ZIP member {member.filename!r}")
+            names.append(member.filename)
+        if names != sorted(names) or names != expected:
+            fail(f"binary ZIP payload differs: {names}")
+        for member in members:
+            mode = (member.external_attr >> 16) & 0o177777
+            if member.filename == f"{root}/":
+                if not member.is_dir() or stat.S_IFMT(mode) != stat.S_IFDIR:
+                    fail("binary ZIP root directory type differs")
+                continue
+            if member.is_dir() or stat.S_IFMT(mode) != stat.S_IFREG:
+                fail(f"binary ZIP file type differs: {member.filename}")
+            binary_data(archive.read(member), target, member.filename)
+
+
+def validate_binary_archive(path: Path, target: str, version: str) -> None:
+    extension, _, _ = binary_names(target)
+    if extension == ".tar.gz":
+        validate_binary_tar(path, target, version)
+    else:
+        validate_binary_zip(path, target, version)
+
+
+def package_binary_archive(args: argparse.Namespace) -> None:
+    asset_name = binary_asset_name(args.target, args.version)
+    if args.output_directory.is_symlink() or not args.output_directory.is_dir():
+        fail(f"output directory is not a real directory: {args.output_directory}")
+    output = args.output_directory / asset_name
+    if output.exists() or output.is_symlink():
+        fail(f"refusing to replace existing binary archive: {output}")
+    _, mineru_name, helper_name = binary_names(args.target)
+    payload = {mineru_name: input_binary(args.mineru, args.target, mineru_name), helper_name: input_binary(args.helper, args.target, helper_name)}
+    root = binary_root(asset_name)
+    temporary = tempfile.NamedTemporaryFile(dir=args.output_directory, prefix=".binary-", delete=False)
+    temporary.close()
+    created = False
+    try:
+        if output.suffix == ".zip":
+            with zipfile.ZipFile(temporary.name, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                directory = zipfile.ZipInfo(f"{root}/", (1980, 1, 1, 0, 0, 0))
+                directory.create_system, directory.external_attr = 3, (stat.S_IFDIR | 0o755) << 16
+                archive.writestr(directory, b"")
+                for name in sorted(payload):
+                    member = zipfile.ZipInfo(f"{root}/{name}", (1980, 1, 1, 0, 0, 0))
+                    member.create_system, member.external_attr = 3, (stat.S_IFREG | 0o755) << 16
+                    member.compress_type = zipfile.ZIP_DEFLATED
+                    archive.writestr(member, payload[name])
+        else:
+            with open(temporary.name, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=BINARY_TIMESTAMP, filename="") as compressed, tarfile.open(fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT) as archive:
+                for name, data, kind in [(root, b"", tarfile.DIRTYPE), *[(f"{root}/{name}", payload[name], tarfile.REGTYPE) for name in sorted(payload)]]:
+                    member = tarfile.TarInfo(name)
+                    member.type, member.mode, member.uid, member.gid, member.uname, member.gname, member.mtime = kind, 0o755, 0, 0, "", "", BINARY_TIMESTAMP
+                    member.size = len(data) if kind == tarfile.REGTYPE else 0
+                    archive.addfile(member, io.BytesIO(data) if kind == tarfile.REGTYPE else None)
+        os.replace(temporary.name, output)
+        created = True
+        validate_binary_archive(output, args.target, args.version)
+    except BaseException:
+        Path(temporary.name).unlink(missing_ok=True)
+        if created:
+            output.unlink(missing_ok=True)
+        raise
+    print(output)
+
+
+def check_binary_set(args: argparse.Namespace) -> None:
+    if args.directory.is_symlink() or not args.directory.is_dir():
+        fail(f"binary set is not a real directory: {args.directory}")
+    expected = {binary_asset_name(target, args.version): target for target in BINARY_TARGETS}
+    entries = list(args.directory.iterdir())
+    if any(entry.is_symlink() or not entry.is_file() for entry in entries) or {entry.name for entry in entries} != set(expected):
+        fail(f"binary set must contain exactly the approved archives: {[entry.name for entry in sorted(entries)]}")
+    paths = sorted(entries)
+    for path in paths:
+        validate_binary_archive(path, expected[path.name], args.version)
+    print("\n".join(str(path) for path in paths))
 
 
 def archive_contents(path: Path) -> tuple[str, dict[str, bytes], dict[str, int]]:
@@ -679,7 +900,6 @@ def check_node_native(args: argparse.Namespace) -> None:
 
 
 def self_test(_: argparse.Namespace) -> None:
-    assert TAG_RE.fullmatch("v0.1.0") and not TAG_RE.fullmatch("v01.1.0")
     assert repository_url({"url": "git+https://github.com/agentsyaml/mineru-rs.git"}) == REPOSITORY
     assert expected_wheel_tags("manylinux_2_17_aarch64.manylinux2014_aarch64") == {
         "cp39-abi3-manylinux_2_17_aarch64", "cp39-abi3-manylinux2014_aarch64",
@@ -911,6 +1131,104 @@ def self_test(_: argparse.Namespace) -> None:
             lambda: validate_npm(bad_path, version, root_manifest),
             "extra npm platform export was accepted",
         )
+
+        def synthetic_binary(target: str) -> bytes:
+            os_name, machine = BINARY_TARGETS[target]
+            if os_name == "linux":
+                data = bytearray(b"\x7fELF\x02\x01\x01" + b"\0" * 13)
+                data[18:20] = struct.pack("<H", machine)
+                return bytes(data)
+            if os_name == "darwin":
+                return b"\xcf\xfa\xed\xfe" + struct.pack("<I", machine)
+            data = bytearray(90)
+            data[:2], data[60:64], data[64:68], data[68:70], data[88:90] = b"MZ", struct.pack("<I", 64), b"PE\0\0", struct.pack("<H", machine), struct.pack("<H", 0x20B)
+            return bytes(data)
+
+        binary_dir = Path(tmp) / "binaries"
+        binary_dir.mkdir()
+        archives = Path(tmp) / "archives"
+        archives.mkdir()
+        first_bytes = None
+        for target_name in BINARY_TARGETS:
+            _extension, mineru_name, helper_name = binary_names(target_name)
+            target_dir = binary_dir / target_name
+            target_dir.mkdir()
+            mineru, helper = target_dir / mineru_name, target_dir / helper_name
+            mineru.write_bytes(synthetic_binary(target_name))
+            helper.write_bytes(synthetic_binary(target_name))
+            mineru.chmod(0o755)
+            helper.chmod(0o755)
+            binary_args = argparse.Namespace(target=target_name, version=version, mineru=mineru, helper=helper, output_directory=archives)
+            package_binary_archive(binary_args)
+            asset = archives / binary_asset_name(target_name, version)
+            validate_binary_archive(asset, target_name, version)
+            if target_name == "x86_64-unknown-linux-gnu":
+                first_bytes = asset.read_bytes()
+                asset.unlink()
+                package_binary_archive(binary_args)
+                assert asset.read_bytes() == first_bytes
+        assert {path.name for path in archives.iterdir()} == {binary_asset_name(target, version) for target in BINARY_TARGETS}
+        check_binary_set(argparse.Namespace(directory=archives, version=version))
+        assert binary_names("x86_64-unknown-linux-gnu")[0] == ".tar.gz"
+        assert binary_names("aarch64-unknown-linux-gnu")[0] == ".tar.gz"
+        assert binary_names("x86_64-apple-darwin")[0] == ".tar.gz"
+        assert binary_names("aarch64-apple-darwin")[0] == ".tar.gz"
+        assert binary_names("x86_64-pc-windows-msvc")[0] == ".zip"
+        assert binary_names("aarch64-pc-windows-msvc")[0] == ".zip"
+        must_fail(lambda: binary_names("x86_64-unknown-linux-musl"), "unknown binary target was accepted")
+        wrong = binary_dir / "wrong-mineru"
+        wrong.write_bytes(synthetic_binary("aarch64-unknown-linux-gnu"))
+        must_fail(lambda: input_binary(wrong, "x86_64-unknown-linux-gnu", "wrong-mineru"), "wrong binary architecture was accepted")
+        wrong.write_bytes(b"not a binary")
+        must_fail(lambda: input_binary(wrong, "x86_64-unknown-linux-gnu", "wrong-mineru"), "wrong binary format was accepted")
+        wrong_name = Path(tmp) / "wrong.zip"
+        shutil.copy2(archives / binary_asset_name("x86_64-pc-windows-msvc", version), wrong_name)
+        must_fail(lambda: validate_binary_archive(wrong_name, "x86_64-pc-windows-msvc", version), "wrong binary archive filename was accepted")
+
+        bad_tar_dir = Path(tmp) / "bad-tar"
+        bad_tar_dir.mkdir()
+        bad_tar = bad_tar_dir / binary_asset_name("x86_64-unknown-linux-gnu", version)
+        tar_root = binary_root(bad_tar.name)
+        with open(bad_tar, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=BINARY_TIMESTAMP, filename="") as compressed, tarfile.open(fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT) as archive:
+            for name, data, mode in [(tar_root, b"", 0o755), (f"{tar_root}/mineru", synthetic_binary("x86_64-unknown-linux-gnu"), 0o644), (f"{tar_root}/mineru-office-convert", synthetic_binary("x86_64-unknown-linux-gnu"), 0o755)]:
+                member = tarfile.TarInfo(name)
+                member.mode, member.uid, member.gid, member.uname, member.gname, member.mtime = mode, 0, 0, "", "", BINARY_TIMESTAMP
+                if data:
+                    member.size = len(data)
+                    archive.addfile(member, io.BytesIO(data))
+                else:
+                    member.type = tarfile.DIRTYPE
+                    archive.addfile(member)
+        must_fail(lambda: validate_binary_archive(bad_tar, "x86_64-unknown-linux-gnu", version), "bad binary mode was accepted")
+
+        def bad_zip(entries: list[tuple[str, bytes, int]]) -> Path:
+            path = Path(tmp) / binary_asset_name("x86_64-pc-windows-msvc", version)
+            with zipfile.ZipFile(path, "w") as archive:
+                for name, data, mode in entries:
+                    member = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+                    member.create_system, member.external_attr = 3, mode << 16
+                    archive.writestr(member, data)
+            return path
+
+        win_root = binary_root(binary_asset_name("x86_64-pc-windows-msvc", version))
+        win_data = synthetic_binary("x86_64-pc-windows-msvc")
+        base = [(f"{win_root}/", b"", stat.S_IFDIR | 0o755), (f"{win_root}/mineru-office-convert.exe", win_data, stat.S_IFREG | 0o755), (f"{win_root}/mineru.exe", win_data, stat.S_IFREG | 0o755)]
+        for entries, message in [
+            (base + [(f"{win_root}/extra", b"x", stat.S_IFREG | 0o755)], "extra binary payload was accepted"),
+            (base + [(f"{win_root}/mineru.exe", win_data, stat.S_IFREG | 0o755)], "duplicate binary payload was accepted"),
+            ([("../escape", b"x", stat.S_IFREG | 0o755)], "traversal binary payload was accepted"),
+            ([(f"{win_root}/", b"", stat.S_IFDIR | 0o755), (f"{win_root}/mineru-office-convert.exe", win_data, stat.S_IFLNK | 0o777), (f"{win_root}/mineru.exe", win_data, stat.S_IFREG | 0o755)], "binary link was accepted"),
+            ([(f"{win_root}/", b"", stat.S_IFDIR | 0o755), (f"{win_root}/mineru-office-convert.exe", b"", stat.S_IFREG | 0o755), (f"{win_root}/mineru.exe", win_data, stat.S_IFREG | 0o755)], "empty binary payload was accepted"),
+        ]:
+            bad = bad_zip(entries)
+            must_fail(lambda bad=bad: validate_binary_archive(bad, "x86_64-pc-windows-msvc", version), message)
+        extra = archives / "extra"
+        extra.write_bytes(b"x")
+        must_fail(lambda: check_binary_set(argparse.Namespace(directory=archives, version=version)), "polluted binary set was accepted")
+        extra.unlink()
+        missing = archives / binary_asset_name("aarch64-pc-windows-msvc", version)
+        missing.unlink()
+        must_fail(lambda: check_binary_set(argparse.Namespace(directory=archives, version=version)), "incomplete binary set was accepted")
     print("verify_release self-test passed")
 
 
@@ -920,11 +1238,8 @@ def parser() -> argparse.ArgumentParser:
     identity = sub.add_parser("identity")
     identity.add_argument("--root", type=Path, default=Path("."))
     identity.add_argument("--metadata", type=Path, required=True)
-    identity.add_argument("--tag", required=True)
-    identity.add_argument("--ref", required=True)
+    identity.add_argument("--version", required=True)
     identity.add_argument("--sha", required=True)
-    identity.add_argument("--draft", choices=("true", "false"), required=True)
-    identity.add_argument("--prerelease", choices=("true", "false"), required=True)
     identity.set_defaults(func=check_identity)
 
     crate = sub.add_parser("crate")
@@ -966,6 +1281,19 @@ def parser() -> argparse.ArgumentParser:
     native.add_argument("--directory", type=Path, required=True)
     native.add_argument("--suffix", choices=tuple(PLATFORMS), required=True)
     native.set_defaults(func=check_node_native)
+
+    binary_archive = sub.add_parser("binary-archive")
+    binary_archive.add_argument("--target", choices=tuple(BINARY_TARGETS), required=True)
+    binary_archive.add_argument("--version", required=True)
+    binary_archive.add_argument("--mineru", type=Path, required=True)
+    binary_archive.add_argument("--helper", type=Path, required=True)
+    binary_archive.add_argument("--output-directory", type=Path, required=True)
+    binary_archive.set_defaults(func=package_binary_archive)
+
+    binary_set = sub.add_parser("binary-set")
+    binary_set.add_argument("--directory", type=Path, required=True)
+    binary_set.add_argument("--version", required=True)
+    binary_set.set_defaults(func=check_binary_set)
 
     test = sub.add_parser("self-test")
     test.set_defaults(func=self_test)

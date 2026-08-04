@@ -1,14 +1,23 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable package version (X.Y.Z)
+        required: true
+        type: string
+      commit:
+        description: Full commit SHA (normalized to lowercase)
+        required: true
+        type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
@@ -16,11 +25,35 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.identity.outputs.version }}
+      commit: ${{ steps.identity.outputs.commit }}
     steps:
-      - name: Check out the published release tag
+      - name: Authoritative immutable release preflight
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          COMMIT="${INPUT_COMMIT,,}"
+          [[ "$INPUT_COMMIT" =~ ^[0-9A-Fa-f]{40}$ ]] || { echo 'commit must be a full hexadecimal SHA' >&2; exit 1; }
+          test "${#COMMIT}" = 40
+          test "$GITHUB_SHA" = "$COMMIT" || { echo "workflow ref $GITHUB_SHA does not equal requested commit $COMMIT" >&2; exit 1; }
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'version must be stable X.Y.Z' >&2; exit 1; }
+          tag="v$VERSION"
+          absent() {
+            status="$(curl --silent --show-error --output "$RUNNER_TEMP/api-body" --write-out '%{http_code}' \
+              --header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' "$1")"
+            test "$status" = 404 || { echo "expected HTTP 404 from $1, got $status" >&2; cat "$RUNNER_TEMP/api-body" >&2; exit 1; }
+          }
+          absent "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag"
+          absent "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+      - name: Check out immutable requested commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ steps.preflight.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
       - name: Set up Python
@@ -55,18 +88,12 @@ jobs:
           test "$audit_status" -eq 1
       - name: Verify immutable release identity and package metadata
         id: identity
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_DRAFT: ${{ github.event.release.draft }}
-          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
-          EVENT_REF: ${{ github.ref }}
-          EVENT_SHA: ${{ github.sha }}
         run: |
           cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json
           version="$(python .github/scripts/verify_release.py identity \
-            --metadata cargo-metadata.json --tag "$RELEASE_TAG" --ref "$EVENT_REF" --sha "$EVENT_SHA" \
-            --draft "$RELEASE_DRAFT" --prerelease "$RELEASE_PRERELEASE")"
+            --metadata cargo-metadata.json --version '${{ inputs.version }}' --sha '${{ steps.preflight.outputs.commit }}')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=${{ steps.preflight.outputs.commit }}" >> "$GITHUB_OUTPUT"
 
   crate-package:
     needs: identity
@@ -75,7 +102,7 @@ jobs:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -150,7 +177,7 @@ jobs:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -254,7 +281,7 @@ jobs:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Python for artifact checks
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -345,7 +372,7 @@ jobs:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -387,6 +414,132 @@ jobs:
           path: bindings/node/packed/*.tgz
           if-no-files-found: error
 
+  build-binary:
+    needs: identity
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            helper: mineru-office-convert
+            deployment: ""
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            helper: mineru-office-convert
+            deployment: ""
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            helper: mineru-office-convert
+            deployment: "10.12"
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            helper: mineru-office-convert
+            deployment: "11.0"
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            helper: mineru-office-convert.exe
+            deployment: ""
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            helper: mineru-office-convert.exe
+            deployment: ""
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment }}
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          persist-credentials: false
+      - name: Set up Python for archive verification
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.14.6
+      - name: Build Linux binaries in the pinned native builder
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e TARGET="${{ matrix.target }}" \
+            rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff \
+            sh -ec '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libreoffice-writer libreoffice-impress libreoffice-calc fonts-dejavu-core
+              rm -rf /var/lib/apt/lists/*
+              install -d -m 700 -o "$HOST_UID" -g "$HOST_GID" /tmp/mineru-home /tmp/mineru-cargo
+              install -d -m 755 -o "$HOST_UID" -g "$HOST_GID" "/workspace/target/$TARGET/release"
+              export HOME=/tmp/mineru-home CARGO_HOME=/tmp/mineru-cargo
+              setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo build --locked --release -p mineru --features office --bin mineru --bin mineru-office-convert --target "$TARGET"
+              setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo test --locked --release -p mineru --features office --target "$TARGET" --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+              chmod -R a+rX "/workspace/target/$TARGET/release"
+            '
+      - name: Build native binaries
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup default 1.89.0
+          rustup target add ${{ matrix.target }}
+          cargo build --locked --release -p mineru --features office --bin mineru --bin mineru-office-convert --target ${{ matrix.target }}
+      - name: Validate packaged binaries and Office helper E2E
+        shell: bash
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release"
+          test "$("$bin/mineru${{ runner.os == 'Windows' && '.exe' || '' }}" --version)" = "mineru $VERSION"
+          "$bin/mineru${{ runner.os == 'Windows' && '.exe' || '' }}" --help >/dev/null
+          if [ "${{ runner.os }}" != Linux ]; then
+            cargo test --locked --release -p mineru --features office --target ${{ matrix.target }} --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+          fi
+          mkdir binary-archive
+          python .github/scripts/verify_release.py binary-archive --target ${{ matrix.target }} --version "$VERSION" \
+            --mineru "$bin/mineru${{ runner.os == 'Windows' && '.exe' || '' }}" --helper "$bin/${{ matrix.helper }}" --output-directory binary-archive
+      - name: Upload exact binary archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-binary-${{ matrix.target }}
+          path: binary-archive/*
+          if-no-files-found: error
+
+  verify-binary-assets:
+    needs: [identity, build-binary]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out immutable release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.14.6
+      - name: Download and merge six binary archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-binary-*
+          path: binary-input
+          merge-multiple: true
+      - name: Verify and seal the exact binary asset set
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/verify_release.py binary-set --directory binary-input --version "$VERSION"
+          python .github/scripts/attach_release_assets.py stage --version "$VERSION" --source binary-input --destination "$RUNNER_TEMP/verified-binary-assets"
+          python .github/scripts/attach_release_assets.py seal --version "$VERSION" --directory "$RUNNER_TEMP/verified-binary-assets"
+      - name: Upload sealed binary-only release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-binary-assets
+          path: ${{ runner.temp }}/verified-binary-assets/*
+          if-no-files-found: error
+
   release-ready:
     needs: [identity, crate-package, python-wheel, node-package]
     runs-on: ubuntu-24.04
@@ -394,7 +547,7 @@ jobs:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -443,7 +596,7 @@ jobs:
           if-no-files-found: error
 
   publish-crate:
-    needs: [identity, release-ready]
+    needs: [identity, release-ready, require-ci-evidence]
     runs-on: ubuntu-24.04
     environment: crates-io
     permissions:
@@ -453,7 +606,7 @@ jobs:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -484,7 +637,7 @@ jobs:
         run: cargo publish -p mineru --locked
 
   publish-python:
-    needs: [identity, release-ready]
+    needs: [identity, release-ready, require-ci-evidence]
     runs-on: ubuntu-24.04
     environment: pypi
     permissions:
@@ -494,7 +647,7 @@ jobs:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -525,7 +678,7 @@ jobs:
         run: python .github/scripts/verify_release.py pypi-postflight --project mineru-rs --version "$VERSION" --directory dist
 
   publish-node:
-    needs: [identity, release-ready]
+    needs: [identity, release-ready, require-ci-evidence]
     runs-on: ubuntu-24.04
     environment: npm
     permissions:
@@ -535,7 +688,7 @@ jobs:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Node 24.18.1
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -581,7 +734,7 @@ jobs:
           publish_verified "@alexsun-top/mineru" "./packages/alexsun-top-mineru-$VERSION.tgz"
 
   publish-container:
-    needs: [identity, release-ready]
+    needs: [identity, release-ready, require-ci-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     environment: ghcr
@@ -592,7 +745,7 @@ jobs:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
@@ -612,10 +765,12 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }}
-            type=semver,pattern={{major}},value=${{ github.event.release.tag_name }}
+            type=semver,pattern={{version}},value=v${{ needs.identity.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.identity.outputs.version }}
+            type=semver,pattern={{major}},value=v${{ needs.identity.outputs.version }}
             type=raw,value=latest
+          labels: |
+            org.opencontainers.image.revision=${{ needs.identity.outputs.commit }}
       - name: Build and push multi-platform image
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -649,7 +804,7 @@ jobs:
         env:
           IMAGE: ghcr.io/agentsyaml/mineru-rs
           DIGEST: ${{ steps.container-manifest.outputs.digest }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: v${{ needs.identity.outputs.version }}
         run: |
           set -euo pipefail
           printf '%s\n' '${{ steps.meta.outputs.tags }}' > "$RUNNER_TEMP/ghcr-tags.txt"
@@ -677,58 +832,127 @@ jobs:
             echo "- \`$platform\`: non-root API and CLI smoke passed" >> "$GITHUB_STEP_SUMMARY"
           done
 
-  attach-assets:
-    needs: [identity, release-ready]
+  require-ci-evidence:
+    needs: identity
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require successful push CI for the exact protected-main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&status=completed&head_sha=$COMMIT&branch=main&per_page=100" > "$RUNNER_TEMP/ci-runs.json"
+          python3 - "$RUNNER_TEMP/ci-runs.json" "$COMMIT" <<'PY'
+          import json
+          import sys
+
+          runs = json.load(open(sys.argv[1], encoding="utf-8"))["workflow_runs"]
+          assert any(
+              run["event"] == "push"
+              and run["head_sha"] == sys.argv[2]
+              and run["head_branch"] == "main"
+              and run["status"] == "completed"
+              and run["conclusion"] == "success"
+              for run in runs
+          ), f"no successful push CI run for main at {sys.argv[2]}"
+          PY
+
+  publish-release:
+    needs: [identity, verify-binary-assets, require-ci-evidence, publish-crate, publish-python, publish-node, publish-container]
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: write
     steps:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.14.6
-      - name: Download verified crate
+      - name: Download sealed binary-only release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: verified-crate
-          path: attach-sources/crate
-      - name: Download verified wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: verified-wheels
-          path: attach-sources/wheels
-      - name: Download verified npm packages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: verified-npm
-          path: attach-sources/npm
-      - name: Re-verify the exact sealed payload before attaching
+          name: verified-binary-assets
+          path: release-assets
+      - name: Re-verify sealed binary-only assets
         env:
           VERSION: ${{ needs.identity.outputs.version }}
         run: |
-          python .github/scripts/verify_release.py crate --directory attach-sources/crate --version "$VERSION"
-          python .github/scripts/verify_release.py wheel --directory attach-sources/wheels --version "$VERSION" --count 5 --platform all
-          python .github/scripts/verify_release.py npm --directory attach-sources/npm --version "$VERSION"
-      - name: Stage attachment set outside the verified payload directories
-        run: |
-          python .github/scripts/attach_release_assets.py stage \
-            --destination "$RUNNER_TEMP/release-upload" \
-            --source attach-sources/crate \
-            --source attach-sources/wheels \
-            --source attach-sources/npm
-      - name: Attach artifacts and SHA256SUMS to the published release
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/archive-only"
+          cp release-assets/mineru-* "$RUNNER_TEMP/archive-only/"
+          python .github/scripts/verify_release.py binary-set --directory "$RUNNER_TEMP/archive-only" --version "$VERSION"
+      - name: Create, attach, verify, and publish draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ github.event.release.id }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ needs.identity.outputs.version }}
+          COMMIT: ${{ needs.identity.outputs.commit }}
         run: |
-          python .github/scripts/attach_release_assets.py attach \
-            --repository "$GITHUB_REPOSITORY" \
-            --release-id "$RELEASE_ID" \
-            --tag "$RELEASE_TAG" \
-            --directory "$RUNNER_TEMP/release-upload"
+          set -euo pipefail
+          tag="v$VERSION"
+          release_id=''
+          published=false
+          cleanup() {
+            status=$?
+            if test "$status" -ne 0 && test -n "$release_id" && test "$published" != true; then
+              metadata="$RUNNER_TEMP/release-$release_id.json"
+              if ! gh api "/repos/$GITHUB_REPOSITORY/releases/$release_id" > "$metadata"; then
+                echo "draft cleanup could not re-GET release $release_id; preserve it and recover manually" >&2
+              elif ! python3 - "$metadata" "$release_id" "$tag" "$COMMIT" <<'PY'
+              import json
+              import sys
+
+              release = json.load(open(sys.argv[1], encoding="utf-8"))
+              assert str(release.get("id")) == sys.argv[2]
+              assert release.get("tag_name") == sys.argv[3]
+              assert release.get("target_commitish") == sys.argv[4]
+              assert release.get("draft") is True
+              assert release.get("prerelease") is False
+          PY
+              then
+                echo "release $release_id is not the exact unpublished draft; preserve it and recover manually" >&2
+              elif ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/releases/$release_id"; then
+                echo "could not delete exact draft $release_id; recover manually" >&2
+              else
+                ref="$RUNNER_TEMP/tag-$release_id.json"
+                if gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > "$ref" 2>/dev/null \
+                  && python3 - "$ref" "$COMMIT" <<'PY'
+              import json
+              import sys
+
+              ref = json.load(open(sys.argv[1], encoding="utf-8"))
+              assert ref["object"]["type"] == "commit"
+              assert ref["object"]["sha"] == sys.argv[2]
+          PY
+                then
+                  gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" \
+                    || echo "exact lightweight tag $tag remains; delete it manually" >&2
+                else
+                  echo "no exact lightweight tag $tag to clean up; preserving any other tag" >&2
+                fi
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          absent() {
+            status="$(curl --silent --show-error --output "$RUNNER_TEMP/api-body" --write-out '%{http_code}' \
+              --header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' "$1")"
+            test "$status" = 404 || { echo "expected HTTP 404 from $1, got $status" >&2; cat "$RUNNER_TEMP/api-body" >&2; exit 1; }
+          }
+          absent "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag"
+          absent "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag"
+          release_id="$(gh api --method POST "/repos/$GITHUB_REPOSITORY/releases" -f tag_name="$tag" -f target_commitish="$COMMIT" -f name="$tag" -F draft=true -F prerelease=false -F generate_release_notes=true --jq .id)"
+          absent "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag"
+          python .github/scripts/attach_release_assets.py attach --repository "$GITHUB_REPOSITORY" --release-id "$release_id" --tag "$tag" --commit "$COMMIT" --version "$VERSION" --directory release-assets
+          python .github/scripts/attach_release_assets.py verify-release --repository "$GITHUB_REPOSITORY" --release-id "$release_id" --tag "$tag" --commit "$COMMIT" --version "$VERSION" --directory release-assets --draft true
+          absent "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag"
+          gh api --method PATCH "/repos/$GITHUB_REPOSITORY/releases/$release_id" -F draft=false >/dev/null
+          published=true
+          python .github/scripts/attach_release_assets.py verify-release --repository "$GITHUB_REPOSITORY" --release-id "$release_id" --tag "$tag" --commit "$COMMIT" --version "$VERSION" --directory release-assets --draft false

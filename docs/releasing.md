@@ -8,9 +8,12 @@ credentials. Never store a registry token in the repository, GitHub secrets,
 
 ## One-time repository and registry setup
 
-In `agentsyaml/mineru-rs`, create protected GitHub environments named
-`crates-io`, `pypi`, `npm`, and `ghcr`, with required reviewers and release-tag
-restrictions as appropriate.
+Protect `main` and allow release dispatch only from that protected branch. The
+`workflow_dispatch` definition is selected from `main`; the workflow fails
+closed unless its `GITHUB_SHA` equals the requested commit. Create protected
+GitHub environments named `crates-io`, `pypi`, `npm`, and `ghcr`, each with
+required reviewers and the appropriate OIDC trusted-publisher controls. Do not
+restrict these environments to release tags.
 
 - PyPI: create a **pending trusted publisher** for project `mineru-rs`,
   repository `agentsyaml/mineru-rs`, workflow `release.yml`, environment
@@ -131,9 +134,8 @@ unset NPM_CONFIG_USERCONFIG NODE_AUTH_TOKEN
 
 Before release, the Cargo workspace version, npm manifest version, both npm
 lockfile root versions, and intended PyPI wheel version must all be the same
-stable `X.Y.Z`. Commit those synchronized files. The GitHub Release tag must be
-exactly `vX.Y.Z`, point to the release commit, and be neither a draft nor a
-prerelease.
+stable `X.Y.Z`. Commit and push those synchronized files; do not change
+manifests just to prepare the workflow.
 
 ## Local preflight
 
@@ -183,40 +185,58 @@ the five documented binaries exist, and no package or target is named
 `mineru-cli`. Confirm Python wheels are `cp39-abi3` and no raw `linux_*` wheel
 is released. Do not build or publish a Python sdist.
 
-## Trigger
+## Trigger and publication sequence
 
-Push the synchronized release commit and tag, then publish the matching stable
-GitHub Release. The release workflow is triggered only by that published
-release. It builds and verifies everything before separate protected jobs
-publish crates.io, PyPI wheels, the six npm native packages and npm root
-package, and the GHCR image. Creating a tag alone does not publish anything.
+1. Bump the synchronized version, commit, and push it to protected `main`.
+2. Confirm the selected commit is the current protected-main tip, then wait for
+   its completed successful **push** CI run:
 
-`publish-container` runs alongside the other publishing and asset-attachment
-jobs after the same `release-ready` gate, so an image failure does not block
-the other registries. It builds the repository Dockerfile for `linux/amd64` and
-`linux/arm64` and publishes `ghcr.io/agentsyaml/mineru-rs` with the exact
-release version, `major.minor`, `major`, and `latest` tags. Buildx records the
-multi-architecture digest in the job summary and publishes maximal provenance
-and an SBOM.
+   ```sh
+   commit='<40-lowercase-sha>'
+   test "$(git rev-parse origin/main)" = "$commit"
+   gh workflow run release.yml --ref main -f version=X.Y.Z -f commit="$commit"
+   ```
 
-## Release asset attachment
+   The workflow normalizes the full hexadecimal SHA, rejects a workflow ref
+   whose `GITHUB_SHA` differs from it, and requires successful push CI with
+   exactly that `head_sha` and `main` branch before any registry publication.
+   It also rejects an existing `vX.Y.Z` tag or release.
 
-After every existing verification passes, `attach-assets` attaches the verified
-crate, all five wheels, all seven npm tarballs, and a `SHA256SUMS` file covering
-exactly those artifacts to the published GitHub Release. It re-runs the crate,
-wheel, and npm checks against the sealed artifacts before uploading anything.
+The workflow keeps crates.io, PyPI, npm (six native packages plus root), and
+GHCR build, validation, and publication. It builds the GHCR image for
+`linux/amd64` and `linux/arm64` and publishes the exact release version,
+`major.minor`, `major`, and `latest` tags.
 
-The job holds `contents: write` and nothing else. Uploads are bound to
-`github.event.release.id`, and the job fails unless that release's `tag_name`
-matches the tag the workflow verified. Attachment runs alongside the publishing
-jobs and does not change their dependencies or ordering.
+The GitHub Release is not published until all four registry/container publishers
+and the binary asset verification succeed. Linux standalone binaries are built
+natively (no QEMU) in
+`rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff`.
 
-Re-running a release is idempotent: an asset whose name and SHA-256 already
-match is skipped, and a same-name asset with a different digest fails the job
-instead of being replaced. Nothing uses `--clobber`, and the job never modifies
-`latest`, any dist-tag, or the release body and metadata. `SHA256SUMS` is
-generated in a separate staging directory so the crate, wheel, and npm
-directories continue to match their exact expected payloads.
+## GitHub Release assets
+
+The GitHub Release has exactly seven uploaded assets (replace `X.Y.Z` with the
+release version):
+
+1. `mineru-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+2. `mineru-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz`
+3. `mineru-vX.Y.Z-x86_64-apple-darwin.tar.gz`
+4. `mineru-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+5. `mineru-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+6. `mineru-vX.Y.Z-aarch64-pc-windows-msvc.zip`
+7. `SHA256SUMS`
+
+Each archive has one root directory and exactly `mineru` plus
+`mineru-office-convert` (`.exe` on Windows). Verify the downloaded files with
+`sha256sum -c SHA256SUMS` (or the platform equivalent). Crates, wheels, and npm
+tarballs remain registry artifacts and are never attached to the GitHub Release.
+
+`publish-release` creates a draft only after the full publication graph passes,
+uploads and verifies this exact set, then publishes it. A failure before publish
+deletes only that newly created draft. Published releases and tags are immutable:
+reruns fail rather than delete, recreate, or replace them. GitHub may show
+automatic `Source code (zip)` and `Source code (tar.gz)` links; those are GitHub
+generated source links, not uploaded release assets and not Rust `.crate`
+packages.
 
 This document specifies commands; it does not assert that bootstrap, preflight,
 trusted-publisher setup, or publication has been performed.
