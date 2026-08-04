@@ -469,11 +469,20 @@ jobs:
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libreoffice-writer libreoffice-impress libreoffice-calc fonts-dejavu-core
               rm -rf /var/lib/apt/lists/*
               install -d -m 700 -o "$HOST_UID" -g "$HOST_GID" /tmp/mineru-home /tmp/mineru-cargo
+              install -d -m 755 -o "$HOST_UID" -g "$HOST_GID" /workspace/target
               install -d -m 755 -o "$HOST_UID" -g "$HOST_GID" "/workspace/target/$TARGET/release"
               export HOME=/tmp/mineru-home CARGO_HOME=/tmp/mineru-cargo
-              setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo build --locked --release -p mineru --features office --bin mineru --bin mineru-office-convert --target "$TARGET"
+              setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo build --locked --release -p mineru --features office --bins --target "$TARGET"
               setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo test --locked --release -p mineru --features office --target "$TARGET" --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
               chmod -R a+rX "/workspace/target/$TARGET/release"
+              cd "/workspace/target/$TARGET/release"
+              for binary in mineru mineru-api mineru-vlm mineru-vlm-api mineru-office-convert; do
+                test -f "$binary" && test -x "$binary" && test ! -L "$binary"
+              done
+              test "$(find . -maxdepth 1 -type f -perm -u+x | wc -l)" -eq 5
+              tar -czf "/workspace/container-binaries-$TARGET.tar.gz" mineru mineru-api mineru-vlm mineru-vlm-api mineru-office-convert
+              chown "$HOST_UID:$HOST_GID" "/workspace/container-binaries-$TARGET.tar.gz"
+              chmod 644 "/workspace/container-binaries-$TARGET.tar.gz"
             '
       - name: Build native binaries
         if: runner.os != 'Linux'
@@ -496,9 +505,29 @@ jobs:
           if [ "${{ runner.os }}" != Linux ]; then
             cargo test --locked --release -p mineru --features office --target ${{ matrix.target }} --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
           fi
+          if [ "${{ runner.os }}" == Linux ]; then
+            for binary in mineru mineru-api mineru-vlm mineru-vlm-api mineru-office-convert; do
+              test -f "$bin/$binary" && test -x "$bin/$binary" && test ! -L "$bin/$binary"
+            done
+            test "$("$bin/mineru" --version)" = "mineru $VERSION"
+            "$bin/mineru" --help >/dev/null
+            "$bin/mineru-api" --help >/dev/null
+            "$bin/mineru-vlm" --help >/dev/null
+            "$bin/mineru-vlm-api" --help >/dev/null
+            # mineru-office-convert has no --help; the container E2E and executable checks cover it.
+            test "$(find "$bin" -maxdepth 1 -type f -perm -u+x | wc -l)" -eq 5
+          fi
           mkdir binary-archive
           python .github/scripts/verify_release.py binary-archive --target ${{ matrix.target }} --version "$VERSION" \
             --mineru "$bin/mineru${{ runner.os == 'Windows' && '.exe' || '' }}" --helper "$bin/${{ matrix.helper }}" --output-directory binary-archive
+      - name: Upload Linux container binaries
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-binaries-${{ matrix.target }}
+          path: container-binaries-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
       - name: Upload exact binary archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -628,13 +657,30 @@ jobs:
             --compare "$RUNNER_TEMP/reference-crate/mineru-$VERSION.crate" --extract "$RUNNER_TEMP/publish-unpacked"
           cargo test --manifest-path "$RUNNER_TEMP/publish-unpacked/mineru-$VERSION/Cargo.toml" --lib --locked -- --test-threads=1
           cargo publish -p mineru --locked --dry-run
+      - name: Determine whether crates.io publish is required
+        id: crate-preflight
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+          COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          publish="$(python .github/scripts/verify_release.py crate-preflight --crate "target/package/mineru-$VERSION.crate" --version "$VERSION" --commit "$COMMIT")"
+          test "$publish" = true || test "$publish" = false
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
       - name: Acquire ephemeral crates.io credential
         id: crates-auth
+        if: steps.crate-preflight.outputs.publish == 'true'
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
       - name: Publish crate from immutable source
+        if: steps.crate-preflight.outputs.publish == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: cargo publish -p mineru --locked
+      - name: Verify exact crates.io release
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+          COMMIT: ${{ needs.identity.outputs.commit }}
+        run: python .github/scripts/verify_release.py crate-postflight --crate "target/package/mineru-$VERSION.crate" --version "$VERSION" --commit "$COMMIT"
 
   publish-python:
     needs: [identity, release-ready, require-ci-evidence]
@@ -734,11 +780,12 @@ jobs:
           publish_verified "@alexsun-top/mineru" "./packages/alexsun-top-mineru-$VERSION.tgz"
 
   publish-container:
-    needs: [identity, release-ready, require-ci-evidence]
+    needs: [identity, build-binary, release-ready, require-ci-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     environment: ghcr
     permissions:
+      actions: read
       contents: read
       packages: write
     steps:
@@ -771,12 +818,66 @@ jobs:
             type=raw,value=latest
           labels: |
             org.opencontainers.image.revision=${{ needs.identity.outputs.commit }}
+      - name: Download exact amd64 container binary archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-binaries-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/container-binaries/amd64
+      - name: Download exact arm64 container binary archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-binaries-aarch64-unknown-linux-gnu
+          path: ${{ runner.temp }}/container-binaries/arm64
+      - name: Extract and verify Linux container binaries
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import os
+          import pathlib
+          import sys
+          import tarfile
+
+          expected = {"mineru", "mineru-api", "mineru-vlm", "mineru-vlm-api", "mineru-office-convert"}
+          root = pathlib.Path.cwd()
+          run_temp = pathlib.Path(sys.argv[1])
+          for slot, target in (("amd64", "x86_64-unknown-linux-gnu"), ("arm64", "aarch64-unknown-linux-gnu")):
+              archive = run_temp / "container-binaries" / slot / f"container-binaries-{target}.tar.gz"
+              if archive.is_symlink() or not archive.is_file():
+                  raise SystemExit(f"container binary archive is not a real file: {archive}")
+              destination = root / "container-binaries" / slot
+              destination.mkdir(parents=True, exist_ok=False)
+              with tarfile.open(archive, "r:gz") as tar:
+                  members = tar.getmembers()
+                  names = []
+                  for member in members:
+                      pure = pathlib.PurePosixPath(member.name)
+                      if pure.is_absolute() or ".." in pure.parts or len(pure.parts) != 1:
+                          raise SystemExit(f"unsafe container tar member {member.name!r}")
+                      if member.issym() or member.islnk() or not member.isfile():
+                          raise SystemExit(f"unexpected container tar member {member.name!r}")
+                      names.append(pure.as_posix())
+                  if len(names) != len(expected) or set(names) != expected:
+                      raise SystemExit(f"container archive {archive} has wrong members: {sorted(names)}")
+                  for member in members:
+                      stream = tar.extractfile(member)
+                      if stream is None:
+                          raise SystemExit(f"cannot read container tar member {member.name!r}")
+                      path = destination / member.name
+                      path.write_bytes(stream.read())
+                      os.chmod(path, 0o755)
+              for name in sorted(expected):
+                  path = destination / name
+                  if path.is_symlink() or not path.is_file() or not (path.stat().st_mode & 0o100):
+                      raise SystemExit(f"container binary {path} is not a real executable")
+              if sorted(p.name for p in destination.iterdir()) != sorted(expected):
+                  raise SystemExit(f"container binaries directory has extras: {sorted(p.name for p in destination.iterdir())}")
+          PY
       - name: Build and push multi-platform image
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

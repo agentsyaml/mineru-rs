@@ -57,6 +57,15 @@ VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 NPM_DEV_DEPENDENCIES = {"@napi-rs/cli": "^3.8.2"}
 PYPI_USER_AGENT = "mineru-rs-release-verifier/1"
+CRATES_IO = "https://crates.io/api/v1/crates"
+CRATES_CRATE = "mineru"
+CRATES_USER_AGENT = "mineru-rs-release-verifier/1"
+CRATES_DOWNLOAD_MAX_BYTES = 16 * 1024 * 1024
+# Version 0.2.3 was first published from cc3c1d8d (run 30886924848). A rerun
+# dispatches from a later recovery commit and repackages the same source, so the
+# only difference vs. the published artifact is .cargo_vcs_info.json.git.sha1.
+# Permit exactly this version->first-published-commit pair for that lineage.
+RECOVERY_CRATE_COMMITS = {"0.2.3": "cc3c1d8d2ca0b1c873e401b08423232db139cee1"}
 PYTHON_SCRIPTS = {"mineru": "mineru_rs._cli:main", "mineru-rs": "mineru_rs._cli:main"}
 NODE_ROOT_BIN = {"mineru": "bin/mineru.js", "mineru-rs": "bin/mineru.js"}
 WHEEL_ENTRY_POINTS = b"[console_scripts]\nmineru=mineru_rs._cli:main\nmineru-rs=mineru_rs._cli:main\n"
@@ -485,18 +494,7 @@ def expected_crate_files(source: Path) -> set[str]:
     return expected
 
 
-def validate_crate(path: Path, version: str, source: Path) -> tuple[str, dict[str, bytes]]:
-    root, files = archive_files(path)
-    if root != f"mineru-{version}":
-        fail(f"crate root {root!r} != mineru-{version}")
-    expected = expected_crate_files(source)
-    if set(files) != expected:
-        fail(f"crate contents differ; missing={sorted(expected - set(files))}, unexpected={sorted(set(files) - expected)}")
-    if ".cargo_vcs_info.json" in files:
-        vcs = json.loads(files[".cargo_vcs_info.json"])
-        revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-        if vcs.get("git", {}).get("sha1") != revision:
-            fail("crate VCS revision differs from checked-out source")
+def validate_crate_manifest(files: dict[str, bytes], version: str) -> None:
     if tomllib is None:
         fail("TOML verification requires Python 3.11+")
     manifest = tomllib.loads(files["Cargo.toml"].decode())
@@ -516,6 +514,25 @@ def validate_crate(path: Path, version: str, source: Path) -> tuple[str, dict[st
         "docs/usage.md", "docs/usage.en.md", "docs/compatibility.md", "!tests/fixtures/input/README.md", *CRATE_FIXTURES,
     }:
         fail("normalized Cargo.toml include policy differs")
+
+
+def validate_crate_payload(files: dict[str, bytes], version: str, source: Path) -> None:
+    expected = expected_crate_files(source)
+    if set(files) != expected:
+        fail(f"crate contents differ; missing={sorted(expected - set(files))}, unexpected={sorted(set(files) - expected)}")
+    validate_crate_manifest(files, version)
+
+
+def validate_crate(path: Path, version: str, source: Path) -> tuple[str, dict[str, bytes]]:
+    root, files = archive_files(path)
+    if root != f"mineru-{version}":
+        fail(f"crate root {root!r} != mineru-{version}")
+    validate_crate_payload(files, version, source)
+    if ".cargo_vcs_info.json" in files:
+        vcs = json.loads(files[".cargo_vcs_info.json"])
+        revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        if vcs.get("git", {}).get("sha1") != revision:
+            fail("crate VCS revision differs from checked-out source")
     return root, files
 
 
@@ -793,6 +810,228 @@ def pypi_postflight(args: argparse.Namespace) -> None:
     fail(f"PyPI postflight unavailable after 8 attempts; last status={last_status or 'network error'}")
 
 
+def local_crate_path(path: Path, version: str) -> Path:
+    if not VERSION_RE.fullmatch(version):
+        fail(f"version is not a plain stable X.Y.Z: {version!r}")
+    if path.is_symlink() or not path.is_file():
+        fail(f"crate file is not a real regular file: {path}")
+    expected = f"mineru-{version}.crate"
+    if path.name != expected:
+        fail(f"crate filename {path.name!r} != {expected!r}")
+    return path
+
+
+def require_commit(commit: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        fail(f"commit is not a full lowercase hexadecimal SHA: {commit!r}")
+    return commit
+
+
+def parse_crate_version(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        fail("malformed crates.io JSON: root must be an object")
+    version_obj = typing.cast(dict[str, object], payload).get("version")
+    if not isinstance(version_obj, dict):
+        fail("malformed crates.io JSON: version must be an object")
+    return typing.cast(dict[str, object], version_obj)
+
+
+def parse_crate_vcs(payload: bytes) -> tuple[str, str]:
+    try:
+        vcs = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"malformed .cargo_vcs_info.json: {error}")
+    if not isinstance(vcs, dict):
+        fail("malformed .cargo_vcs_info.json: root must be an object")
+    git = vcs.get("git")
+    sha1 = git.get("sha1") if isinstance(git, dict) else None
+    path_in_vcs = vcs.get("path_in_vcs")
+    if not isinstance(sha1, str) or not re.fullmatch(r"[0-9a-f]{40}", sha1):
+        fail("malformed .cargo_vcs_info.json: git.sha1 must be a full lowercase SHA")
+    if not isinstance(path_in_vcs, str):
+        fail("malformed .cargo_vcs_info.json: path_in_vcs must be a string")
+    return sha1, path_in_vcs
+
+
+def require_crate_vcs(files: dict[str, bytes]) -> tuple[str, str]:
+    if ".cargo_vcs_info.json" not in files:
+        fail("crate is missing .cargo_vcs_info.json")
+    return parse_crate_vcs(files[".cargo_vcs_info.json"])
+
+
+def require_crate_api(version_obj: object, expected_version: str) -> str:
+    if not isinstance(version_obj, dict):
+        fail("malformed crates.io version object")
+    mapping = typing.cast(dict[str, object], version_obj)
+    if mapping.get("crate") != CRATES_CRATE or mapping.get("num") != expected_version or mapping.get("yanked") is not False:
+        fail(f"crates.io version {expected_version} identity differs")
+    checksum = mapping.get("checksum")
+    if not isinstance(checksum, str) or not SHA256_RE.fullmatch(checksum):
+        fail(f"crates.io version {expected_version} has malformed checksum")
+    return checksum
+
+
+def require_download_checksum(payload: bytes, expected_sha: str) -> None:
+    if hashlib.sha256(payload).hexdigest() != expected_sha:
+        fail("crates.io crate download checksum mismatch")
+
+
+def read_bounded(response: typing.IO[bytes], max_bytes: int) -> bytes:
+    payload = response.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        fail(f"crates.io crate download exceeded {max_bytes}-byte bound")
+    return payload
+
+
+def verify_crate_lineage(local: dict[str, bytes], remote: dict[str, bytes], version: str, commit: str) -> None:
+    if set(local) != set(remote):
+        fail(f"crate path sets differ: missing={sorted(set(remote) - set(local))!r}, extra={sorted(set(local) - set(remote))!r}")
+    for name in sorted(local):
+        if name == ".cargo_vcs_info.json":
+            continue
+        if hashlib.sha256(local[name]).digest() != hashlib.sha256(remote[name]).digest():
+            fail(f"crate file {name!r} differs between local and remote")
+    local_sha, local_path = require_crate_vcs(local)
+    remote_sha, remote_path = require_crate_vcs(remote)
+    if local_sha != commit:
+        fail(f"local crate VCS sha {local_sha} does not match dispatch commit {commit}")
+    if local_path != "":
+        fail(f"local crate path_in_vcs {local_path!r} is not the package root")
+    if remote_path != local_path:
+        fail(f"remote crate path_in_vcs {remote_path!r} != local {local_path!r}")
+    pinned = RECOVERY_CRATE_COMMITS.get(version)
+    if remote_sha != commit and not (pinned is not None and remote_sha == pinned):
+        fail(f"remote crate VCS sha {remote_sha} does not match dispatch commit {commit} or a pinned recovery commit")
+
+
+def crates_io_version(crate: str, version: str) -> tuple[int, dict[str, object] | None, int | None]:
+    url = "{}/{}/{}".format(CRATES_IO, urllib.parse.quote(crate, safe=""), urllib.parse.quote(version, safe=""))
+    request = urllib.request.Request(url, headers={"User-Agent": CRATES_USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            status = response.status
+            retry_after = response.headers.get("Retry-After")
+            if status != 200:
+                fail(f"unexpected crates.io HTTP status {status}")
+            try:
+                payload = json.loads(response.read().decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                fail(f"malformed crates.io JSON: {error}")
+            return 200, parse_crate_version(payload), None
+    except urllib.error.HTTPError as error:
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        if error.code == 404 or error.code == 429 or 500 <= error.code < 600:
+            return error.code, None, int(retry_after) if retry_after and retry_after.strip().isdigit() else None
+        fail(f"unexpected crates.io HTTP status {error.code}")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return 0, None, None
+
+
+def download_crate(version: str, expected_sha: str, max_bytes: int = CRATES_DOWNLOAD_MAX_BYTES) -> bytes:
+    url = f"{CRATES_IO}/{urllib.parse.quote(CRATES_CRATE, safe='')}/{urllib.parse.quote(version, safe='')}/download"
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(url, headers={"User-Agent": CRATES_USER_AGENT}), timeout=30
+            ) as response:
+                status = response.status
+                if status != 200:
+                    fail(f"crates.io crate download returned HTTP {status}")
+                payload = read_bounded(response, max_bytes)
+        except urllib.error.HTTPError as error:
+            if error.code == 429 or 500 <= error.code < 600:
+                if attempt < 3:
+                    time.sleep(2**attempt)
+                    continue
+                fail(f"crates.io crate download failed after 4 attempts; last status={error.code}")
+            fail(f"crates.io crate download returned HTTP {error.code}")
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            if attempt < 3:
+                time.sleep(2**attempt)
+                continue
+            fail(f"crates.io crate download unavailable after 4 attempts: {error}")
+        require_download_checksum(payload, expected_sha)
+        return payload
+    fail("crates.io crate download unavailable")
+
+
+def fetch_remote_crate(version: str, checksum: str, source: Path) -> dict[str, bytes]:
+    payload = download_crate(version, checksum)
+    temporary = tempfile.NamedTemporaryFile(prefix=".crate-remote-", suffix=".crate", delete=False)
+    temporary.write(payload)
+    temporary.close()
+    try:
+        root, files = archive_files(Path(temporary.name))
+        if root != f"mineru-{version}":
+            fail(f"remote crate root {root!r} != mineru-{version}")
+        validate_crate_payload(files, version, source)
+    finally:
+        Path(temporary.name).unlink(missing_ok=True)
+    return files
+
+
+def verified_local_crate(args: argparse.Namespace) -> tuple[str, dict[str, bytes]]:
+    path = local_crate_path(args.crate, args.version)
+    commit = require_commit(args.commit)
+    _, files = validate_crate(path, args.version, args.source)
+    local_sha, local_path = require_crate_vcs(files)
+    if local_sha != commit or local_path != "":
+        fail("local crate VCS does not match the dispatch commit at the package root")
+    return commit, files
+
+
+def crate_preflight(args: argparse.Namespace) -> None:
+    commit, local_files = verified_local_crate(args)
+    decision: bool | None = None
+    last_status = 0
+    for attempt in range(4):
+        status, version_obj, retry_after = crates_io_version(CRATES_CRATE, args.version)
+        last_status = status
+        if status == 404:
+            decision = True
+            break
+        if status == 200:
+            checksum = require_crate_api(version_obj, args.version)
+            remote_files = fetch_remote_crate(args.version, checksum, args.source)
+            verify_crate_lineage(local_files, remote_files, args.version, commit)
+            decision = False
+            break
+        if attempt < 3:
+            retry_pypi(retry_after, 2**attempt)
+    if decision is None:
+        fail(f"crates.io preflight unavailable after 4 attempts; last status={last_status or 'network error'}")
+    print("true" if decision else "false")
+
+
+def crate_postflight(args: argparse.Namespace) -> None:
+    commit, local_files = verified_local_crate(args)
+    last_remote: dict[str, bytes] | None = None
+    last_status = 0
+    for attempt in range(8):
+        status, version_obj, retry_after = crates_io_version(CRATES_CRATE, args.version)
+        last_status = status
+        if status == 200:
+            checksum = require_crate_api(version_obj, args.version)
+            try:
+                remote_files = fetch_remote_crate(args.version, checksum, args.source)
+            except SystemExit:
+                last_remote = None
+            else:
+                last_remote = remote_files
+                try:
+                    verify_crate_lineage(local_files, remote_files, args.version, commit)
+                except SystemExit:
+                    pass
+                else:
+                    print(f"crates.io postflight: verified={args.version}")
+                    return
+        if attempt < 7:
+            retry_pypi(retry_after, 2**attempt)
+    if last_remote is not None:
+        verify_crate_lineage(local_files, last_remote, args.version, commit)
+    fail(f"crates.io postflight unavailable after 8 attempts; last status={last_status or 'network error'}")
+
+
 def expected_platform_manifest(root: dict, suffix: str, version: str) -> dict:
     os_name, cpu, libc, _ = PLATFORMS[suffix]
     native = f"mineru.{suffix}.node"
@@ -1018,6 +1257,86 @@ def self_test(_: argparse.Namespace) -> None:
         assert local_wheel_hashes(pypi_dir, "mineru-rs", version) == {
             pypi_wheel.name: hashlib.sha256(b"wheel").hexdigest()
         }
+
+        vcs_commit = "1" * 40
+        vcs_other = "2" * 40
+        pinned_commit = RECOVERY_CRATE_COMMITS["0.2.3"]
+        assert pinned_commit == "cc3c1d8d2ca0b1c873e401b08423232db139cee1"
+
+        def crate_files(sha: str, path_in_vcs: str = "") -> dict[str, bytes]:
+            return {
+                ".cargo_vcs_info.json": json.dumps({"git": {"sha1": sha}, "path_in_vcs": path_in_vcs}).encode(),
+                "Cargo.toml": b"[package]\nname = \"mineru\"\n",
+                "src/lib.rs": b"fn f() {}\n",
+            }
+
+        verify_crate_lineage(crate_files(vcs_commit), crate_files(pinned_commit), "0.2.3", vcs_commit)
+        verify_crate_lineage(crate_files(vcs_commit), crate_files(vcs_commit), "0.2.3", vcs_commit)
+        drift = crate_files(pinned_commit)
+        drift["src/lib.rs"] = b"fn g() {}\n"
+        must_fail(
+            lambda: verify_crate_lineage(crate_files(vcs_commit), drift, "0.2.3", vcs_commit),
+            "crate content drift was accepted",
+        )
+        path_drift = crate_files(pinned_commit)
+        del path_drift["src/lib.rs"]
+        must_fail(
+            lambda: verify_crate_lineage(crate_files(vcs_commit), path_drift, "0.2.3", vcs_commit),
+            "crate path drift was accepted",
+        )
+        must_fail(
+            lambda: verify_crate_lineage(crate_files(vcs_commit), crate_files(vcs_other), "0.2.3", vcs_commit),
+            "unrelated remote VCS sha was accepted",
+        )
+        must_fail(
+            lambda: verify_crate_lineage(crate_files(vcs_other), crate_files(pinned_commit), "0.2.3", vcs_commit),
+            "wrong local VCS sha was accepted",
+        )
+        must_fail(
+            lambda: verify_crate_lineage(crate_files(vcs_commit), crate_files(pinned_commit, "bindings"), "0.2.3", vcs_commit),
+            "remote path_in_vcs mismatch was accepted",
+        )
+        must_fail(
+            lambda: verify_crate_lineage(crate_files(vcs_commit, "bindings"), crate_files(pinned_commit), "0.2.3", vcs_commit),
+            "non-root local path_in_vcs was accepted",
+        )
+        must_fail(
+            lambda: verify_crate_lineage(crate_files(vcs_commit), crate_files(pinned_commit), "0.2.4", vcs_commit),
+            "unrelated future version used the pinned recovery commit",
+        )
+        verify_crate_lineage(crate_files(vcs_commit), crate_files(vcs_commit), "0.2.4", vcs_commit)
+        api_obj = {"crate": CRATES_CRATE, "num": "0.2.3", "checksum": "c" * 64, "yanked": False}
+        assert require_crate_api(api_obj, "0.2.3") == "c" * 64
+        must_fail(lambda: require_crate_api({**api_obj, "yanked": True}, "0.2.3"), "yanked crates.io version was accepted")
+        must_fail(lambda: require_crate_api({**api_obj, "num": "0.2.4"}, "0.2.3"), "wrong crates.io version was accepted")
+        must_fail(lambda: require_crate_api({**api_obj, "crate": "mineru-rs"}, "0.2.3"), "wrong crates.io crate was accepted")
+        must_fail(lambda: require_crate_api({**api_obj, "checksum": "C" * 64}, "0.2.3"), "malformed crates.io checksum was accepted")
+        must_fail(lambda: require_crate_api({**api_obj, "checksum": None}, "0.2.3"), "missing crates.io checksum was accepted")
+        download_payload = b"crate-payload"
+        require_download_checksum(download_payload, hashlib.sha256(download_payload).hexdigest())
+        must_fail(lambda: require_download_checksum(download_payload, "d" * 64), "crates.io download checksum mismatch was accepted")
+        assert read_bounded(io.BytesIO(b"abc"), 10) == b"abc"
+        must_fail(lambda: read_bounded(io.BytesIO(b"x" * 100), 10), "oversized crate download was accepted")
+        must_fail(lambda: parse_crate_vcs(b"not json"), "malformed VCS JSON was accepted")
+        must_fail(lambda: parse_crate_vcs(b"[]"), "non-object VCS was accepted")
+        must_fail(lambda: parse_crate_vcs(b'{"git": {}}'), "VCS without git.sha1 was accepted")
+        must_fail(lambda: parse_crate_vcs(b'{"git": {"sha1": "ABC"}, "path_in_vcs": ""}'), "non-lowercase VCS sha1 was accepted")
+        must_fail(lambda: parse_crate_vcs(b'{"git": {"sha1": "' + b"1" * 40 + b'"}}'), "VCS without path_in_vcs was accepted")
+        must_fail(lambda: require_crate_vcs({"Cargo.toml": b"x"}), "crate missing .cargo_vcs_info.json was accepted")
+        assert require_commit("1" * 40) == "1" * 40
+        must_fail(lambda: require_commit("ABC"), "invalid commit was accepted")
+        must_fail(lambda: parse_crate_version([]), "non-object crates.io payload was accepted")
+        must_fail(lambda: parse_crate_version({"version": "not-an-object"}), "malformed crates.io version object was accepted")
+        crate_file = Path(tmp) / f"mineru-{version}.crate"
+        crate_file.write_bytes(b"crate")
+        assert local_crate_path(crate_file, version) == crate_file
+        wrong_crate_name = Path(tmp) / "mineru-1.2.4.crate"
+        wrong_crate_name.write_bytes(b"x")
+        must_fail(lambda: local_crate_path(wrong_crate_name, version), "wrong crate filename was accepted")
+        must_fail(lambda: local_crate_path(crate_file, "1.2.3-rc.1"), "non-stable crate version was accepted")
+        crate_link = Path(tmp) / "mineru-1.2.3-link.crate"
+        crate_link.symlink_to(crate_file)
+        must_fail(lambda: local_crate_path(crate_link, version), "symlinked crate was accepted")
 
         package = Path(tmp) / "package"
         package.mkdir()
@@ -1271,6 +1590,20 @@ def parser() -> argparse.ArgumentParser:
     postflight.add_argument("--version", required=True)
     postflight.add_argument("--directory", type=Path, required=True)
     postflight.set_defaults(func=pypi_postflight)
+
+    crate_pre = sub.add_parser("crate-preflight")
+    crate_pre.add_argument("--crate", type=Path, required=True)
+    crate_pre.add_argument("--version", required=True)
+    crate_pre.add_argument("--commit", required=True)
+    crate_pre.add_argument("--source", type=Path, default=Path("."))
+    crate_pre.set_defaults(func=crate_preflight)
+
+    crate_post = sub.add_parser("crate-postflight")
+    crate_post.add_argument("--crate", type=Path, required=True)
+    crate_post.add_argument("--version", required=True)
+    crate_post.add_argument("--commit", required=True)
+    crate_post.add_argument("--source", type=Path, default=Path("."))
+    crate_post.set_defaults(func=crate_postflight)
 
     npm = sub.add_parser("npm")
     npm.add_argument("--directory", type=Path, required=True)

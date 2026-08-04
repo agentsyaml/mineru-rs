@@ -1,0 +1,22 @@
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+
+ARG TARGETARCH
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system mineru \
+    && useradd --system --gid mineru --home-dir /app --shell /usr/sbin/nologin mineru \
+    && mkdir -p /app/output \
+    && chown mineru:mineru /app/output
+
+COPY --chmod=0755 container-binaries/${TARGETARCH}/ /usr/local/bin/
+
+WORKDIR /app
+USER mineru
+ENV MINERU_API_PUBLIC_BIND_EXPOSED=true \
+    MINERU_API_OUTPUT_ROOT=/app/output
+EXPOSE 8000
+VOLUME ["/app/output"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl --fail --silent --show-error http://127.0.0.1:8000/health || exit 1
+CMD ["mineru-api", "--host", "0.0.0.0", "--port", "8000"]
