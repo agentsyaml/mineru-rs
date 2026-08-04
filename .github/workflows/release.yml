@@ -470,7 +470,6 @@ jobs:
               rm -rf /var/lib/apt/lists/*
               install -d -m 700 -o "$HOST_UID" -g "$HOST_GID" /tmp/mineru-home /tmp/mineru-cargo
               install -d -m 755 -o "$HOST_UID" -g "$HOST_GID" /workspace/target
-              install -d -m 755 -o "$HOST_UID" -g "$HOST_GID" "/workspace/target/$TARGET/release"
               export HOME=/tmp/mineru-home CARGO_HOME=/tmp/mineru-cargo
               setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo build --locked --release -p mineru --features office --bins --target "$TARGET"
               setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo test --locked --release -p mineru --features office --target "$TARGET" --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
