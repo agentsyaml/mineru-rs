@@ -93,6 +93,9 @@ impl MineruApiClient {
         let client = Client::builder()
             .redirect(redirect_policy(redirect_origin))
             .connect_timeout(connect_timeout)
+            // Ambient system proxies (common on Windows) hijack loopback/127.0.0.1 API traffic
+            // and answer 502/504, breaking local MinerU servers. API requests must go direct.
+            .no_proxy()
             .build()
             .map_err(|_| "unable to construct API client".to_string())?;
         Ok(Self {
@@ -1212,7 +1215,8 @@ mod tests {
             &base,
             Timing {
                 acquisition: Duration::from_millis(5),
-                send: Duration::from_millis(40),
+                // Generous for slower Windows loopback connection setup plus the 15 ms server sleep.
+                send: Duration::from_millis(200),
                 interval: Duration::from_millis(1),
             },
         );
@@ -1775,7 +1779,13 @@ mod tests {
                 interval: Duration::from_millis(20),
             },
         );
-        client.client = Client::builder().no_proxy().build().unwrap();
+        client.client = Client::builder()
+            .no_proxy()
+            // Windows loopback connect to a closed port can hang instead of returning RST;
+            // a short connect timeout surfaces the connection error before the result deadline.
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
         let started = tokio::time::Instant::now();
         assert_eq!(
             client
