@@ -1754,7 +1754,12 @@ mod tests {
                         .lock()
                         .expect("worker events")
                         .push((index, result.as_ref().err().map(ToString::to_string)));
-                    worker_finished.notify_one();
+                    // Only the prefetch worker's completion may wake the test; the current page
+                    // (index 0) completes early and would otherwise resolve the wait before the
+                    // prefetch event is pushed, racing the assertion below.
+                    if index == 1 {
+                        worker_finished.notify_one();
+                    }
                 }
             },
         ));

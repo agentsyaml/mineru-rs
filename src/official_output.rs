@@ -1212,7 +1212,7 @@ fn check_stage_deadline(deadline: std::time::Instant) -> VlmResult<()> {
 mod tests {
     use super::{
         OfficialOutputStage, OfficialOutputTarget, OutputTree, canonical_stem,
-        create_private_stage, install_stage_in, open_or_create_root, remove_private_stage,
+        create_private_stage, install_stage_in, remove_private_stage,
     };
     use crate::VlmError;
     use bytes::Bytes;
@@ -1309,7 +1309,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_tmp_alias_is_opened_through_private_tmp() {
-        assert!(open_or_create_root(Path::new("/tmp")).is_ok());
+        assert!(super::open_or_create_root(Path::new("/tmp")).is_ok());
     }
 
     #[test]

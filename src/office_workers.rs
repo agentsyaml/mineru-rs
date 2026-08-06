@@ -990,7 +990,7 @@ enum ReapOutcome {
 }
 async fn kill_and_reap(
     mut child: tokio::process::Child,
-    process_group: Option<u32>,
+    #[cfg_attr(not(unix), allow(unused_variables))] process_group: Option<u32>,
     already_reaped: bool,
     mode: ReapMode,
 ) -> ReapOutcome {

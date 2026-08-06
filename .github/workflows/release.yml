@@ -232,7 +232,7 @@ jobs:
           python -c "import os,venv; venv.create(os.path.join(os.environ['RUNNER_TEMP'],'wheel-venv'),with_pip=True)"
           python -c "import glob,os,pathlib,subprocess; root=pathlib.Path(os.environ['RUNNER_TEMP'])/'wheel-venv'; py=root/('Scripts/python.exe' if os.name=='nt' else 'bin/python'); wheels=glob.glob(os.path.abspath('dist/*.whl')); assert len(wheels)==1,wheels; subprocess.check_call([str(py),'-m','pip','install',wheels[0]])"
           python -c "import os,pathlib,subprocess; root=pathlib.Path(os.environ['RUNNER_TEMP'])/'wheel-venv'; launcher=root/('Scripts/mineru.exe' if os.name=='nt' else 'bin/mineru'); subprocess.check_call([str(launcher),'--help'],cwd=os.environ['RUNNER_TEMP'])"
-          python -c "import os,pathlib,subprocess; root=pathlib.Path(os.environ['RUNNER_TEMP'])/'wheel-venv'; py=root/('Scripts/python.exe' if os.name=='nt' else 'bin/python'); subprocess.check_call([str(py),'-I','-c','import mineru_rs; assert mineru_rs.canonical_stem(\'a bad/pdf\') == \'a_bad_pdf\'; assert mineru_rs.validate_pdf_options(0, None, True, True, True)'],cwd=os.environ['RUNNER_TEMP']); subprocess.check_call([str(py),'-m','unittest','discover','-s',os.path.join(os.environ['GITHUB_WORKSPACE'],'bindings/python/tests'),'-p','test_*.py'],cwd=os.environ['RUNNER_TEMP'])"
+          python -c "import os,pathlib,subprocess; root=pathlib.Path(os.environ['RUNNER_TEMP'])/'wheel-venv'; py=root/('Scripts/python.exe' if os.name=='nt' else 'bin/python'); subprocess.check_call([str(py),'-I','-c','import mineru_rs; assert mineru_rs.canonical_stem(\'a bad/pdf\') == \'a bad_pdf\'; assert mineru_rs.validate_pdf_options(0, None, True, True, True)'],cwd=os.environ['RUNNER_TEMP']); subprocess.check_call([str(py),'-m','unittest','discover','-s',os.path.join(os.environ['GITHUB_WORKSPACE'],'bindings/python/tests'),'-p','test_*.py'],cwd=os.environ['RUNNER_TEMP'])"
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -346,7 +346,7 @@ jobs:
           MINERU_RUN_OFFICE_E2E: "1"
           MINERU_NODE_TEST_SOURCE: ${{ github.workspace }}/bindings/node/__test__/smoke.test.js
         run: |
-          node -e "const api=require('@alexsun-top/mineru');if(api.canonicalStem('a bad/pdf')!=='a_bad_pdf'||!api.validatePdfOptions(0,null,true,true,true))process.exit(1)"
+          node -e "const api=require('@alexsun-top/mineru');if(api.canonicalStem('a bad/pdf')!=='a bad_pdf'||!api.validatePdfOptions(0,null,true,true,true))process.exit(1)"
           node -e "const fs=require('fs'),Module=require('module'),path=require('path');const root=path.dirname(require.resolve('@alexsun-top/mineru/package.json'));const file=path.join(root,'__test__','smoke.test.js');const test=new Module(file);test.filename=file;test.paths=Module._nodeModulePaths(path.dirname(file));test._compile(fs.readFileSync(process.env.MINERU_NODE_TEST_SOURCE,'utf8'),file)"
       - name: Set up minimum Node runtime
         if: matrix.suffix == 'linux-x64-gnu'
