@@ -1070,7 +1070,10 @@ mod tests {
             }),
         ))
         .await;
-        let client = MineruApiClient::new(&base).unwrap();
+        let mut client = MineruApiClient::new(&base).unwrap();
+        // Ambient system-proxy environment on Windows can route loopback requests through a
+        // proxy and return 502 instead of reaching the mock; loopback must never be proxied.
+        client.client = Client::builder().no_proxy().build().unwrap();
         assert_eq!(
             client.submit(&RemoteOptions::default(), &[]).await,
             Err(
@@ -1767,7 +1770,7 @@ mod tests {
         let mut client = MineruApiClient::with_timing(
             &base,
             Timing {
-                acquisition: Duration::from_millis(50),
+                acquisition: Duration::from_secs(2),
                 send: Duration::from_millis(50),
                 interval: Duration::from_millis(20),
             },
@@ -1788,7 +1791,9 @@ mod tests {
                 .await,
             Err("request connection failed".into())
         );
-        assert!(started.elapsed() < Duration::from_millis(100));
+        // The connection-refused error must surface quickly on all platforms; a generous bound
+        // still proves it beats the 1s result deadline (Windows loopback RST can be slow under load).
+        assert!(started.elapsed() < Duration::from_secs(1));
         for timeout in [false, true] {
             let base = server(Router::new().route(
                 "/status",

@@ -56,6 +56,7 @@ pub fn run(command: &mut Command, name: &str, timeout: Duration, token: Option<&
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("cannot start {name}: {e}"));
+    #[cfg(unix)]
     let pid = child.id() as i32;
     let mut stderr = child.stderr.take().expect("piped stderr missing");
     let reader = thread::spawn(move || {

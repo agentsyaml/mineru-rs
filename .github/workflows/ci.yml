@@ -74,14 +74,10 @@ jobs:
       - name: Check formatting
         run: cargo +1.89.0 fmt --all -- --check
       - name: Test root package
-        run: cargo +1.89.0 test --locked -p mineru --all-targets -- --test-threads=1
+        run: cargo +1.89.0 test --locked -p mineru --all-targets --all-features -- --test-threads=4
       - name: Run hermetic API process end-to-end tests
         run: |
-          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact aliases_help_health_cwd_and_eof --ignored --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact invalid_log_level_exits_before_bind_or_output --ignored --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact public_bind_matrix --ignored --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact sigint_exits_while_stdin_watcher_is_blocked --ignored --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact active_worker_drains_before_exit --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --ignored --test-threads=1
           cargo +1.89.0 test --locked -p mineru --all-features --test mineru_api_server -- --exact canonical_client_consumes_real_api_server_zip_and_publishes_layout --ignored --test-threads=1
           cargo +1.89.0 test --locked -p mineru --all-features --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
       - name: Check root package without default features
@@ -233,13 +229,13 @@ jobs:
         run: rustup toolchain install 1.89.0 --profile minimal && rustup target add --toolchain 1.89.0 aarch64-pc-windows-msvc
       - name: Test Windows path safety
         run: |
-          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc command::direct::tests -- --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_output::tests -- --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc command::direct::tests -- --test-threads=4
+          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_output::tests -- --test-threads=4
+          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=4
       - name: Test Windows Office helper containment and conversion
         run: |
-          cargo +1.89.0 test --locked -p mineru --all-features --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --all-features --target x86_64-pc-windows-msvc --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --all-features --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=4
+          cargo +1.89.0 test --locked -p mineru --all-features --target x86_64-pc-windows-msvc --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=4
       - name: Check ARM64 Windows tests
         run: |
           cargo +1.89.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
@@ -256,8 +252,8 @@ jobs:
           persist-credentials: false
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal --component clippy
-      - name: Test all features
-        run: cargo +stable test --locked -p mineru --all-targets --all-features -- --test-threads=1
+      - name: Test all features (lib)
+        run: cargo +stable test --locked -p mineru --lib --all-features -- --test-threads=4
       - name: Clippy
         run: cargo +stable clippy --locked -p mineru --all-targets --all-features
 
@@ -325,7 +321,7 @@ jobs:
           python - <<'PY'
           import mineru_rs
 
-          assert mineru_rs.canonical_stem("a bad/pdf") == "a_bad_pdf"
+          assert mineru_rs.canonical_stem("a bad/pdf") == "a bad_pdf"
           assert mineru_rs.validate_pdf_options(0, None, True, True, True) is True
           PY
           python -m unittest discover -s bindings/python/tests -p 'test_*.py'

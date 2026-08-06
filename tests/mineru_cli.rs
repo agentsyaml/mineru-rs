@@ -76,6 +76,7 @@ struct Seen(Arc<Mutex<Vec<(String, Value, Option<String>)>>>);
 struct Mock {
     seen: Seen,
     layout: bool,
+    #[cfg_attr(not(unix), allow(dead_code))]
     mutate_output: Option<std::path::PathBuf>,
     fail_after: Option<usize>,
     active: Arc<AtomicUsize>,
