@@ -832,14 +832,14 @@ async fn raw_reply_allowance_counts_ignored_json_fields() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(
-        error,
+    match error {
         mineru::VlmError::LimitExceeded {
             resource: "response",
             limit: 128,
             ..
-        }
-    ));
+        } => {}
+        other => panic!("raw reply allowance: unexpected error: {other:?}"),
+    }
 }
 
 #[tokio::test]
