@@ -638,7 +638,14 @@ def validate_wheel(path: Path, version: str) -> str:
     windows = "win_" in platform
     helper = f"mineru_rs/mineru-office-convert{'.exe' if windows else ''}"
     package_files = {name for name in files if name.startswith("mineru_rs/")}
-    expected_package = {"mineru_rs/__init__.py", "mineru_rs/_cli.py", helper, *native}
+    expected_package = {
+        "mineru_rs/__init__.py",
+        "mineru_rs/__init__.pyi",
+        "mineru_rs/_cli.py",
+        "mineru_rs/_native.pyi",
+        helper,
+        *native,
+    }
     if len(native) != 1 or package_files != expected_package:
         fail(f"wheel mixed package payload differs in {path.name}: {sorted(package_files)}")
     dist_info = f"mineru_rs-{version}.dist-info"
@@ -1206,8 +1213,10 @@ def self_test(_: argparse.Namespace) -> None:
             dist = "mineru_rs-1.2.3.dist-info"
             contents = {
                 "mineru_rs/__init__.py": b"",
+                "mineru_rs/__init__.pyi": b"",
                 "mineru_rs/_cli.py": b"",
                 "mineru_rs/_native.abi3.so": b"native",
+                "mineru_rs/_native.pyi": b"",
                 "mineru_rs/mineru-office-convert": b"helper",
                 f"{dist}/METADATA": b"Name: mineru-rs\nVersion: 1.2.3\n",
                 f"{dist}/WHEEL": b"Wheel-Version: 1.0\nTag: cp39-abi3-macosx_11_0_arm64\n",

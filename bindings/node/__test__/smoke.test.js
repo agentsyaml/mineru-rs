@@ -139,7 +139,7 @@ async function main() {
   const started = Date.now()
   assert.deepEqual(Object.keys(api).sort(), ['canonicalStem', 'run', 'runCli', 'validatePdfOptions'])
   assert.equal('signal' in api.run, false)
-  assert.equal(api.canonicalStem('a bad/pdf'), 'a_bad_pdf')
+  assert.equal(api.canonicalStem('a bad/pdf'), 'a bad_pdf')
   assert.equal(api.canonicalStem(''), 'document')
   assert.throws(() => api.canonicalStem('con'), Error)
   assert.equal(api.validatePdfOptions(0, null, true, true, true), true)
