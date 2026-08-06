@@ -704,10 +704,14 @@ fn validate_asset(asset: &Asset, stem: &str) -> VlmResult<PathBuf> {
 /// Canonical portable output directory name shared by route preflight and publication.
 pub fn canonical_stem(value: &str) -> VlmResult<String> {
     let stem = crate::vlm_types::sanitize_stem(value);
+    // Windows silently strips trailing dots/spaces from names, which would let a
+    // published `foo.` directory alias `foo`; trim them so the stem is portable.
+    // Empty and dot-only stems collapse to the generic document name.
+    let stem = stem.trim_end_matches(['.', ' ']);
     let stem = if stem.is_empty() {
         "document".to_owned()
     } else {
-        stem
+        stem.to_owned()
     };
     if portable_name(&stem) && !windows_device_name(&stem) {
         Ok(stem)
@@ -728,10 +732,7 @@ fn portable_asset_path(path: &str) -> bool {
 fn portable_name(name: &str) -> bool {
     !name.is_empty()
         && !name.ends_with(['.', ' '])
-        && name.is_ascii()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-'))
+        && name.chars().all(crate::vlm_types::is_safe_stem_char)
         && !windows_device_name(name)
 }
 
@@ -1210,12 +1211,45 @@ fn check_stage_deadline(deadline: std::time::Instant) -> VlmResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OfficialOutputStage, OfficialOutputTarget, OutputTree, create_private_stage,
-        install_stage_in, open_or_create_root, remove_private_stage,
+        OfficialOutputStage, OfficialOutputTarget, OutputTree, canonical_stem,
+        create_private_stage, install_stage_in, open_or_create_root, remove_private_stage,
     };
     use crate::VlmError;
     use bytes::Bytes;
     use std::path::Path;
+
+    #[test]
+    fn canonical_stem_preserves_unicode_and_replaces_only_unsafe_chars() {
+        // Chinese plus CJK punctuation survives unchanged.
+        assert_eq!(
+            canonical_stem("文档《报告》·2026").unwrap(),
+            "文档《报告》·2026"
+        );
+        assert_eq!(
+            canonical_stem("日本語-フォルダ_名").unwrap(),
+            "日本語-フォルダ_名"
+        );
+        assert_eq!(canonical_stem("foo bar.pdf").unwrap(), "foo bar.pdf");
+        // Separators and Windows-reserved characters are replaced.
+        assert_eq!(canonical_stem("../office").unwrap(), ".._office");
+        assert_eq!(canonical_stem("a\\b/c?d").unwrap(), "a_b_c_d");
+        assert_eq!(canonical_stem("a\u{0}b\u{7f}c").unwrap(), "a_b_c");
+        // Trailing dots/spaces are trimmed; dot-only and empty stems fall back.
+        assert_eq!(canonical_stem("报告. ").unwrap(), "报告");
+        assert_eq!(canonical_stem("...").unwrap(), "document");
+        assert_eq!(canonical_stem("..").unwrap(), "document");
+        assert_eq!(canonical_stem(".").unwrap(), "document");
+        assert_eq!(canonical_stem("").unwrap(), "document");
+        // Windows device names stay rejected.
+        for device in ["CON", "com1", "nul.txt", "PRN", "lpt9"] {
+            assert!(canonical_stem(device).is_err(), "{device}");
+        }
+        // canonical_stem is idempotent for accepted stems (round-trip gate).
+        for stem in ["文档《报告》", "报告", ".._office", "a_b_c", "日本語"] {
+            let once = canonical_stem(stem).unwrap();
+            assert_eq!(canonical_stem(&once).unwrap(), once);
+        }
+    }
 
     #[cfg(windows)]
     #[test]

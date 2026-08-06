@@ -6,7 +6,7 @@
 
 ### Rust 扩展：官方形状输出
 
-`mineru-vlm --official-output` 是 Rust 专用的低层直接路由：它可接受 PDF 目录（递归处理），并写入 `<output>/<stem>/vlm` 的六个官方形状产物和预览。此模式下 `--base-url`、`--model` 可由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME` 或单模型发现补充；默认兼容模式仍要求两者。`--batch-size` 仅可与该开关一起使用，默认 `1`，只用于本地文档分组/进度，**不是** MinerU 的 64 页处理窗口。
+`mineru-vlm --official-output` 是 Rust 专用的低层直接路由：它可接受 PDF 目录（递归处理），并写入 `<output>/<stem>/vlm` 的六个官方形状产物和预览。此模式下 `--base-url`、`--model` 可由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME` 或单模型发现补充；默认兼容模式仍要求两者。`--batch-size` 仅可与该开关一起使用，省略时使用官方路由的编译默认值 32。它是每页真实的语义推理请求准入（推理批大小），**不是**输入文档分组，也**不是** MinerU 的 64 页处理窗口；页并发（`--page-concurrency`）与处理窗口（`--processing-window-size`）是相互独立的轴。
 
 兼容性基线、参考套件和可复现安装方式见 [compatibility.md](compatibility.md)。该声明仅覆盖 `vlm-http-client` 的 PDF 流程，不是完整 MinerU 3.4.4 兼容性声明。
 
@@ -132,11 +132,54 @@ export MINERU_VL_API_KEY="<your-key>"
 | `-u, --url <URL>` | 无 | 直接模式下的 VLM 服务地址覆盖；API 模式下的任务级模型服务器覆盖。 |
 | `-s, --start <n>` | `0` | 起始页，**从 0 开始**。 |
 | `-e, --end <n>` | 无（到末页） | 结束页，**包含该页**。 |
-| `-f, --formula <true\|false>` | `true` | 公式识别。 |
-| `-t, --table <true\|false>` | `true` | 表格识别。 |
-| `--image-analysis <true\|false>` | `true` | 图像分析。 |
+| `-f, --formula <true\|false>` | `true` | 公式识别。显式布尔值，优先级 `CLI > MINERU_FORMULA_ENABLE > 默认值`。 |
+| `-t, --table <true\|false>` | `true` | 表格识别。显式布尔值，优先级 `CLI > MINERU_TABLE_ENABLE > 默认值`。 |
+| `--image-analysis <true\|false>` | `true` | 图像分析。显式布尔值，优先级 `CLI > MINERU_IMAGE_ANALYSIS_ENABLE > 默认值`。 |
+| `--log-level <级别>` | `info` | 日志级别：`trace`、`debug`、`info`、`success`、`warning`、`error`、`critical`。覆盖 `MINERU_LOG_LEVEL`。 |
+| `--processing-window-size <n>` | `64` | 页处理窗口。覆盖 `MINERU_PROCESSING_WINDOW_SIZE`。 |
+| `--page-concurrency <n>` | `4` | 官方页准入并发（任意正整数；仍受窗口与 HTTP 并发下限约束）。覆盖 `MINERU_OFFICIAL_PAGE_CONCURRENCY`。 |
+| `--render-workers <n>` | `3` | 渲染 worker 数；实际值受可用并行度与所选页数约束，不再被 3 封顶。覆盖 `MINERU_PDF_RENDER_THREADS`。 |
+| `--render-timeout-seconds <n>` | `300` | 单次渲染超时。覆盖 `MINERU_PDF_RENDER_TIMEOUT`。 |
+| `--batch-size <n>` | `32` | 每页语义推理请求准入（推理批大小），区别于页并发与处理窗口。覆盖 `MINERU_BATCH_SIZE`。 |
+| `--total-deadline-seconds <n>` | `86400` | 单文档总 deadline。覆盖 `MINERU_TOTAL_DEADLINE_SECONDS`。 |
+| `--max-pdf-bytes <n>` | `536870912` | 常驻源 PDF 上限。覆盖 `MINERU_MAX_PDF_BYTES`。 |
+| `--max-pages <n>` | `10000` | 每文档最大选中页数。覆盖 `MINERU_MAX_PAGES`。 |
+| `--max-page-pixels <n>` | `100000000` | 单页像素上限。覆盖 `MINERU_MAX_PAGE_PIXELS`。 |
+| `--max-rendered-image-bytes <n>` | `67108864` | 单次渲染 RGB 上限。覆盖 `MINERU_MAX_RENDERED_IMAGE_BYTES`。 |
+| `--max-in-flight-image-bytes <n>` | `134217728` | 在途 RGB 预算。覆盖 `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`。 |
+| `--max-raw-output-bytes <n>` | `134217728` | 单文档原始输出预算。覆盖 `MINERU_MAX_RAW_OUTPUT_BYTES`。 |
+| `--max-layout-blocks-per-page <n>` | `256` | 单页版面块上限。覆盖 `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE`。 |
+| `--max-semantic-requests-per-page <n>` | `128` | 单页语义请求上限。覆盖 `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE`。 |
+| `--max-encoded-request-bytes <n>` | `16777216` | 编码请求上限。覆盖 `MINERU_MAX_ENCODED_REQUEST_BYTES`。 |
+| `--max-encoded-batch-bytes <n>` | `67108864` | 编码批上限。覆盖 `MINERU_MAX_ENCODED_BATCH_BYTES`。 |
+| `--max-total-asset-bytes <n>` | `1073741824` | 全部资产上限。覆盖 `MINERU_MAX_TOTAL_ASSET_BYTES`。 |
+| `--max-staged-text-bytes <n>` | `268435456` | 暂存文本上限。覆盖 `MINERU_MAX_STAGED_TEXT_BYTES`。 |
+
+所有数值 flag 均为严格解析：非法、非有限、不应为零却为零、溢出或平台不可表示的值会在任何网络/输出工作前失败。每个旋钮的优先级均为 `CLI > 环境变量 > 编译默认值`。
+
+VLM 传输旋钮（每个都有对应的环境拼写）：
+
+| Flag | 默认值 | 覆盖 |
+| --- | ---: | --- |
+| `--http-max-concurrency <n>` | `100` | `MINERU_VLM_HTTP_CONCURRENCY` |
+| `--http-timeout-seconds <n>` | `600` | `MINERU_VLM_HTTP_TIMEOUT` |
+| `--connect-timeout-seconds <n>` | `10` | `MINERU_VLM_CONNECT_TIMEOUT` |
+| `--http-max-keepalive-connections <n>` | `20` | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` |
+| `--http-keepalive-expiry-seconds <n>` | `5` | `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` |
+| `--http-max-retries <n>` | `3` | `MINERU_VLM_HTTP_MAX_RETRIES` |
+| `--http-retry-backoff-factor <f>` | `0.5` | `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` |
+| `--max-remote-image-bytes <n>` | `33554432` | `MINERU_VLM_MAX_IMAGE_BYTES` |
+| `--max-decoded-pixels <n>` | `100000000` | `MINERU_VLM_MAX_DECODED_PIXELS` |
+| `--max-images-per-request <n>` | `64` | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` |
+| `--max-redirects <n>` | `3` | `MINERU_VLM_MAX_REDIRECTS` |
+| `--http-max-response-bytes <n>` | `10485760` | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` |
+| `--vlm-debug <true\|false>` | `false` | 在 VLM 请求体中发送 `vllm_xargs.debug`。覆盖 `MINERU_VL_DEBUG_ENABLE`。 |
+
+诊断/人类输出截断上限保持编译固定、不可配置。现有 `--max-input-bytes`、`--max-encoded-document-bytes`、`--max-output-bytes` 三组不变。
 
 直接模式下 `--method`、`--effort`、`--lang` 的非默认值会产生警告并被忽略。`--client-side-output-generation=true` 在 API 模式下会被拒绝。
+
+API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--processing-window-size`、`--render-*`、`--batch-size`、全部 `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--vlm-debug` 及其环境拼写）会显式报错，因为远程服务器执行解析、这些配置不会有任何消费者；`MINERU_VL_SERVER` 在未传 `--url` 时作为任务级 `server_url` 提交。
 
 ---
 
@@ -194,30 +237,90 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `--host <IP>` | `127.0.0.1` | 监听地址。非 loopback 地址需同时设置 `MINERU_API_PUBLIC_BIND_EXPOSED`，否则启动失败。 |
 | `--port <端口>` | `8000` | 监听端口。 |
 | `--output-root <目录>` | `./output` | 任务输出与临时文件根目录。 |
-| `--concurrency <n>` | 非 macOS `3`，macOS `1` | 同时处理的任务数。 |
+| `--concurrency <n>` | `3` | 同时处理的任务数。 |
 | `--shutdown-on-stdin-eof` | 关闭 | stdin 关闭时优雅退出，适合由父进程托管。 |
 
-`--output-root`、`--concurrency`、`--shutdown-on-stdin-eof` 覆盖对应环境变量；省略时保留环境变量值或上表默认值。显式传入 `--concurrency` 时 macOS 也不再强制为 1。
+`--output-root`、`--concurrency`、`--shutdown-on-stdin-eof` 覆盖对应环境变量；省略时保留环境变量值或上表默认值。所有平台均接受显式值，不再有 macOS 并发下限。
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `MINERU_API_OUTPUT_ROOT` | `./output` | 输出根目录。 |
-| `MINERU_API_MAX_CONCURRENT_REQUESTS` | 非 macOS `3`，macOS `1` | 并发任务数；非正值或非法值直接启动失败。 |
+| `MINERU_API_MAX_CONCURRENT_REQUESTS` | `3` | 并发任务数；非正值或非法值直接启动失败。 |
 | `MINERU_API_TASK_RETENTION_SECONDS` | `86400` | 终态任务记录保留时长。 |
 | `MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS` | `300` | 清理扫描间隔。 |
 | `MINERU_API_PUBLIC_BIND_EXPOSED` | 关闭 | 允许监听非 loopback 地址。 |
 | `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` | 关闭 | 公开监听时允许处理 POST 解析请求。 |
 | `MINERU_API_SHUTDOWN_ON_STDIN_EOF` | 关闭 | 等价于 `--shutdown-on-stdin-eof`。 |
+| `MINERU_API_RECORD_CAP` | `32` | 并发任务记录上限。 |
+| `MINERU_API_FILE_CAP` | `536870912` | 单文件上传字节上限。 |
+| `MINERU_API_BODY_CAP` | `537001984` | multipart 请求体字节上限。 |
+| `MINERU_API_TEXT_CAP` | `65536` | 单个表单文本字段字节上限。 |
+| `MINERU_API_TEXT_TOTAL_CAP` | `262144` | 表单文本合计字节上限。 |
+| `MINERU_API_FORM_FIELDS_CAP` | `32` | multipart 表单字段数量上限。 |
+| `MINERU_OFFICE_INPUT_BYTES` | `33554432` | Office 辅助进程输入字节上限（子进程环境）。 |
+| `MINERU_OFFICE_OUTPUT_BYTES` | `67108864` | Office 辅助进程输出 PDF 字节上限。 |
+| `MINERU_OFFICE_STDERR_BYTES` | `4096` | Office 辅助进程 stderr 诊断上限。 |
+| `MINERU_OFFICE_WALL_SECONDS` | `180` | Office 辅助进程托管 wall 时间上限。 |
+| `MINERU_OFFICE_CPU_SECONDS` | `120` | Office 辅助进程 CPU 秒数 rlimit。 |
+| `MINERU_OFFICE_NOFILE` | `256` | Office 辅助进程 NOFILE rlimit。 |
+| `MINERU_OFFICE_ADDRESS_SPACE_BYTES` | `1073741824` | Office 辅助进程地址空间 rlimit（Linux）。 |
+| `MINERU_OFFICE_ACTIVE_PROCESS_LIMIT` | `8` | Office 辅助进程 Windows 作业活动进程上限。 |
+| `MINERU_OFFICE_PROCESS_MEMORY_BYTES` | `1073741824` | Office 辅助进程 Windows 单进程内存上限。 |
+| `MINERU_OFFICE_JOB_MEMORY_BYTES` | `1073741824` | Office 辅助进程 Windows 作业内存上限。 |
+| `MINERU_OFFICE_PROCESS_TIME_SECONDS` | `120` | Office 辅助进程 Windows 单进程用户时间。 |
+| `MINERU_OFFICE_JOB_TIME_SECONDS` | `120` | Office 辅助进程 Windows 作业用户时间。 |
+| `MINERU_OOXML_ARCHIVE_BYTES` | `536870912` | OOXML 预检归档字节上限。 |
+| `MINERU_OOXML_EXPANDED_BYTES` | `268435456` | OOXML 预检解压字节上限。 |
+| `MINERU_OOXML_XML_ENTRY_BYTES` | `8388608` | OOXML 单个 XML 条目字节上限。 |
+| `MINERU_OOXML_XML_TOTAL_BYTES` | `33554432` | OOXML XML 合计字节上限。 |
+| `MINERU_OOXML_RATIO` | `500` | OOXML 条目压缩比上限。 |
+| `MINERU_OOXML_XML_DEPTH` | `128` | OOXML XML 深度上限。 |
+| `MINERU_OOXML_XML_EVENTS` | `100000` | OOXML XML 事件数上限。 |
+| `MINERU_OOXML_XML_ATTRIBUTES` | `256` | OOXML 单元素属性数上限。 |
+| `MINERU_OOXML_XML_NAMESPACES` | `256` | OOXML 单元素命名空间数上限。 |
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | 官方直接路由页并发；整数范围 1 到 8（`2` 为低内存回退值）。 |
 | `MINERU_PDF_RENDER_THREADS` | `3` | 渲染 worker 数。 |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
-| `MINERU_FORMULA_ENABLE` | 开启 | 公式识别默认值。 |
-| `MINERU_TABLE_ENABLE` | 开启 | 表格识别默认值。 |
+| `MINERU_FORMULA_ENABLE` | 开启 | 公式识别默认值（严格 `true`/`false`，不区分大小写）。 |
+| `MINERU_TABLE_ENABLE` | 开启 | 表格识别默认值（严格 `true`/`false`）。 |
+| `MINERU_IMAGE_ANALYSIS_ENABLE` | 开启 | 图像分析默认值（严格 `true`/`false`）。 |
+| `MINERU_LOG_LEVEL` | `info` | 日志级别；`critical` 静默进度输出。 |
+| `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
+| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | 官方页准入并发（任意正整数）。 |
+| `MINERU_PDF_RENDER_THREADS` | `3` | 渲染 worker 数。 |
+| `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
+| `MINERU_BATCH_SIZE` | `32` | 每页语义推理请求准入。 |
+| `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | 单文档总 deadline。 |
+| `MINERU_MAX_PDF_BYTES` | `536870912` | 常驻源 PDF 上限。 |
+| `MINERU_MAX_PAGES` | `10000` | 每文档最大选中页数。 |
+| `MINERU_MAX_PAGE_PIXELS` | `100000000` | 单页像素上限。 |
+| `MINERU_MAX_RENDERED_IMAGE_BYTES` | `67108864` | 单次渲染 RGB 上限。 |
+| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `134217728` | 在途 RGB 预算。 |
+| `MINERU_MAX_RAW_OUTPUT_BYTES` | `134217728` | 单文档原始输出预算。 |
+| `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE` | `256` | 单页版面块上限。 |
+| `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE` | `128` | 单页语义请求上限。 |
+| `MINERU_MAX_ENCODED_REQUEST_BYTES` | `16777216` | 编码请求上限。 |
+| `MINERU_MAX_ENCODED_BATCH_BYTES` | `67108864` | 编码批上限。 |
+| `MINERU_MAX_TOTAL_ASSET_BYTES` | `1073741824` | 全部资产上限。 |
+| `MINERU_MAX_STAGED_TEXT_BYTES` | `268435456` | 暂存文本上限。 |
+| `MINERU_VLM_HTTP_CONCURRENCY` | `100` | VLM HTTP 并发。 |
+| `MINERU_VLM_HTTP_TIMEOUT` | `600` | VLM HTTP 请求超时秒数。 |
+| `MINERU_VLM_CONNECT_TIMEOUT` | `10` | 连接超时秒数。 |
+| `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` | `20` | keepalive 连接池大小。 |
+| `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` | `5` | keepalive 过期秒数。 |
+| `MINERU_VLM_HTTP_MAX_RETRIES` | `3` | HTTP 重试次数。 |
+| `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` | `0.5` | 重试退避因子。 |
+| `MINERU_VLM_MAX_IMAGE_BYTES` | `33554432` | 远程图像字节上限。 |
+| `MINERU_VLM_MAX_DECODED_PIXELS` | `100000000` | 解码像素上限。 |
+| `MINERU_VLM_MAX_IMAGES_PER_REQUEST` | `64` | 每请求图像数上限。 |
+| `MINERU_VLM_MAX_REDIRECTS` | `3` | 重定向上限。 |
+| `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP 响应上限。 |
+| `MINERU_VL_DEBUG_ENABLE` | 关闭 | VLM 请求调试标记（严格 `true`/`false`）。 |
 
-布尔变量接受 `1`、`true`、`yes`、`on`（不区分大小写），其他值视为关闭。除并发外的非法数值会回落到默认值。
+对规范 CLI，每个数值与布尔变量均为严格解析：布尔只接受不区分大小写的 `true`/`false`（`1`、`yes`、`on` 会报错，不再静默视为关闭）；数值的非法、非有限、不应为零却为零、溢出或平台不可表示的值会在任何网络/输出工作前失败，不再回落到默认值。（服务启动路径在服务车道落地前保留旧的回落行为；其并发配置对非正值仍然启动失败。）
 
 ### HTTP 接口
 
@@ -330,9 +433,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 文档大小控制
 
-`--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`、`--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES` 和 `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` 接受无符号十进制字节数（允许空白和 `_`）。优先级为 CLI、环境变量、编译默认值：输入 4_293_918_719 字节、编码文档 8 GiB、输出 8 GiB。显式的非法、零或超过硬上限值会失败；硬上限依次为 16 GiB、64 GiB、16 GiB。
+`--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`、`--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES` 和 `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` 接受无符号十进制字节数（允许空白和 `_`）。优先级为 CLI、环境变量、编译默认值：输入 4_293_918_719 字节、编码文档 8 GiB、输出 8 GiB。显式的非法、零、溢出或平台不可表示值会失败；不再存在任意硬上限——配置值本身作为策略使用，而不会被夹紧到另一个常数。
 
-这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过 512 MiB 的源 PDF，单个 VLM 响应仍限制为 10 MiB。编码策略应在 `mineru-vlm-api` 配置；规范远程模式会拒绝编码覆盖项。普通遗留 `mineru-vlm` 保持常驻解析器限制，编码文档覆盖项需要 `--official-output`。
+这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过常驻上限（`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`，默认 512 MiB）的源 PDF，单个 VLM 响应仍限制为 10 MiB（`--http-max-response-bytes`）。编码策略应在 `mineru-vlm-api` 配置；规范远程模式会拒绝编码覆盖项。普通遗留 `mineru-vlm` 保持常驻解析器限制，编码文档覆盖项需要 `--official-output`。
 
 | 项目 | 默认值 |
 | --- | ---: |
@@ -340,8 +443,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | 单页像素 / 渲染 RGB 图像 | 100,000,000 / 64 MiB |
 | 响应体 / 全部资产 | 10 MiB / 1 GiB |
 | 单页版面块数 / 页窗口 | 256 / 64 页 |
+| 单页语义请求数 / 推理批 | 128 / 32 |
 | 同时在途渲染图像 | 128 MiB |
-| 请求并发 / 渲染 worker | 100 / 3（渲染实际最多 3） |
+| 请求并发 / 渲染 worker | 100 / 3（worker 还受 CPU 与所选页数约束，不再封顶 3） |
+| 官方页准入并发 | 4（无固定上限） |
 | 连接 / 单请求 / 总解析超时 | 10 秒 / 600 秒 / 24 小时 |
 
 ### 默认值来源与容量

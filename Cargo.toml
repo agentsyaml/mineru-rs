@@ -107,8 +107,18 @@ members = [".", "bindings/python", "bindings/node"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/agentsyaml/mineru-rs"
+
+# Dev-experience: dependencies rarely recompile, so optimize them even in dev
+# builds (one-time cost, cached), and lightly optimize the test profile so the
+# large suite (669+ tests) runs faster. Release profile intentionally untouched:
+# the release pipeline owns its exact artifact contract.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.test]
+opt-level = 1

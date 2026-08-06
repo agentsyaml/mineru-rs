@@ -20,7 +20,6 @@ struct SemanticCandidate {
     absorbed: Vec<ContentBlock>,
 }
 
-#[allow(dead_code)]
 fn official_snapshot_block(block: VlmLayoutBlock) -> VlmResult<ModelBlock> {
     if block.block_type.is_empty() {
         return Err(protocol(
@@ -782,8 +781,9 @@ impl MinerUVlmPreprocessor {
     }
 }
 
-// ponytail: public APIs keep this memory-bounded compatibility default; commands
-// may use a bounded route-specific semaphore.
+// Finite compatibility default for the client-created official page semaphore. This is a
+// default, not a clamp: commands pass their own resolved `OfficialPageConcurrency`, and
+// `MINERU_OFFICIAL_PAGE_CONCURRENCY`/`--page-concurrency` accept any positive value.
 const OFFICIAL_PAGE_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone)]
@@ -1310,10 +1310,17 @@ impl MinerUVlmClient {
         config: MinerUVlmConfig,
         task_work_lease: TaskWorkLease,
     ) -> VlmResult<Self> {
-        let official_page_semaphore = Arc::new(Semaphore::new(
-            http.max_concurrency.clamp(1, OFFICIAL_PAGE_CONCURRENCY),
-        ));
-        let layout_semaphore = Arc::new(Semaphore::new(http.max_concurrency.max(1)));
+        // The tokio semaphore capacity is a legitimate representability bound. An impossible
+        // public `max_concurrency` (zero, or above capacity) fails instead of being silently
+        // min-clamped or dead-locking on a zero-permit semaphore.
+        if http.max_concurrency == 0 || http.max_concurrency > Semaphore::MAX_PERMITS {
+            return Err(VlmError::InvalidConfig(
+                "max_concurrency must be greater than zero and at most the tokio semaphore capacity"
+                    .into(),
+            ));
+        }
+        let official_page_semaphore = Arc::new(Semaphore::new(OFFICIAL_PAGE_CONCURRENCY));
+        let layout_semaphore = Arc::new(Semaphore::new(http.max_concurrency));
         Ok(Self {
             http: VlmHttpClient::connect_for_task(http, task_work_lease).await?,
             preprocessor: MinerUVlmPreprocessor { config },
@@ -1329,6 +1336,9 @@ impl MinerUVlmClient {
     }
     pub(crate) fn task_work_lease(&self) -> TaskWorkLease {
         self.http.task_work_lease()
+    }
+    pub(crate) fn official_response_cap(&self) -> usize {
+        self.http.official_response_cap()
     }
     pub(crate) fn official_page_concurrency(
         &self,
@@ -2170,6 +2180,31 @@ mod tests {
 
     async fn window_client(state: WindowState) -> MinerUVlmClient {
         window_client_with_concurrency(state, 2).await
+    }
+
+    async fn window_client_with_layout(state: WindowState, layout: (u32, u32)) -> MinerUVlmClient {
+        let app = Router::new()
+            .route("/v1/chat/completions", post(window_chat))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 2,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                layout_image_size: layout,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
     }
 
     async fn window_client_with_concurrency(
@@ -3966,7 +4001,7 @@ mod tests {
     async fn snapshot_window_shares_encoded_budget_and_keeps_exact_local_caps() {
         let state = window_state();
         state.layouts.store(2, Ordering::SeqCst); // no admission hold in this limit test
-        let client = window_client(state).await;
+        let client = window_client(state.clone()).await;
         let image = Arc::new(RgbImage::from_pixel(8, 8, image::Rgb([7, 0, 0])));
         let layout_bytes = client
             .preprocessor
@@ -3976,6 +4011,7 @@ mod tests {
             .data
             .len();
         let pages = vec![Arc::clone(&image), Arc::clone(&image)];
+        // 1. A page whose layout image alone exceeds the encoded-request cap is rejected.
         assert!(matches!(
             client
                 .official_two_step_snapshot_window(
@@ -3998,6 +4034,41 @@ mod tests {
                 ..
             })
         ));
+        // 2. An encoded semantic candidate exceeding the per-request cap is rejected too. A tiny
+        //    layout image keeps the layout bytes below the candidate's encoded bytes, so this page
+        //    reaches the semantic request check and fails on the candidate, not the layout.
+        let tiny = window_client_with_layout(state.clone(), (11, 10)).await;
+        let tiny_layout = tiny
+            .preprocessor
+            .prepare_rgb_for_layout_capped(&image, u64::MAX)
+            .unwrap()
+            .image
+            .data
+            .len();
+        assert!(matches!(
+            tiny.official_two_step_snapshot_window(
+                pages.iter().map(Arc::clone).collect(),
+                false,
+                true,
+                true,
+                4,
+                2,
+                2,
+                tiny_layout,
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                Instant::now() + Duration::from_secs(2)
+            )
+            .await,
+            Err(VlmError::LimitExceeded {
+                resource: "encoded request bytes",
+                ..
+            })
+        ));
+        // 3. A batch cap below the request cap is a configuration error (guard), never silently
+        //    accepted: admission is gated on `batch - request` and candidate bytes never exceed
+        //    the request cap, so the guard is the batch policy's only reachable rejection.
         assert!(matches!(
             client
                 .official_two_step_snapshot_window(
@@ -4015,11 +4086,9 @@ mod tests {
                     Instant::now() + Duration::from_secs(2)
                 )
                 .await,
-            Err(VlmError::LimitExceeded {
-                resource: "encoded batch bytes",
-                ..
-            })
+            Err(VlmError::InvalidConfig { .. })
         ));
+        // 4. The shared encoded document budget is charged across the window.
         assert!(matches!(
             client
                 .official_two_step_snapshot_window(

@@ -113,6 +113,22 @@ pub struct ClientConfig {
 }
 impl ClientConfig {
     pub fn new(base_url: impl AsRef<str>, model: impl Into<String>) -> Result<Self> {
+        let config = Self::new_with_resolution(base_url, model, |_| None)?;
+        Ok(config)
+    }
+
+    /// Creates a config honoring the canonical runtime environment spellings for the legacy
+    /// `Limits`/`Timeouts` (the same env names the canonical route resolves). Values follow the
+    /// strict default -> frozen environment -> explicit CLI precedence of the core seam.
+    pub fn from_env(base_url: impl AsRef<str>, model: impl Into<String>) -> Result<Self> {
+        Self::new_with_resolution(base_url, model, |name| std::env::var_os(name))
+    }
+
+    fn new_with_resolution(
+        base_url: impl AsRef<str>,
+        model: impl Into<String>,
+        env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Self> {
         let mut base_url = Url::parse(base_url.as_ref())
             .map_err(|e| Error::InvalidConfig(format!("invalid base URL: {e}")))?;
         if !matches!(base_url.scheme(), "http" | "https")
@@ -132,18 +148,22 @@ impl ClientConfig {
         if model.is_empty() {
             return Err(Error::InvalidConfig("model is required".into()));
         }
+        let overrides = crate::command::env::parse_core_overrides(&env)
+            .map_err(|error| Error::InvalidConfig(error))?;
+        let (limits, timeouts) = crate::config::resolve_legacy_policy(&overrides);
         let config = Self {
             base_url,
             model,
             bearer_token: None,
-            limits: Limits::default(),
-            timeouts: Timeouts::default(),
-            request_concurrency: 100,
-            render_workers: 3,
+            limits,
+            timeouts,
+            request_concurrency: overrides.http_max_concurrency.unwrap_or(100),
+            render_workers: overrides.render_workers.unwrap_or(3),
         };
         config.validate()?;
         Ok(config)
     }
+
     pub fn validate(&self) -> Result<()> {
         self.limits.validate()?;
         self.timeouts.validate()?;
@@ -154,6 +174,48 @@ impl ClientConfig {
         }
         Ok(())
     }
+}
+
+/// Maps the resolved core policy onto the legacy `Limits`/`Timeouts` shapes without duplicating
+/// arbitrary maxima. Every field follows the same env spelling used by the canonical route.
+pub(crate) fn resolve_legacy_policy(
+    overrides: &crate::command::env::CoreOverrides,
+) -> (Limits, Timeouts) {
+    let defaults = Limits::default();
+    let timeout_defaults = Timeouts::default();
+    let limits = Limits {
+        max_pdf_bytes: overrides.max_pdf_bytes.unwrap_or(defaults.max_pdf_bytes),
+        max_total_asset_bytes: overrides
+            .max_total_asset_bytes
+            .unwrap_or(defaults.max_total_asset_bytes),
+        max_pages: overrides.max_pages.unwrap_or(defaults.max_pages),
+        max_page_pixels: overrides
+            .max_page_pixels
+            .unwrap_or(defaults.max_page_pixels),
+        max_response_bytes: overrides
+            .http_max_response_bytes
+            .unwrap_or(defaults.max_response_bytes),
+        max_rendered_image_bytes: overrides
+            .max_rendered_image_bytes
+            .unwrap_or(defaults.max_rendered_image_bytes),
+        max_in_flight_image_bytes: overrides
+            .max_in_flight_image_bytes
+            .unwrap_or(defaults.max_in_flight_image_bytes),
+        max_blocks_per_page: overrides
+            .max_layout_blocks_per_page
+            .unwrap_or(defaults.max_blocks_per_page),
+        page_window_size: overrides
+            .processing_window_size
+            .unwrap_or(defaults.page_window_size),
+    };
+    let timeouts = Timeouts {
+        connect: overrides
+            .connect_timeout
+            .unwrap_or(timeout_defaults.connect),
+        request: overrides.http_timeout.unwrap_or(timeout_defaults.request),
+        total: overrides.total_deadline.unwrap_or(timeout_defaults.total),
+    };
+    (limits, timeouts)
 }
 
 #[cfg(test)]

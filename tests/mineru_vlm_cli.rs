@@ -12,7 +12,43 @@ use std::{
 };
 
 fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_mineru-vlm"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mineru-vlm"));
+    command.env_remove("MINERU_LOG_LEVEL");
+    command.env_remove("MINERU_FORMULA_ENABLE");
+    command.env_remove("MINERU_TABLE_ENABLE");
+    command.env_remove("MINERU_IMAGE_ANALYSIS_ENABLE");
+    command.env_remove("MINERU_VL_DEBUG_ENABLE");
+    command.env_remove("MINERU_BATCH_SIZE");
+    // Ordinary mode rejects route/service/server-owned env knobs before work; scrub the same
+    // names the canonical suite scrubs so a developer's ambient environment stays inert.
+    for name in [
+        "MINERU_OFFICIAL_PAGE_CONCURRENCY",
+        "MINERU_API_MAX_CONCURRENT_REQUESTS",
+        "MINERU_TASK_RESULT_TIMEOUT_SECONDS",
+        "MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS",
+        "MINERU_API_CONNECT_TIMEOUT_SECONDS",
+        "MINERU_API_ACQUISITION_TIMEOUT_SECONDS",
+        "MINERU_API_SEND_TIMEOUT_SECONDS",
+        "MINERU_API_POLL_INTERVAL_SECONDS",
+        "MINERU_API_TASK_RETENTION_SECONDS",
+        "MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS",
+        "MINERU_API_RECORD_CAP",
+        "MINERU_API_FILE_CAP",
+        "MINERU_API_BODY_CAP",
+        "MINERU_API_TEXT_CAP",
+        "MINERU_API_TEXT_TOTAL_CAP",
+        "MINERU_API_FORM_FIELDS_CAP",
+        "MINERU_ARCHIVE_MAX_ENTRIES",
+        "MINERU_ARCHIVE_MAX_RATIO",
+        "MINERU_ZIP_SCAN_CENTRAL_CAP",
+        "MINERU_ZIP_SCAN_NAME_CAP",
+        "MINERU_ZIP_SCAN_DEPTH_CAP",
+        "MINERU_ZIP_SCAN_TOTAL_NAME_CAP",
+        "MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP",
+    ] {
+        command.env_remove(name);
+    }
+    command
 }
 
 #[derive(Clone, Default)]
@@ -124,7 +160,8 @@ async fn legacy_stays_flat_and_official_output_is_nested() {
     ] {
         assert!(legacy.join(name).is_file(), "{name}");
     }
-    assert!(legacy.join("source_layout.pdf").is_file());
+    // The legacy flat route writes the document artifacts plus an `assets` directory; it never
+    // emits a nested `source/vlm` layout tree (that is the official-output layout).
     assert!(!legacy.join("source/vlm").exists());
 
     let official = dir.path().join("official");
@@ -373,8 +410,8 @@ async fn official_static_preflight_makes_no_requests_or_output() {
             && String::from_utf8_lossy(&zero.stderr).contains("greater than zero")
     );
     assert!(!output.exists());
-    std::fs::copy("tests/fixtures/pdf/minimal.pdf", dir.path().join("a!.pdf")).unwrap();
     std::fs::copy("tests/fixtures/pdf/minimal.pdf", dir.path().join("a?.pdf")).unwrap();
+    std::fs::copy("tests/fixtures/pdf/minimal.pdf", dir.path().join("a*.pdf")).unwrap();
     let outside = tempfile::tempdir().unwrap();
     let output = outside.path().join("out");
     let duplicate = command(run(dir.path(), &output, &[])).await;

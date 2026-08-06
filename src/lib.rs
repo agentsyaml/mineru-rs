@@ -13,7 +13,8 @@ pub mod input_prepare;
 mod layout;
 mod markdown;
 mod middle_json;
-mod mineru_api;
+#[doc(hidden)]
+pub mod mineru_api;
 mod office_workers;
 mod official_builders;
 mod official_output;
@@ -47,11 +48,11 @@ pub use input_prepare::DocumentKind;
 #[doc(hidden)]
 pub use input_prepare::RasterWorkers;
 #[doc(hidden)]
-pub use mineru_api::ooxml::preflight_ooxml_bytes;
+pub use mineru_api::ooxml::preflight_ooxml_bytes_with;
 #[doc(hidden)]
 pub use mineru_api::{
     RemoteApiDocument, RemoteApiEnv, RemoteApiFailure, RemoteApiOptions, normalize_remote_language,
-    parse_remote_api_env, selected_document_pages,
+    selected_document_pages,
 };
 #[doc(hidden)]
 pub use office_workers::{OfficeConvertError, OfficeWorkers};

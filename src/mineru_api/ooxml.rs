@@ -8,26 +8,26 @@ use quick_xml::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
     io::{Cursor, Read},
-    path::Path,
 };
+#[cfg(test)]
+use std::{fs::File, path::Path};
 use zip::{
     ZipArchive,
     read::{ArchiveOffset, Config},
 };
 
-const ARCHIVE_CAP: u64 = 512 * 1024 * 1024;
-/// Maximum uncompressed package size accepted by the OOXML preflight.
-const MAX_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
-/// Maximum bytes in one XML part accepted by the OOXML preflight.
+#[cfg(test)]
 const MAX_XML_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
-/// Maximum XML bytes retained and parsed across one OOXML package.
-const MAX_XML_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+#[cfg(test)]
 const MAX_XML_DEPTH: usize = 128;
+#[cfg(test)]
 const MAX_XML_EVENTS: usize = 100_000;
+#[cfg(test)]
 const MAX_XML_ATTRIBUTES: usize = 256;
+#[cfg(test)]
 const MAX_XML_NAMESPACES: usize = 256;
+#[cfg(test)]
 const RATIO_CAP: u64 = 500;
 const RELS: &str = "_rels/.rels";
 const TYPES: &str = "[Content_Types].xml";
@@ -36,23 +36,23 @@ const TYPE_NS: &[u8] = b"http://schemas.openxmlformats.org/package/2006/content-
 const OFFICE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 
-pub(super) fn detect(path: &Path) -> Result<Option<&'static str>, String> {
-    detect_with(path, Limits::default())
-}
-
 /// Detect an OOXML package from the exact bounded bytes that will be consumed.
-pub(crate) fn detect_bytes(bytes: &[u8]) -> Result<Option<&'static str>, String> {
+pub(crate) fn detect_bytes_with_limits(
+    bytes: &[u8],
+    ooxml: crate::command::service::OoxmlLimits,
+) -> Result<Option<&'static str>, String> {
     // The legacy detector is a classifier; callers still receive no office kind on rejection.
-    Ok(preflight_ooxml_bytes(bytes).unwrap_or(None))
+    Ok(preflight_ooxml_bytes_with(bytes, ooxml).unwrap_or(None))
 }
 
-/// Preflights exact OOXML archive bytes before they are passed to an office converter.
-///
-/// `Ok(Some(..))` is the detected `"docx"`, `"pptx"`, or `"xlsx"` kind;
-/// `Ok(None)` is a non-OOXML input; errors are bounded preflight rejections.
+/// Preflights with the resolved operator policy (the office helper reads it once at startup).
 #[doc(hidden)]
-pub fn preflight_ooxml_bytes(bytes: &[u8]) -> Result<Option<&'static str>, String> {
-    detect_reader(Cursor::new(bytes), bytes.len() as u64, Limits::default())
+pub fn preflight_ooxml_bytes_with(
+    bytes: &[u8],
+    ooxml: crate::command::service::OoxmlLimits,
+) -> Result<Option<&'static str>, String> {
+    let limits = Limits::from_resolved(ooxml)?;
+    detect_reader(Cursor::new(bytes), bytes.len() as u64, limits)
 }
 
 #[derive(Clone, Copy)]
@@ -62,25 +62,39 @@ struct Limits {
     xml: u64,
     ratio: u64,
     xml_total: u64,
+    xml_depth: usize,
+    xml_events: usize,
+    xml_attributes: usize,
+    xml_namespaces: usize,
     scan: ScanLimits,
 }
+#[cfg(test)]
 impl Default for Limits {
     fn default() -> Self {
-        Self {
-            archive: ARCHIVE_CAP,
-            total: MAX_EXPANDED_BYTES,
-            xml: MAX_XML_ENTRY_BYTES,
-            ratio: RATIO_CAP,
-            xml_total: MAX_XML_TOTAL_BYTES,
-            scan: ScanLimits::production(10_000),
-        }
+        Self::from_resolved(crate::command::service::OoxmlLimits::default_resolved())
+            .expect("compiled OOXML defaults are valid")
+    }
+}
+impl Limits {
+    fn from_resolved(ooxml: crate::command::service::OoxmlLimits) -> Result<Self, String> {
+        let ooxml = ooxml.validate()?;
+        Ok(Self {
+            archive: ooxml.archive_bytes,
+            total: ooxml.expanded_bytes,
+            xml: ooxml.xml_entry_bytes,
+            ratio: ooxml.ratio,
+            xml_total: ooxml.xml_total_bytes,
+            xml_depth: ooxml.xml_depth,
+            xml_events: ooxml.xml_events,
+            xml_attributes: ooxml.xml_attributes,
+            xml_namespaces: ooxml.xml_namespaces,
+            scan: ooxml.scan,
+        })
     }
 }
 
+#[cfg(test)]
 fn detect_with(path: &Path, limits: Limits) -> Result<Option<&'static str>, String> {
-    if limits.archive == 0 || limits.total == 0 || limits.xml == 0 || limits.ratio == 0 {
-        return Err("OOXML limits are invalid".into());
-    }
     let file = match File::open(path) {
         Ok(file) => file,
         Err(_) => return Ok(None),
@@ -163,7 +177,7 @@ fn detect_reader<R: Read + std::io::Seek>(
         }
         let bytes = read_entry(&mut entry, declared, named_xml, limits, &mut xml_total)?;
         if let Some(bytes) = bytes {
-            validate_xml(&bytes).map_err(|_| "OOXML XML is unsafe or malformed")?;
+            validate_xml(&bytes, &limits).map_err(|_| "OOXML XML is unsafe or malformed")?;
             validated_xml.insert(name.clone());
             if name.as_bytes().ends_with(b".rels") {
                 rels.push((name.clone(), bytes.clone()));
@@ -201,14 +215,14 @@ fn detect_reader<R: Read + std::io::Seek>(
         let declared = entry.size();
         let bytes = read_entry(&mut entry, declared, true, limits, &mut xml_total)?
             .ok_or("OOXML XML relationship target is invalid")?;
-        validate_xml(&bytes).map_err(|_| "OOXML XML is unsafe or malformed")?;
+        validate_xml(&bytes, &limits).map_err(|_| "OOXML XML is unsafe or malformed")?;
     }
     let (relationships, overrides) = match (relationships, overrides) {
         (Some(a), Some(b)) => (a, b),
         _ => return Ok(None),
     };
-    let targets = parse_relationships(&relationships).ok();
-    let overrides = parse_overrides(&overrides).ok();
+    let targets = parse_relationships(&relationships, &limits).ok();
+    let overrides = parse_overrides(&overrides, &limits).ok();
     let (Some(targets), Some(overrides)) = (targets, overrides) else {
         return Ok(None);
     };
@@ -433,7 +447,7 @@ fn read_entry<R: Read>(
     Ok(None)
 }
 
-fn validate_xml(bytes: &[u8]) -> Result<(), ()> {
+fn validate_xml(bytes: &[u8], limits: &Limits) -> Result<(), ()> {
     let mut reader = xml_reader(bytes)?;
     let mut buf = Vec::new();
     let mut events = 0usize;
@@ -449,7 +463,7 @@ fn validate_xml(bytes: &[u8]) -> Result<(), ()> {
             return Err(());
         }
         events += 1;
-        if events > MAX_XML_EVENTS {
+        if events > limits.xml_events {
             return Err(());
         }
         if let Event::Decl(decl) = &event {
@@ -462,7 +476,7 @@ fn validate_xml(bytes: &[u8]) -> Result<(), ()> {
         }
         first_event = false;
         if let Event::Start(element) | Event::Empty(element) = &event {
-            validate_xml_attributes(&reader, element)?;
+            validate_xml_attributes(&reader, element, limits)?;
         }
         match &event {
             Event::DocType(_) => return Err(()),
@@ -478,7 +492,7 @@ fn validate_xml(bytes: &[u8]) -> Result<(), ()> {
                 }
                 root_seen = true;
                 depth = depth.checked_add(1).ok_or(())?;
-                if depth > MAX_XML_DEPTH {
+                if depth > limits.xml_depth {
                     return Err(());
                 }
             }
@@ -499,6 +513,7 @@ fn validate_xml(bytes: &[u8]) -> Result<(), ()> {
 fn validate_xml_attributes(
     reader: &NsReader<DecodingReader<Cursor<&[u8]>>>,
     element: &quick_xml::events::BytesStart<'_>,
+    limits: &Limits,
 ) -> Result<(), ()> {
     let mut attributes = 0usize;
     let mut namespaces = 0usize;
@@ -506,12 +521,13 @@ fn validate_xml_attributes(
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| ())?;
         attributes += 1;
-        if attributes > MAX_XML_ATTRIBUTES {
+        if attributes > limits.xml_attributes {
             return Err(());
         }
         if attribute.key.as_namespace_binding().is_some() {
             namespaces += 1;
-            if namespaces > MAX_XML_NAMESPACES || !names.insert(attribute.key.as_ref().to_vec()) {
+            if namespaces > limits.xml_namespaces || !names.insert(attribute.key.as_ref().to_vec())
+            {
                 return Err(());
             }
         } else {
@@ -535,7 +551,7 @@ fn validate_xml_attributes(
     Ok(())
 }
 
-fn parse_relationships(bytes: &[u8]) -> Result<Vec<String>, ()> {
+fn parse_relationships(bytes: &[u8], limits: &Limits) -> Result<Vec<String>, ()> {
     let mut reader = xml_reader(bytes)?;
     let utf8_decoder = NsReader::from_reader(Cursor::new(b"".as_slice())).decoder();
     let mut buf = Vec::new();
@@ -555,7 +571,7 @@ fn parse_relationships(bytes: &[u8]) -> Result<Vec<String>, ()> {
         let allowed_ns = matches!(ns, ResolveResult::Unbound)
             || matches!(ns, ResolveResult::Bound(n) if n.as_ref() == REL_NS);
         events += 1;
-        if events > 100_000 {
+        if events > limits.xml_events {
             return Err(());
         }
         if let Event::Decl(decl) = &event {
@@ -658,7 +674,7 @@ fn parse_relationships(bytes: &[u8]) -> Result<Vec<String>, ()> {
         }
     }
 }
-fn parse_overrides(bytes: &[u8]) -> Result<HashMap<String, String>, ()> {
+fn parse_overrides(bytes: &[u8], limits: &Limits) -> Result<HashMap<String, String>, ()> {
     let mut reader = xml_reader(bytes)?;
     let utf8_decoder = NsReader::from_reader(Cursor::new(b"".as_slice())).decoder();
     let mut buf = Vec::new();
@@ -678,7 +694,7 @@ fn parse_overrides(bytes: &[u8]) -> Result<HashMap<String, String>, ()> {
         let allowed_ns = matches!(ns, ResolveResult::Unbound)
             || matches!(ns, ResolveResult::Bound(n) if n.as_ref() == TYPE_NS);
         events += 1;
-        if events > 100_000 {
+        if events > limits.xml_events {
             return Err(());
         }
         if let Event::Decl(decl) = &event {
@@ -916,6 +932,15 @@ mod tests {
         "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
     const XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
 
+    /// Preflights with the compiled defaults (the production entry point takes an explicit
+    /// resolved policy, so tests use the defaults through this wrapper).
+    fn preflight(bytes: &[u8]) -> Result<Option<&'static str>, String> {
+        preflight_ooxml_bytes_with(
+            bytes,
+            crate::command::service::OoxmlLimits::default_resolved(),
+        )
+    }
+
     fn bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut central = Vec::new();
@@ -1136,7 +1161,7 @@ mod tests {
             ("xlsx", "xl/worksheets/sheet1.xml"),
         ] {
             assert_eq!(
-                preflight_ooxml_bytes(&package_part(kind, part, b"<root/>")),
+                preflight(&package_part(kind, part, b"<root/>")),
                 Ok(Some(kind))
             );
             for attack in [
@@ -1156,9 +1181,7 @@ mod tests {
                     "</x>".repeat(MAX_XML_DEPTH + 1)
                 ),
             ] {
-                assert!(
-                    preflight_ooxml_bytes(&package_part(kind, part, attack.as_bytes())).is_err()
-                );
+                assert!(preflight(&package_part(kind, part, attack.as_bytes())).is_err());
             }
         }
     }
@@ -1166,10 +1189,7 @@ mod tests {
     #[test]
     fn preflight_rejects_xml_like_parts_and_duplicate_names() {
         let event_bomb = format!("<root>{}</root>", "<x/>".repeat(MAX_XML_EVENTS));
-        assert!(
-            preflight_ooxml_bytes(&package_part("docx", "payload.bin", event_bomb.as_bytes()))
-                .is_err()
-        );
+        assert!(preflight(&package_part("docx", "payload.bin", event_bomb.as_bytes())).is_err());
         let (relationships, types) = xml("docx", false);
         let duplicate = bytes(&[
             (RELS, relationships.as_bytes()),
@@ -1177,9 +1197,9 @@ mod tests {
             ("word/document.xml", b"<x/>"),
             ("word/document.xml", b"<x/>"),
         ]);
-        assert!(preflight_ooxml_bytes(&duplicate).is_err());
+        assert!(preflight(&duplicate).is_err());
         assert!(
-            preflight_ooxml_bytes(&package_part(
+            preflight(&package_part(
                 "docx",
                 "relationship-target.bin",
                 b" \xef\xbb\xbf<root>"
@@ -1191,7 +1211,7 @@ mod tests {
     #[test]
     fn preflight_accepts_safe_refs_and_rejects_custom_xml_like_encodings() {
         assert_eq!(
-            preflight_ooxml_bytes(&package_part(
+            preflight(&package_part(
                 "docx",
                 "word/document.xml",
                 b"<root>&amp;&#65;&#x41;</root>"
@@ -1200,7 +1220,7 @@ mod tests {
         );
         for part in [utf16("<root/>", false), utf16("<root/>", true)] {
             assert_eq!(
-                preflight_ooxml_bytes(&package_part("docx", "payload.bin", &part)),
+                preflight(&package_part("docx", "payload.bin", &part)),
                 Ok(Some("docx"))
             );
         }
@@ -1216,7 +1236,7 @@ mod tests {
         .enumerate()
         {
             assert!(
-                preflight_ooxml_bytes(&package_part("docx", "payload.bin", part)).is_err(),
+                preflight(&package_part("docx", "payload.bin", part)).is_err(),
                 "{i}"
             );
         }
@@ -1225,7 +1245,7 @@ mod tests {
     #[test]
     fn preflight_rejects_non_xml_ratio_and_normalized_name_aliases() {
         assert!(
-            preflight_ooxml_bytes(&deflated_package_part(
+            preflight(&deflated_package_part(
                 "docx",
                 "payload.bin",
                 &vec![0; 128 * 1024]
@@ -1239,7 +1259,7 @@ mod tests {
         ] {
             let mut entries = vec![(RELS, relationships.as_bytes()), (TYPES, types.as_bytes())];
             entries.extend(aliases);
-            assert!(preflight_ooxml_bytes(&bytes(&entries)).is_err());
+            assert!(preflight(&bytes(&entries)).is_err());
         }
     }
 
@@ -1270,7 +1290,7 @@ mod tests {
             ),
         ] {
             assert!(
-                preflight_ooxml_bytes(&pptx_slide_target_with(
+                preflight(&pptx_slide_target_with(
                     slide,
                     "ppt/charts/chart.bin",
                     target,
@@ -1281,7 +1301,7 @@ mod tests {
                 .is_err()
             );
             assert_eq!(
-                preflight_ooxml_bytes(&pptx_slide_target_with(
+                preflight(&pptx_slide_target_with(
                     slide,
                     "ppt/charts/chart.bin",
                     target,
@@ -1295,7 +1315,7 @@ mod tests {
         let mut oversized = vec![b' '; MAX_XML_ENTRY_BYTES as usize + 1];
         oversized.extend_from_slice(hostile.as_bytes());
         assert!(
-            preflight_ooxml_bytes(&pptx_slide_target(
+            preflight(&pptx_slide_target(
                 "../charts/chart.bin",
                 chart_type,
                 &oversized
@@ -1305,7 +1325,7 @@ mod tests {
         let image_type =
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
         assert_eq!(
-            preflight_ooxml_bytes(&pptx_slide_target(
+            preflight(&pptx_slide_target(
                 "../media/image.bin",
                 image_type,
                 b"binary"
@@ -1356,7 +1376,7 @@ mod tests {
         ];
         for (kind, owner, target, typ, path) in cases {
             assert!(
-                preflight_ooxml_bytes(&relationship_package(
+                preflight(&relationship_package(
                     kind,
                     owner,
                     target,
@@ -1367,14 +1387,14 @@ mod tests {
                 .is_err()
             );
             assert_eq!(
-                preflight_ooxml_bytes(&relationship_package(
+                preflight(&relationship_package(
                     kind, owner, target, typ, path, b"<root/>"
                 )),
                 Ok(Some(kind))
             );
         }
         assert_eq!(
-            preflight_ooxml_bytes(&relationship_package(
+            preflight(&relationship_package(
                 "xlsx",
                 "xl/drawings/drawing.bin",
                 "../media/image.bin",
@@ -1558,13 +1578,6 @@ mod tests {
                 )
             )),
             Some("xlsx")
-        );
-    }
-    #[test]
-    fn falls_back_for_open_failure() {
-        assert_eq!(
-            detect_with(Path::new("/definitely/not/an/ooxml"), Limits::default()).unwrap(),
-            None
         );
     }
     #[test]

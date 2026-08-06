@@ -18,10 +18,17 @@ use tokio::sync::Semaphore;
 pub(crate) struct OfficialPageConcurrency(Arc<Semaphore>);
 
 impl OfficialPageConcurrency {
-    pub(crate) fn new(configured: usize, window: usize, http: usize) -> Self {
-        Self(Arc::new(Semaphore::new(effective_page_concurrency(
+    pub(crate) fn new(configured: usize, window: usize, http: usize) -> VlmResult<Self> {
+        // The tokio capacity is a legitimate representability bound; an explicit value above it
+        // fails here instead of being silently reduced.
+        if configured > Semaphore::MAX_PERMITS {
+            return Err(VlmError::InvalidConfig(
+                "page concurrency exceeds the tokio semaphore capacity".into(),
+            ));
+        }
+        Ok(Self(Arc::new(Semaphore::new(effective_page_concurrency(
             configured, window, http,
-        ))))
+        )))))
     }
 
     fn semaphore(&self) -> Arc<Semaphore> {
@@ -34,6 +41,9 @@ impl OfficialPageConcurrency {
 }
 
 pub(crate) fn effective_page_concurrency(configured: usize, window: usize, http: usize) -> usize {
+    // Runtime-derived minima express actual downstream capacity and remain. The lower bound of
+    // one keeps a degenerate derived input from creating a zero-permit semaphore; the
+    // `Semaphore::MAX_PERMITS` representability guard lives in `OfficialPageConcurrency::new`.
     configured.min(window).min(http).max(1)
 }
 
@@ -44,8 +54,8 @@ fn effective_render_workers(
 ) -> usize {
     available_cpus
         .min(configured_workers)
-        .min(3)
-        .min((selected_pages / 30).max(1))
+        .min(selected_pages)
+        .max(1)
 }
 
 #[cfg(test)]
@@ -159,7 +169,6 @@ impl Drop for RenderDropGuard {
     }
 }
 
-#[allow(dead_code)] // Phase 2B consumes the split; Phase 2A verifies its arithmetic.
 fn split_image_slot_caps(full_cap: usize) -> (usize, usize) {
     let first = full_cap / 2;
     (first, full_cap - first)
@@ -365,13 +374,140 @@ async fn render_route_window(
     Ok(WindowState { plan, rendered })
 }
 
-pub(crate) fn route_limits(options: &OfficialPdfOptions) -> Limits {
+/// Snapshot output of one window's two-step VLM work, in source page order.
+type WindowSnapshots = Vec<(
+    Vec<crate::ModelBlock>,
+    Vec<crate::VlmLayoutBlock>,
+    usize,
+    usize,
+)>;
+
+struct StagedWindow {
+    stage: OfficialOutputStage,
+    completed: usize,
+}
+
+/// Serial, source-ordered staging/publication of one rendered window. Extracted so Phase B can
+/// poll it concurrently with the next window's VLM future. Internal failures keep today's
+/// `dispose_stage` semantics; if the future itself is dropped (a sibling VLM failure), the owned
+/// stage's capability-only Drop schedules the same cleanup.
+async fn stage_window(
+    mut stage: OfficialOutputStage,
+    deadline: RouteDeadline,
+    task_work_lease: &TaskWorkLease,
+    events: &Option<ProgressCallback>,
+    stem: &str,
+    total: usize,
+    current: WindowState,
+    snapshots: WindowSnapshots,
+    mut completed: usize,
+) -> VlmResult<StagedWindow> {
+    for (page, (snapshot, cleaned, _raw, _encoded)) in current.rendered.into_iter().zip(snapshots) {
+        if let Err(error) = deadline.check() {
+            return Err(dispose_stage(stage, error).await);
+        }
+
+        let preview_page = PageResult {
+            page_index: page.index,
+            page_size: page.size,
+            blocks: cleaned
+                .into_iter()
+                .map(|block| crate::ContentBlock {
+                    kind: crate::BlockKind::new(block.block_type),
+                    bbox: block.bbox,
+                    angle: block.angle,
+                    content: block.content,
+                    merge_previous: block.merge_prev.unwrap_or(false),
+                    metadata: block.metadata,
+                })
+                .collect(),
+        };
+        let (returned_stage, result) = deadline
+            .blocking(task_work_lease, move || {
+                let result = (|| {
+                    deadline.check()?;
+                    stage.write_preview_page(&preview_page)
+                })();
+                (stage, result)
+            })
+            .await?;
+        stage = returned_stage;
+        if let Err(error) = result {
+            return Err(dispose_stage(stage, error).await);
+        }
+        let remaining_assets = stage.remaining_asset_buffer_bytes();
+        let remaining_text = stage.remaining_text_buffer_bytes();
+        let image = match Arc::try_unwrap(page.image) {
+            Ok(image) => image,
+            Err(_) => {
+                return Err(dispose_stage(
+                    stage,
+                    VlmError::Transport {
+                        operation: "official PDF",
+                        message: "official PDF image ownership was retained".into(),
+                    },
+                )
+                .await);
+            }
+        };
+        let built = match deadline
+            .blocking(task_work_lease, move || {
+                prepare_official_page_until(
+                    OfficialBuildPage {
+                        slice_page_idx: page.index,
+                        page_size_points: page.size,
+                        render_scale: 200.0 / 72.0,
+                        rgb: image,
+                        snapshot,
+                    },
+                    remaining_assets,
+                    remaining_text,
+                    Some(deadline.instant()),
+                )
+            })
+            .await
+        {
+            Ok(Ok(built)) => built,
+            Ok(Err(error)) => return Err(dispose_stage(stage, error).await),
+            Err(error) => return Err(dispose_stage(stage, error).await),
+        };
+        if let Err(error) = deadline.check() {
+            return Err(dispose_stage(stage, error).await);
+        }
+        let (returned_stage, result) = deadline
+            .blocking(task_work_lease, move || {
+                let result = (|| {
+                    deadline.check()?;
+                    stage.write_prepared_page(page.index, built.page, &built.assets)
+                })();
+                (stage, result)
+            })
+            .await?;
+        stage = returned_stage;
+        if let Err(error) = result {
+            return Err(dispose_stage(stage, error).await);
+        }
+        completed += 1;
+        crate::progress_events::emit(
+            events,
+            ProgressEvent::DocumentPageCompleted {
+                document: stem.to_string(),
+                page_index: page.index,
+                completed,
+                total,
+            },
+        );
+    }
+    Ok(StagedWindow { stage, completed })
+}
+
+pub(crate) fn route_limits(options: &OfficialPdfOptions, response_cap: usize) -> Limits {
     Limits {
         max_pdf_bytes: options.max_pdf_bytes,
         max_total_asset_bytes: options.max_total_asset_bytes,
         max_pages: options.max_pages,
         max_page_pixels: options.max_page_pixels,
-        max_response_bytes: Limits::default().max_response_bytes,
+        max_response_bytes: response_cap,
         max_rendered_image_bytes: options.max_rendered_image_bytes,
         max_in_flight_image_bytes: options.max_in_flight_image_bytes,
         max_blocks_per_page: options.max_layout_blocks_per_page,
@@ -656,7 +792,7 @@ async fn parse_and_write_to(
     let task_work_lease = client.task_work_lease();
     let stem = crate::canonical_stem(stem)?;
     let deadline = RouteDeadline::new(options.total_deadline)?;
-    let limits = route_limits(&options);
+    let limits = route_limits(&options, client.official_response_cap());
 
     let read_limits = limits.clone();
     let bytes = deadline
@@ -729,13 +865,22 @@ async fn parse_and_write_to(
     let overlap_enabled = slot_caps[0] != 0 && slot_caps[1] != 0;
     let mut next_slot = 0usize;
     let mut prefetch: Option<PrefetchState> = None;
+    // Snapshots produced by phase B for the window held in `prefetch` as `Rendered`.
+    let mut next_snapshots: Option<WindowSnapshots> = None;
 
     while cursor < indexes.len() || prefetch.is_some() {
         if let Err(error) = deadline.check() {
             return Err(dispose_stage(stage, error).await);
         }
-        let current = match prefetch.take() {
-            Some(PrefetchState::Rendered(current)) => current,
+        let (current, pending_snapshots) = match prefetch.take() {
+            Some(PrefetchState::Rendered(current)) => (
+                current,
+                Some(
+                    next_snapshots
+                        .take()
+                        .expect("a rendered prefetch always carries its phase-B snapshots"),
+                ),
+            ),
             Some(PrefetchState::PendingFallback(plan)) => {
                 match render_route_window(
                     RenderRole::Fallback,
@@ -749,7 +894,7 @@ async fn parse_and_write_to(
                 )
                 .await
                 {
-                    Ok(current) => current,
+                    Ok(current) => (current, None),
                     Err(error) => return Err(dispose_stage(stage, error).await),
                 }
             }
@@ -784,32 +929,41 @@ async fn parse_and_write_to(
                 )
                 .await
                 {
-                    Ok(current) => current,
+                    Ok(current) => (current, None),
                     Err(error) => return Err(dispose_stage(stage, error).await),
                 }
             }
         };
 
-        let images: Vec<_> = current
-            .rendered
-            .iter()
-            .map(|page| Arc::clone(&page.image))
-            .collect();
-        let vlm = client.official_two_step_snapshot_window_with_budgets_and_page_semaphore(
-            images,
-            options.image_analysis,
-            options.formula_enable,
-            options.table_enable,
-            options.max_layout_blocks_per_page,
-            options.max_semantic_requests_per_page,
-            options.max_requests_per_batch,
-            options.max_encoded_request_bytes,
-            options.max_encoded_batch_bytes,
-            Arc::clone(&encoded_budget),
-            Arc::clone(&raw_budget),
-            deadline.instant(),
-            page_concurrency.semaphore(),
-        );
+        // The current window's VLM future exists only when phase B of the previous iteration did
+        // not already complete it (a prefetched current carries its snapshots).
+        let vlm = if pending_snapshots.is_none() {
+            let images: Vec<_> = current
+                .rendered
+                .iter()
+                .map(|page| Arc::clone(&page.image))
+                .collect();
+            Some(
+                client.official_two_step_snapshot_window_with_budgets_and_page_semaphore(
+                    images,
+                    options.image_analysis,
+                    options.formula_enable,
+                    options.table_enable,
+                    options.max_layout_blocks_per_page,
+                    options.max_semantic_requests_per_page,
+                    options.max_requests_per_batch,
+                    options.max_encoded_request_bytes,
+                    options.max_encoded_batch_bytes,
+                    Arc::clone(&encoded_budget),
+                    Arc::clone(&raw_budget),
+                    deadline.instant(),
+                    page_concurrency.semaphore(),
+                ),
+            )
+        } else {
+            None
+        };
+
         let mut pending_fallback = None;
         let next = if overlap_enabled
             && current.plan.mode == WindowPlanMode::Slot
@@ -843,7 +997,10 @@ async fn parse_and_write_to(
         } else {
             None
         };
-        let snapshots = match if let Some(next) = next {
+
+        // Phase A: remaining VLM(current) || render(next). A prefetched current already has its
+        // snapshots from the previous phase-B overlap, so only the next render remains here.
+        let snapshots = if let Some(next) = next {
             if current
                 .plan
                 .bytes
@@ -866,17 +1023,33 @@ async fn parse_and_write_to(
                 render_workers,
                 task_work_lease.clone(),
             );
-            match tokio::try_join!(deadline.future(vlm), render) {
-                Ok((snapshots, prefetched)) => {
-                    prefetch = Some(PrefetchState::Rendered(prefetched));
-                    next_slot = 1 - next_slot;
-                    Ok(snapshots)
+            match pending_snapshots {
+                Some(snapshots) => match render.await {
+                    Ok(prefetched) => {
+                        prefetch = Some(PrefetchState::Rendered(prefetched));
+                        next_slot = 1 - next_slot;
+                        Ok(snapshots)
+                    }
+                    Err(error) => Err(error),
+                },
+                None => {
+                    match tokio::try_join!(deadline.future(vlm.expect("vlm pending")), render) {
+                        Ok((snapshots, prefetched)) => {
+                            prefetch = Some(PrefetchState::Rendered(prefetched));
+                            next_slot = 1 - next_slot;
+                            Ok(snapshots)
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
-                Err(error) => Err(error),
             }
         } else {
-            deadline.future(vlm).await
-        } {
+            match pending_snapshots {
+                Some(snapshots) => Ok(snapshots),
+                None => deadline.future(vlm.expect("vlm pending")).await,
+            }
+        };
+        let snapshots = match snapshots {
             Ok(snapshots) if snapshots.len() == current.rendered.len() => snapshots,
             Ok(_) => {
                 return Err(dispose_stage(
@@ -887,103 +1060,89 @@ async fn parse_and_write_to(
             }
             Err(error) => return Err(dispose_stage(stage, error).await),
         };
-        for (page, (snapshot, cleaned, _raw, _encoded)) in
-            current.rendered.into_iter().zip(snapshots)
-        {
-            if let Err(error) = deadline.check() {
-                return Err(dispose_stage(stage, error).await);
-            }
 
-            let preview_page = PageResult {
-                page_index: page.index,
-                page_size: page.size,
-                blocks: cleaned
-                    .into_iter()
-                    .map(|block| crate::ContentBlock {
-                        kind: crate::BlockKind::new(block.block_type),
-                        bbox: block.bbox,
-                        angle: block.angle,
-                        content: block.content,
-                        merge_previous: block.merge_prev.unwrap_or(false),
-                        metadata: block.metadata,
-                    })
-                    .collect(),
-            };
-            let (returned_stage, result) = deadline
-                .blocking(&task_work_lease, move || {
-                    let result = (|| {
-                        deadline.check()?;
-                        stage.write_preview_page(&preview_page)
-                    })();
-                    (stage, result)
-                })
-                .await?;
-            stage = returned_stage;
-            if let Err(error) = result {
-                return Err(dispose_stage(stage, error).await);
-            }
-            let remaining_assets = stage.remaining_asset_buffer_bytes();
-            let remaining_text = stage.remaining_text_buffer_bytes();
-            let image = match Arc::try_unwrap(page.image) {
-                Ok(image) => image,
-                Err(_) => {
-                    return Err(dispose_stage(
-                        stage,
-                        VlmError::Transport {
-                            operation: "official PDF",
-                            message: "official PDF image ownership was retained".into(),
-                        },
-                    )
-                    .await);
-                }
-            };
-            let built = match deadline
-                .blocking(&task_work_lease, move || {
-                    prepare_official_page_until(
-                        OfficialBuildPage {
-                            slice_page_idx: page.index,
-                            page_size_points: page.size,
-                            render_scale: 200.0 / 72.0,
-                            rgb: image,
-                            snapshot,
-                        },
-                        remaining_assets,
-                        remaining_text,
-                        Some(deadline.instant()),
-                    )
-                })
-                .await
-            {
-                Ok(Ok(built)) => built,
-                Ok(Err(error)) => return Err(dispose_stage(stage, error).await),
-                Err(error) => return Err(dispose_stage(stage, error).await),
-            };
-            if let Err(error) = deadline.check() {
-                return Err(dispose_stage(stage, error).await);
-            }
-            let (returned_stage, result) = deadline
-                .blocking(&task_work_lease, move || {
-                    let result = (|| {
-                        deadline.check()?;
-                        stage.write_prepared_page(page.index, built.page, &built.assets)
-                    })();
-                    (stage, result)
-                })
-                .await?;
-            stage = returned_stage;
-            if let Err(error) = result {
-                return Err(dispose_stage(stage, error).await);
-            }
-            completed += 1;
-            crate::progress_events::emit(
-                &events,
-                ProgressEvent::DocumentPageCompleted {
-                    document: stem.clone(),
-                    page_index: page.index,
-                    completed,
+        // Phase B: stage(current) || deadline-wrapped VLM(next). Staging/publication stays source
+        // ordered; the prefetched next window keeps the engine supplied for the whole staging
+        // loop, so the staging-time inference bubble is gone. A staging failure disposes the stage
+        // and drops the next-window VLM future; a VLM failure drops the staging future (the owned
+        // stage's capability-only Drop schedules cleanup) and rolls back.
+        let phase_b = match prefetch.take() {
+            Some(PrefetchState::Rendered(next_window)) => {
+                let next_images: Vec<_> = next_window
+                    .rendered
+                    .iter()
+                    .map(|page| Arc::clone(&page.image))
+                    .collect();
+                let vlm_next = client
+                    .official_two_step_snapshot_window_with_budgets_and_page_semaphore(
+                        next_images,
+                        options.image_analysis,
+                        options.formula_enable,
+                        options.table_enable,
+                        options.max_layout_blocks_per_page,
+                        options.max_semantic_requests_per_page,
+                        options.max_requests_per_batch,
+                        options.max_encoded_request_bytes,
+                        options.max_encoded_batch_bytes,
+                        Arc::clone(&encoded_budget),
+                        Arc::clone(&raw_budget),
+                        deadline.instant(),
+                        page_concurrency.semaphore(),
+                    );
+                let staging = stage_window(
+                    stage,
+                    deadline,
+                    &task_work_lease,
+                    &events,
+                    &stem,
                     total,
-                },
-            );
+                    current,
+                    snapshots,
+                    completed,
+                );
+                match tokio::try_join!(staging, deadline.future(vlm_next)) {
+                    Ok((staged, next_window_snapshots)) => {
+                        if next_window_snapshots.len() != next_window.rendered.len() {
+                            let error =
+                                VlmError::Pdf("VLM returned an unexpected page count".into());
+                            return Err(dispose_stage(staged.stage, error).await);
+                        }
+                        next_snapshots = Some(next_window_snapshots);
+                        prefetch = Some(PrefetchState::Rendered(next_window));
+                        Ok(staged)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Some(PrefetchState::PendingFallback(_)) => {
+                // A pending fallback is stored only after phase B completes, never during it.
+                return Err(dispose_stage(
+                    stage,
+                    VlmError::Pdf("invalid prefetch state during phase B".into()),
+                )
+                .await);
+            }
+            None => {
+                stage_window(
+                    stage,
+                    deadline,
+                    &task_work_lease,
+                    &events,
+                    &stem,
+                    total,
+                    current,
+                    snapshots,
+                    completed,
+                )
+                .await
+            }
+        };
+        match phase_b {
+            Ok(staged) => {
+                stage = staged.stage;
+                completed = staged.completed;
+            }
+            Err(error) => return Err(error),
         }
         if let Some(fallback) = pending_fallback {
             prefetch = Some(PrefetchState::PendingFallback(fallback));
@@ -1101,11 +1260,11 @@ async fn dispose_stage(stage: OfficialOutputStage, error: VlmError) -> VlmError 
 #[cfg(test)]
 mod tests {
     use super::{
-        RenderRole, RenderTestInfo, RouteDeadline, WindowPlanMode, WindowRenderTestHook,
-        admitted_commit, effective_page_concurrency, effective_render_workers, map,
-        observe_route_render, plan_window, render_with_timeout, retain_window,
-        scope_available_render_parallelism, scope_window_render_test_hook, split_image_slot_caps,
-        window_render_test_hook,
+        OfficialPageConcurrency, RenderRole, RenderTestInfo, RouteDeadline, WindowPlanMode,
+        WindowRenderTestHook, admitted_commit, effective_page_concurrency,
+        effective_render_workers, map, observe_route_render, plan_window, render_with_timeout,
+        retain_window, scope_available_render_parallelism, scope_window_render_test_hook,
+        split_image_slot_caps, window_render_test_hook,
     };
     use crate::{TaskWorkLease, official_output::OfficialOutputStage};
     use axum::{Json, Router, extract::State, routing::post};
@@ -1120,7 +1279,7 @@ mod tests {
         },
         time::{Duration, Instant},
     };
-    use tokio::sync::Notify;
+    use tokio::sync::{Notify, Semaphore};
 
     fn route_pdf(pages: usize) -> Bytes {
         let mut pdf = Document::with_version("1.5");
@@ -1949,22 +2108,38 @@ mod tests {
 
     #[test]
     fn effective_render_workers_uses_selected_page_total_cpu_and_configured_caps() {
-        assert_eq!(effective_render_workers(8, 8, 29), 1);
-        assert_eq!(effective_render_workers(8, 8, 30), 1);
-        assert_eq!(effective_render_workers(8, 8, 59), 1);
-        assert_eq!(effective_render_workers(8, 8, 60), 2);
-        assert_eq!(effective_render_workers(8, 8, 89), 2);
-        assert_eq!(effective_render_workers(8, 8, 90), 3);
+        // No arbitrary 3-worker or /30 page ceiling: only CPU, configured, and page capacities.
+        assert_eq!(effective_render_workers(8, 8, 29), 8);
+        assert_eq!(effective_render_workers(8, 8, 30), 8);
+        assert_eq!(effective_render_workers(8, 8, 59), 8);
+        assert_eq!(effective_render_workers(8, 8, 60), 8);
+        assert_eq!(effective_render_workers(8, 8, 89), 8);
+        assert_eq!(effective_render_workers(8, 8, 90), 8);
         assert_eq!(effective_render_workers(1, 8, 90), 1);
         assert_eq!(effective_render_workers(8, 1, 90), 1);
-        assert_eq!(effective_render_workers(8, 99, 90), 3);
+        assert_eq!(effective_render_workers(8, 99, 90), 8);
+        assert_eq!(effective_render_workers(16, 16, 100), 16);
+        assert_eq!(effective_render_workers(64, 64, 200), 64);
+        assert_eq!(effective_render_workers(64, 64, 3), 3);
     }
 
     #[test]
-    fn page_concurrency_obeys_window_and_http_bounds() {
+    fn page_concurrency_obeys_window_and_http_bounds_and_rejects_unrepresentable() {
         assert_eq!(effective_page_concurrency(4, 2, 8), 2);
         assert_eq!(effective_page_concurrency(4, 8, 3), 3);
         assert_eq!(effective_page_concurrency(4, 8, 8), 4);
+        // Values above the removed 1..=8 ceiling flow through and meet actual capacities.
+        assert_eq!(effective_page_concurrency(16, 8, 8), 8);
+        // No silent clamp: the pure derivation is min(...), and the tokio-capacity guard lives
+        // in `OfficialPageConcurrency::new`, where explicit values fail.
+        assert_eq!(
+            effective_page_concurrency(usize::MAX, usize::MAX, usize::MAX),
+            usize::MAX
+        );
+        assert!(OfficialPageConcurrency::new(usize::MAX, usize::MAX, usize::MAX).is_err());
+        assert!(
+            OfficialPageConcurrency::new(Semaphore::MAX_PERMITS, usize::MAX, usize::MAX).is_ok()
+        );
     }
 
     #[tokio::test]

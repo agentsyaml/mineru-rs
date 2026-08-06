@@ -307,7 +307,7 @@ pub(crate) async fn render_window_for_task(
     let mut pending = sizes.into_iter().peekable();
     while pending.peek().is_some() {
         let window = admitted_window(&mut pending, limits.max_in_flight_image_bytes)?;
-        let concurrency = workers.clamp(1, 3).min(window.len());
+        let concurrency = workers.max(1).min(window.len());
         let mut window_pending = window.into_iter();
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..concurrency {
@@ -796,6 +796,62 @@ mod tests {
             *events.lock().expect("events"),
             vec![("before", 0, true), ("after", 0, true)]
         );
+    }
+
+    #[tokio::test]
+    async fn render_window_honors_more_than_three_workers_subject_to_page_count() {
+        // Six pages with eight configured workers must render six-way concurrent. The old
+        // `clamp(1, 3)` policy would starve the six-party gate and fail with a clear error
+        // instead of a hang.
+        use std::sync::{Condvar, Mutex};
+        use std::time::Instant;
+
+        let document = parse_document(in_memory_pdf(6, 6), &Limits::default()).expect("fixture");
+        let gate = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let hook = Arc::new(PageRenderTestHook::new(
+            {
+                let gate = Arc::clone(&gate);
+                move |_| {
+                    let (lock, ready) = &*gate;
+                    let mut count = lock.lock().expect("gate");
+                    *count += 1;
+                    if *count == 6 {
+                        ready.notify_all();
+                        return Ok(());
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while *count < 6 && Instant::now() < deadline {
+                        let (guard, _) = ready
+                            .wait_timeout(count, Duration::from_millis(100))
+                            .expect("gate");
+                        count = guard;
+                    }
+                    if *count >= 6 {
+                        Ok(())
+                    } else {
+                        Err(crate::Error::Pdf("render concurrency gate timeout".into()))
+                    }
+                }
+            },
+            |_, _| {},
+        ));
+        let rendered = tokio::time::timeout(
+            Duration::from_secs(30),
+            scope_page_render_test_hook(
+                hook,
+                render_window_for_task(
+                    document,
+                    (0..6).collect(),
+                    Limits::default(),
+                    8,
+                    TaskWorkLease::default(),
+                ),
+            ),
+        )
+        .await
+        .expect("render timed out")
+        .expect("render");
+        assert_eq!(rendered.len(), 6);
     }
 
     #[tokio::test]

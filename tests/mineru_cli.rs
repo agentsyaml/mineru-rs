@@ -11,7 +11,10 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use serde_json::{Value, json};
 use std::{
     process::{Command, Output},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 #[path = "support/office_fixtures.rs"]
 #[allow(dead_code)]
@@ -29,10 +32,41 @@ fn mineru() -> Command {
     command.env_remove("MINERU_PDF_RENDER_TIMEOUT");
     command.env_remove("MINERU_FORMULA_ENABLE");
     command.env_remove("MINERU_TABLE_ENABLE");
+    command.env_remove("MINERU_IMAGE_ANALYSIS_ENABLE");
+    command.env_remove("MINERU_OFFICIAL_PAGE_CONCURRENCY");
+    command.env_remove("MINERU_BATCH_SIZE");
+    command.env_remove("MINERU_VLM_HTTP_CONCURRENCY");
+    command.env_remove("MINERU_VLM_HTTP_TIMEOUT");
+    command.env_remove("MINERU_VLM_CONNECT_TIMEOUT");
+    command.env_remove("MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS");
+    command.env_remove("MINERU_VLM_HTTP_KEEPALIVE_EXPIRY");
+    command.env_remove("MINERU_VLM_HTTP_MAX_RETRIES");
+    command.env_remove("MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR");
+    command.env_remove("MINERU_VLM_MAX_IMAGE_BYTES");
+    command.env_remove("MINERU_VLM_MAX_DECODED_PIXELS");
+    command.env_remove("MINERU_VLM_MAX_IMAGES_PER_REQUEST");
+    command.env_remove("MINERU_VLM_MAX_REDIRECTS");
+    command.env_remove("MINERU_VLM_HTTP_MAX_RESPONSE_BYTES");
+    command.env_remove("MINERU_VL_DEBUG_ENABLE");
     command.env_remove("MINERU_OFFICE_FAKE_CHILD");
     command.env_remove("MINERU_OFFICE_FAKE_MODE");
     command.env_remove("MINERU_OFFICE_FAKE_READY");
     command
+}
+
+/// Strip the `[+HH:MM:SS] ` run-elapsed stamp that the CLI plain renderer
+/// prepends, so e2e snapshots stay exact without pinning wall-clock timing.
+fn unstamped(stderr: &[u8]) -> Vec<String> {
+    std::str::from_utf8(stderr)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            line.strip_prefix("[+")
+                .and_then(|rest| rest.split_once("] "))
+                .map(|(_, body)| body.to_owned())
+                .unwrap_or_else(|| line.to_owned())
+        })
+        .collect()
 }
 
 #[derive(Clone, Default)]
@@ -44,7 +78,11 @@ struct Mock {
     layout: bool,
     mutate_output: Option<std::path::PathBuf>,
     fail_after: Option<usize>,
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
 }
+
+const THREE_CANDIDATE_LAYOUT: &str = "<|box_start|>1 1 200 200<|box_end|><|ref_start|>equation<|ref_end|><|rotate_up|><|box_start|>250 1 500 200<|box_end|><|ref_start|>table<|ref_end|><|rotate_up|><|box_start|>1 250 200 500<|box_end|><|ref_start|>image<|ref_end|><|rotate_up|>";
 
 async fn mock_with(layout: bool, mutate_output: Option<std::path::PathBuf>) -> (String, Seen) {
     async fn models(State(mock): State<Mock>) -> Json<Value> {
@@ -88,7 +126,7 @@ async fn mock_with(layout: bool, mutate_output: Option<std::path::PathBuf>) -> (
                 .into_response();
         }
         let content = if mock.layout {
-            "<|box_start|>1 1 200 200<|box_end|><|ref_start|>equation<|ref_end|><|rotate_up|><|box_start|>250 1 500 200<|box_end|><|ref_start|>table<|ref_end|><|rotate_up|><|box_start|>1 250 200 500<|box_end|><|ref_start|>image<|ref_end|><|rotate_up|>"
+            THREE_CANDIDATE_LAYOUT
         } else {
             ""
         };
@@ -104,6 +142,8 @@ async fn mock_with(layout: bool, mutate_output: Option<std::path::PathBuf>) -> (
             layout,
             mutate_output,
             fail_after: None,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
         });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -148,6 +188,8 @@ async fn failing_mock(after: usize) -> (String, Seen) {
             layout: false,
             mutate_output: None,
             fail_after: Some(after),
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
         });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -157,6 +199,51 @@ async fn failing_mock(after: usize) -> (String, Seen) {
 
 async fn mock() -> (String, Seen) {
     mock_with(false, None).await
+}
+
+/// Deterministic multi-candidate mock: every completion is held briefly while the handler
+/// tracks active and peak concurrent requests, so the CLI batch admission is observable.
+async fn batch_mock() -> (String, Seen, Arc<AtomicUsize>) {
+    async fn models(State(mock): State<Mock>) -> Json<Value> {
+        mock.seen
+            .0
+            .lock()
+            .unwrap()
+            .push(("models".into(), json!({}), None));
+        Json(json!({"data":[{"id":"discovered"}]}))
+    }
+    async fn completion(State(mock): State<Mock>, request: Request) -> axum::response::Response {
+        let (_, body) = request.into_parts();
+        let body = axum::body::to_bytes(body, 16 * 1024 * 1024).await.unwrap();
+        mock.seen.0.lock().unwrap().push((
+            "completion".into(),
+            serde_json::from_slice(&body).unwrap(),
+            None,
+        ));
+        let active = mock.active.fetch_add(1, Ordering::SeqCst) + 1;
+        mock.peak.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        mock.active.fetch_sub(1, Ordering::SeqCst);
+        Json(json!({"choices":[{"finish_reason":"stop","message":{"content":THREE_CANDIDATE_LAYOUT}}]}))
+            .into_response()
+    }
+    let seen = Seen::default();
+    let peak = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/v1/models", get(models))
+        .route("/v1/chat/completions", post(completion))
+        .with_state(Mock {
+            seen: seen.clone(),
+            layout: true,
+            mutate_output: None,
+            fail_after: None,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: peak.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{address}"), seen, peak)
 }
 
 async fn command(mut command: Command) -> Output {
@@ -261,6 +348,80 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
             "-t, --table <TABLE>",
             "--image-analysis <IMAGE_ANALYSIS>",
             "--client-side-output-generation <CLIENT_SIDE_OUTPUT_GENERATION>",
+            "--max-input-bytes <MAX_INPUT_BYTES>",
+            "--max-encoded-document-bytes <MAX_ENCODED_DOCUMENT_BYTES>",
+            "--max-output-bytes <MAX_OUTPUT_BYTES>",
+            "--log-level <LOG_LEVEL>",
+            "--processing-window-size <PROCESSING_WINDOW_SIZE>",
+            "--page-concurrency <PAGE_CONCURRENCY>",
+            "--render-workers <RENDER_WORKERS>",
+            "--render-timeout-seconds <RENDER_TIMEOUT_SECONDS>",
+            "--max-pdf-bytes <MAX_PDF_BYTES>",
+            "--max-pages <MAX_PAGES>",
+            "--max-page-pixels <MAX_PAGE_PIXELS>",
+            "--max-rendered-image-bytes <MAX_RENDERED_IMAGE_BYTES>",
+            "--max-in-flight-image-bytes <MAX_IN_FLIGHT_IMAGE_BYTES>",
+            "--max-raw-output-bytes <MAX_RAW_OUTPUT_BYTES>",
+            "--max-layout-blocks-per-page <MAX_LAYOUT_BLOCKS_PER_PAGE>",
+            "--max-semantic-requests-per-page <MAX_SEMANTIC_REQUESTS_PER_PAGE>",
+            "--batch-size <BATCH_SIZE>",
+            "--max-encoded-request-bytes <MAX_ENCODED_REQUEST_BYTES>",
+            "--max-encoded-batch-bytes <MAX_ENCODED_BATCH_BYTES>",
+            "--max-total-asset-bytes <MAX_TOTAL_ASSET_BYTES>",
+            "--max-staged-text-bytes <MAX_STAGED_TEXT_BYTES>",
+            "--total-deadline-seconds <TOTAL_DEADLINE_SECONDS>",
+            "--http-max-concurrency <HTTP_MAX_CONCURRENCY>",
+            "--http-timeout-seconds <HTTP_TIMEOUT_SECONDS>",
+            "--connect-timeout-seconds <CONNECT_TIMEOUT_SECONDS>",
+            "--http-max-keepalive-connections <HTTP_MAX_KEEPALIVE_CONNECTIONS>",
+            "--http-keepalive-expiry-seconds <HTTP_KEEPALIVE_EXPIRY_SECONDS>",
+            "--http-max-retries <HTTP_MAX_RETRIES>",
+            "--http-retry-backoff-factor <HTTP_RETRY_BACKOFF_FACTOR>",
+            "--max-remote-image-bytes <MAX_REMOTE_IMAGE_BYTES>",
+            "--max-decoded-pixels <MAX_DECODED_PIXELS>",
+            "--max-images-per-request <MAX_IMAGES_PER_REQUEST>",
+            "--max-redirects <MAX_REDIRECTS>",
+            "--http-max-response-bytes <HTTP_MAX_RESPONSE_BYTES>",
+            "--vlm-debug <VLM_DEBUG>",
+            "--vlm-text-before-image <VLM_TEXT_BEFORE_IMAGE>",
+            "--vlm-allow-truncated-content <VLM_ALLOW_TRUNCATED_CONTENT>",
+            "--vlm-allow-remote-images <VLM_ALLOW_REMOTE_IMAGES>",
+            "--vlm-allow-private-remote-images <VLM_ALLOW_PRIVATE_REMOTE_IMAGES>",
+            "--api-max-concurrent-requests <API_MAX_CONCURRENT_REQUESTS>",
+            "--task-result-timeout-seconds <TASK_RESULT_TIMEOUT_SECONDS>",
+            "--task-result-download-timeout-seconds <TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS>",
+            "--api-connect-timeout-seconds <API_CONNECT_TIMEOUT_SECONDS>",
+            "--api-acquisition-timeout-seconds <API_ACQUISITION_TIMEOUT_SECONDS>",
+            "--api-send-timeout-seconds <API_SEND_TIMEOUT_SECONDS>",
+            "--api-poll-interval-seconds <API_POLL_INTERVAL_SECONDS>",
+            "--archive-max-entries <ARCHIVE_MAX_ENTRIES>",
+            "--archive-max-ratio <ARCHIVE_MAX_RATIO>",
+            "--zip-scan-central-cap <ZIP_SCAN_CENTRAL_CAP>",
+            "--zip-scan-name-cap <ZIP_SCAN_NAME_CAP>",
+            "--zip-scan-depth-cap <ZIP_SCAN_DEPTH_CAP>",
+            "--zip-scan-total-name-cap <ZIP_SCAN_TOTAL_NAME_CAP>",
+            "--zip-scan-total-component-cap <ZIP_SCAN_TOTAL_COMPONENT_CAP>",
+            "--ooxml-archive-bytes <OOXML_ARCHIVE_BYTES>",
+            "--ooxml-expanded-bytes <OOXML_EXPANDED_BYTES>",
+            "--ooxml-xml-entry-bytes <OOXML_XML_ENTRY_BYTES>",
+            "--ooxml-xml-total-bytes <OOXML_XML_TOTAL_BYTES>",
+            "--ooxml-ratio <OOXML_RATIO>",
+            "--ooxml-xml-depth <OOXML_XML_DEPTH>",
+            "--ooxml-xml-events <OOXML_XML_EVENTS>",
+            "--ooxml-xml-attributes <OOXML_XML_ATTRIBUTES>",
+            "--ooxml-xml-namespaces <OOXML_XML_NAMESPACES>",
+            "--office-input-bytes <OFFICE_INPUT_BYTES>",
+            "--office-output-bytes <OFFICE_OUTPUT_BYTES>",
+            "--office-stderr-bytes <OFFICE_STDERR_BYTES>",
+            "--office-wall-seconds <OFFICE_WALL_SECONDS>",
+            "--office-cpu-seconds <OFFICE_CPU_SECONDS>",
+            "--office-nofile <OFFICE_NOFILE>",
+            "--office-address-space-bytes <OFFICE_ADDRESS_SPACE_BYTES>",
+            "--office-active-process-limit <OFFICE_ACTIVE_PROCESS_LIMIT>",
+            "--office-process-memory-bytes <OFFICE_PROCESS_MEMORY_BYTES>",
+            "--office-job-memory-bytes <OFFICE_JOB_MEMORY_BYTES>",
+            "--office-process-time-seconds <OFFICE_PROCESS_TIME_SECONDS>",
+            "--office-job-time-seconds <OFFICE_JOB_TIME_SECONDS>",
             "-h, --help",
         ]
     );
@@ -275,10 +436,10 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
     }
     assert!(
         help.contains("--method")
-            && !help.contains("--log-level")
+            && help.contains("--log-level")
+            && help.contains("--batch-size")
             && !help.contains("--server-url")
             && !help.contains("--model")
-            && !help.contains("--batch-size")
     );
 }
 
@@ -420,7 +581,7 @@ async fn declared_image_mismatch_preserves_existing_target_without_a_completion(
     let result = command(cmd).await;
     assert!(!result.status.success());
     let stderr = String::from_utf8(result.stderr).unwrap();
-    let lines: Vec<_> = stderr.lines().collect();
+    let lines = unstamped(stderr.as_bytes());
     let started = lines
         .iter()
         .position(|line| *line == "document started: bad")
@@ -473,8 +634,8 @@ async fn invalid_static_options_make_no_request_or_output() {
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
     assert_eq!(
-        result.stderr,
-        b"failed: --end must not be less than --start\n"
+        unstamped(&result.stderr),
+        ["failed: --end must not be less than --start"]
     );
     assert!(!output.exists());
     assert!(seen.0.lock().unwrap().is_empty());
@@ -488,23 +649,18 @@ async fn behaviorless_options_warn_once_with_canonical_progress() {
     let output = dir.path().join("out");
     let (url, _) = mock().await;
     let mut cmd = mineru();
-    cmd.args(["-p"])
-        .arg(pdf)
-        .args(["-o"])
-        .arg(&output)
-        .args([
-            "--url",
-            &url,
-            "--method",
-            "txt",
-            "--effort",
-            "high",
-            "--lang",
-            "en",
-            "--client-side-output-generation",
-            "true",
-        ])
-        .env("MINERU_API_MAX_CONCURRENT_REQUESTS", "0");
+    cmd.args(["-p"]).arg(pdf).args(["-o"]).arg(&output).args([
+        "--url",
+        &url,
+        "--method",
+        "txt",
+        "--effort",
+        "high",
+        "--lang",
+        "en",
+        "--client-side-output-generation",
+        "true",
+    ]);
     let result = command(cmd).await;
     assert!(
         result.status.success(),
@@ -513,8 +669,14 @@ async fn behaviorless_options_warn_once_with_canonical_progress() {
     );
     assert_eq!(result.stdout, b"");
     assert_eq!(
-        result.stderr,
-        b"warning: ignored direct options: method=txt, effort=high, lang=en, client-side-output-generation=true\ndocument started: document\ndocument prepared: document\ndocument page completed: document: page=0 completed=1/1\ndocument completed: document\n"
+        unstamped(&result.stderr),
+        [
+            "warning: ignored direct options: method=txt, effort=high, lang=en, client-side-output-generation=true",
+            "document started: document",
+            "document prepared: document",
+            "document page completed: document: page=0 completed=1/1",
+            "document completed: document",
+        ]
     );
     assert!(output.join("document/vlm/document.md").is_file());
 }
@@ -542,8 +704,8 @@ async fn api_client_side_output_rejection_precedes_input_and_network() {
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
     assert_eq!(
-        result.stderr,
-        b"failed: client-side output generation is unsupported\n"
+        unstamped(&result.stderr),
+        ["failed: client-side output generation is unsupported"]
     );
     assert!(!output.exists());
     assert!(!String::from_utf8_lossy(&result.stderr).contains("missing.pdf"));
@@ -572,8 +734,8 @@ async fn api_concurrency_env_rejection_precedes_input_and_network() {
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
     assert_eq!(
-        result.stderr,
-        b"failed: MINERU_API_MAX_CONCURRENT_REQUESTS must be positive\n"
+        unstamped(&result.stderr),
+        ["failed: MINERU_API_MAX_CONCURRENT_REQUESTS must be greater than zero"]
     );
     assert!(!output.exists());
     assert!(!String::from_utf8_lossy(&result.stderr).contains("missing.pdf"));
@@ -630,11 +792,282 @@ fn parser_rejects_noop_flags() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(2));
+    // --log-level and --batch-size are real options now; they must parse (and fail on input,
+    // not on the option spelling) instead of being rejected as no-ops.
     let status = mineru()
         .args(["-p", "x", "-o", "y", "--log-level", "debug"])
         .status()
         .unwrap();
-    assert_eq!(status.code(), Some(2));
+    assert_ne!(status.code(), Some(2));
+    let status = mineru()
+        .args(["-p", "x", "-o", "y", "--batch-size", "4"])
+        .status()
+        .unwrap();
+    assert_ne!(status.code(), Some(2));
+}
+
+#[tokio::test]
+#[ignore = "CLI process contract e2e"]
+async fn malformed_core_flags_and_env_fail_before_network_or_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let (url, seen) = mock().await;
+    let cases: Vec<(&[&str], &str)> = vec![
+        (
+            &["--processing-window-size", "0"],
+            "MINERU_PROCESSING_WINDOW_SIZE",
+        ),
+        (&["--batch-size", "0"], "MINERU_BATCH_SIZE"),
+        (&["--render-workers", "+5"], "MINERU_PDF_RENDER_THREADS"),
+        (
+            &["--http-retry-backoff-factor", "NaN"],
+            "MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR",
+        ),
+        (
+            &["--http-max-concurrency", "184467440737095516160"],
+            "MINERU_VLM_HTTP_CONCURRENCY",
+        ),
+    ];
+    for (index, (extra, needle)) in cases.into_iter().enumerate() {
+        let output = dir.path().join(format!("case-{index}"));
+        let mut cmd = mineru();
+        cmd.args(["-p"])
+            .arg(&pdf)
+            .args(["-o"])
+            .arg(&output)
+            .args(["--url", &url])
+            .args(extra);
+        let result = command(cmd).await;
+        assert!(!result.status.success(), "{extra:?}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains(needle), "{extra:?}: {stderr}");
+        assert!(!output.exists(), "{extra:?}");
+    }
+    let output = dir.path().join("env-bad");
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(&pdf)
+        .args(["-o"])
+        .arg(&output)
+        .args(["--url", &url])
+        .env("MINERU_MAX_PAGE_PIXELS", "1e6");
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("MINERU_MAX_PAGE_PIXELS"), "{stderr}");
+    assert!(!output.exists());
+    assert!(seen.0.lock().unwrap().is_empty());
+
+    // Strict boolean grammar: `1`/`yes`/`on` are rejected, not silently treated as false.
+    for (env_name, value) in [
+        ("MINERU_FORMULA_ENABLE", "1"),
+        ("MINERU_TABLE_ENABLE", "yes"),
+        ("MINERU_IMAGE_ANALYSIS_ENABLE", "on"),
+        ("MINERU_VL_DEBUG_ENABLE", ""),
+    ] {
+        let output = dir.path().join("env-bool-bad");
+        let mut cmd = mineru();
+        cmd.args(["-p"])
+            .arg(&pdf)
+            .args(["-o"])
+            .arg(&output)
+            .args(["--url", &url])
+            .env(env_name, value);
+        let result = command(cmd).await;
+        assert!(!result.status.success(), "{env_name}={value}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains(env_name), "{env_name}: {stderr}");
+        assert!(!output.exists(), "{env_name}={value}");
+    }
+    assert!(seen.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "full CLI/API/PDF request-and-output process e2e"]
+async fn boolean_env_and_flags_reach_the_route_with_strict_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    // Env-disabled semantics suppress all three semantic candidates: one layout request only.
+    let (url, seen) = mock_with(true, None).await;
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(&pdf)
+        .args(["-o"])
+        .arg(dir.path().join("env-out"))
+        .args(["--url", &url])
+        .env("MINERU_FORMULA_ENABLE", "false")
+        .env("MINERU_TABLE_ENABLE", "false")
+        .env("MINERU_IMAGE_ANALYSIS_ENABLE", "false");
+    assert!(command(cmd).await.status.success());
+    let calls = seen.0.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(kind, _, _)| kind == "completion")
+            .count(),
+        1
+    );
+    assert!(calls.iter().any(|(kind, body, _)| kind == "completion"
+        && body["messages"].to_string().contains("Layout Detection")));
+    drop(calls);
+
+    // An explicit CLI flag beats the frozen environment (false via env, true via CLI).
+    let (url, seen) = mock_with(true, None).await;
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(&pdf)
+        .args(["-o"])
+        .arg(dir.path().join("cli-out"))
+        .args([
+            "--url",
+            &url,
+            "--formula",
+            "true",
+            "--table",
+            "true",
+            "--image-analysis",
+            "true",
+        ])
+        .env("MINERU_FORMULA_ENABLE", "false")
+        .env("MINERU_TABLE_ENABLE", "false")
+        .env("MINERU_IMAGE_ANALYSIS_ENABLE", "false");
+    assert!(command(cmd).await.status.success());
+    let calls = seen.0.lock().unwrap();
+    let completions = calls
+        .iter()
+        .filter(|(kind, _, _)| kind == "completion")
+        .count();
+    // Env said false but the explicit CLI booleans re-enable all three semantic candidates.
+    assert_eq!(completions, 4, "{calls:?}");
+}
+
+#[tokio::test]
+#[ignore = "CLI process contract e2e"]
+async fn remote_mode_rejects_local_vlm_transport_controls_before_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("out");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    for extra in [
+        &["--http-max-concurrency", "50"][..],
+        &["--batch-size", "8"][..],
+        &["--vlm-debug", "true"][..],
+        &["--page-concurrency", "9"][..],
+    ] {
+        let mut cmd = mineru();
+        cmd.args(["-p", "tests/fixtures/pdf/minimal.pdf", "-o"])
+            .arg(&output)
+            .args(["--api-url", &api_url])
+            .args(extra);
+        let result = command(cmd).await;
+        assert!(!result.status.success(), "{extra:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("local VLM transport controls"),
+            "{extra:?}"
+        );
+        assert!(!output.exists(), "{extra:?}");
+    }
+    let mut cmd = mineru();
+    cmd.args(["-p", "tests/fixtures/pdf/minimal.pdf", "-o"])
+        .arg(&output)
+        .args(["--api-url", &api_url])
+        .env("MINERU_VL_DEBUG_ENABLE", "true");
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("MINERU_VL_DEBUG_ENABLE"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!output.exists());
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[tokio::test]
+#[ignore = "full CLI/API/PDF request-and-output process e2e"]
+async fn cli_core_overrides_and_batch_reach_the_scheduler() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    // A deterministic three-candidate layout plus held completions makes the real semantic
+    // scheduler's active/peak admissions observable: batch 1 admits one request at a time,
+    // batch 3 admits all three candidates concurrently.
+    for (batch, expected_peak) in [("1", 1), ("3", 3)] {
+        let (url, seen, peak) = batch_mock().await;
+        let out = dir.path().join(format!("out-{batch}"));
+        let mut cmd = mineru();
+        cmd.args(["-p"])
+            .arg(&pdf)
+            .args(["-o"])
+            .arg(&out)
+            .args([
+                "--url",
+                &url,
+                "--processing-window-size",
+                "1",
+                "--page-concurrency",
+                "9",
+                "--render-workers",
+                "4",
+                "--batch-size",
+                batch,
+                "--http-max-concurrency",
+                "6",
+            ])
+            // The frozen environment must lose to the explicit CLI batch value.
+            .env("MINERU_PROCESSING_WINDOW_SIZE", "2")
+            .env("MINERU_OFFICIAL_PAGE_CONCURRENCY", "5")
+            .env("MINERU_BATCH_SIZE", "1");
+        let result = command(cmd).await;
+        assert!(
+            result.status.success(),
+            "batch {batch}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert_eq!(
+            observed_peak, expected_peak,
+            "batch {batch}: observed peak concurrent semantic requests"
+        );
+        let calls = seen.0.lock().unwrap();
+        let completions = calls
+            .iter()
+            .filter(|(kind, _, _)| kind == "completion")
+            .count();
+        // One layout plus three semantic candidates per page prove real admission.
+        assert_eq!(completions, 4, "batch {batch}: {calls:?}");
+        assert!(calls.iter().any(|(kind, body, _)| kind == "completion"
+            && body["messages"].to_string().contains("Layout Detection")));
+        let middle: Value = serde_json::from_slice(
+            &std::fs::read(out.join("document/vlm/document_middle.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(middle["pdf_info"][0]["page_idx"], 0);
+    }
+}
+
+#[tokio::test]
+#[ignore = "full CLI/API/PDF request-and-output process e2e"]
+async fn vlm_debug_flag_reaches_the_http_request_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let (url, seen, _) = batch_mock().await;
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(&pdf)
+        .args(["-o"])
+        .arg(dir.path().join("out"))
+        .args(["--url", &url, "--vlm-debug", "true"]);
+    assert!(command(cmd).await.status.success(), "vlm-debug run failed");
+    let calls = seen.0.lock().unwrap();
+    let (_, request, _) = calls
+        .iter()
+        .find(|(kind, _, _)| kind == "completion")
+        .unwrap();
+    assert_eq!(request["vllm_xargs"]["debug"], json!(true), "{request}");
 }
 
 #[tokio::test]
@@ -660,7 +1093,7 @@ async fn backend_and_zero_batch_fail_before_network_or_output() {
 
 #[tokio::test]
 #[ignore = "full CLI/PDF fail-stop process e2e"]
-async fn sequential_batches_stop_at_failed_document() {
+async fn sequential_documents_stop_at_failed_document() {
     let dir = tempfile::tempdir().unwrap();
     for name in ["a.pdf", "b.pdf", "c.pdf"] {
         std::fs::copy("tests/fixtures/pdf/minimal.pdf", dir.path().join(name)).unwrap();
@@ -750,8 +1183,8 @@ async fn special_files_make_no_network_or_socket_output() {
 async fn duplicate_canonical_stems_receive_smallest_suffixes() {
     let dir = tempfile::tempdir().unwrap();
     let (url, seen) = mock().await;
-    std::fs::copy("tests/fixtures/pdf/minimal.pdf", dir.path().join("a!.pdf")).unwrap();
     std::fs::copy("tests/fixtures/pdf/minimal.pdf", dir.path().join("a?.pdf")).unwrap();
+    std::fs::copy("tests/fixtures/pdf/minimal.pdf", dir.path().join("a*.pdf")).unwrap();
     let output_root = tempfile::tempdir().unwrap();
     let output = output_root.path().join("duplicate-out");
     let mut cmd = mineru();
@@ -827,6 +1260,44 @@ async fn cli_env_precedence_and_canonical_request_are_real() {
         assert!(vlm.join(name).is_file(), "{name}");
     }
     assert!(!dir.path().join("out/document/document.json").exists());
+}
+
+#[tokio::test]
+async fn chinese_basename_stem_reaches_final_output_paths_and_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = dir.path().join("文档《报告》·2026.pdf");
+    std::fs::copy("tests/fixtures/pdf/minimal.pdf", &pdf).unwrap();
+    let (url, seen) = mock().await;
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(&pdf)
+        .args(["-o"])
+        .arg(dir.path().join("out"))
+        .args(["--url", &url]);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let vlm = dir.path().join("out/文档《报告》·2026/vlm");
+    for name in [
+        "文档《报告》·2026.md",
+        "文档《报告》·2026_middle.json",
+        "文档《报告》·2026_model.json",
+        "文档《报告》·2026_content_list.json",
+        "文档《报告》·2026_content_list_v2.json",
+        "文档《报告》·2026_layout.pdf",
+    ] {
+        assert!(vlm.join(name).is_file(), "{name}");
+    }
+    assert!(
+        seen.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(kind, _, _)| kind == "completion")
+    );
 }
 
 #[tokio::test]
@@ -1129,8 +1600,8 @@ async fn api_mode_mixed_inputs_use_exact_forms_waves_and_layouts() {
     );
     assert!(run.stdout.is_empty());
     let stderr = String::from_utf8(run.stderr).unwrap();
-    let events: Vec<_> = stderr
-        .lines()
+    let events: Vec<_> = unstamped(stderr.as_bytes())
+        .into_iter()
         .filter(|line| line.contains("task#1 [a]"))
         .collect();
     assert_eq!(
@@ -1337,15 +1808,16 @@ async fn api_mode_sorts_typed_failures_without_generic_duplicate() {
     assert!(!run.status.success());
     assert!(run.stdout.is_empty());
     let stderr = String::from_utf8(run.stderr).unwrap();
+    let lines = unstamped(stderr.as_bytes());
     assert_eq!(
-        stderr.lines().collect::<Vec<_>>(),
+        lines,
         [
             "api failed: task#1 [a]: task submission HTTP 400 Bad Request: failure-a",
             "api failed: task#2 [b]: task submission HTTP 400 Bad Request: failure-b",
             "api failed: task#3 [c]: task submission HTTP 400 Bad Request: failure-c",
         ]
     );
-    assert!(!stderr.lines().any(|line| line.starts_with("failed:")));
+    assert!(!lines.iter().any(|line| line.starts_with("failed:")));
     assert!(!stderr.contains("api submitted:") && !stderr.contains("api completed:"));
     assert!(!stderr.contains("document started:") && !stderr.contains("document completed:"));
     let observed = state.lock().unwrap();

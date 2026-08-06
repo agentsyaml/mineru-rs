@@ -6,7 +6,7 @@
 
 ### Rust extension: official-shape output
 
-`mineru-vlm --official-output` is a Rust-only low-level direct route: it accepts PDF directories (processed recursively) and writes six official-shape artifacts and a preview to `<output>/<stem>/vlm`. In this mode, `--base-url` and `--model` may be supplied by `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, or single-model discovery; the default compatibility mode still requires both. `--batch-size` is available only with this switch, defaults to `1`, and is used only for local document grouping/progress; it is **not** MinerU's 64-page processing window.
+`mineru-vlm --official-output` is a Rust-only low-level direct route: it accepts PDF directories (processed recursively) and writes six official-shape artifacts and a preview to `<output>/<stem>/vlm`. In this mode, `--base-url` and `--model` may be supplied by `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, or single-model discovery; the default compatibility mode still requires both. `--batch-size` is available only with this switch; when omitted it uses the official route's compiled default of 32. It is the real per-page semantic inference request admission (inference batching), **not** input-document grouping and **not** MinerU's 64-page processing window. Page concurrency (`--page-concurrency`) and the processing window (`--processing-window-size`) remain separate axes.
 
 See [compatibility.md](compatibility.md) for the compatibility baseline, reference suite, and reproducible installation. This statement covers only the `vlm-http-client` PDF flow; it is not a full MinerU 3.4.4 compatibility statement.
 
@@ -132,11 +132,54 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `-u, --url <URL>` | None | VLM service-address override in direct mode; per-task model-server override in API mode. |
 | `-s, --start <n>` | `0` | Start page, **zero-based**. |
 | `-e, --end <n>` | None (through the last page) | End page, **inclusive**. |
-| `-f, --formula <true\|false>` | `true` | Formula recognition. |
-| `-t, --table <true\|false>` | `true` | Table recognition. |
-| `--image-analysis <true\|false>` | `true` | Image analysis. |
+| `-f, --formula <true\|false>` | `true` | Formula recognition. Explicit boolean; precedence `CLI > MINERU_FORMULA_ENABLE > default`. |
+| `-t, --table <true\|false>` | `true` | Table recognition. Explicit boolean; precedence `CLI > MINERU_TABLE_ENABLE > default`. |
+| `--image-analysis <true\|false>` | `true` | Image analysis. Explicit boolean; precedence `CLI > MINERU_IMAGE_ANALYSIS_ENABLE > default`. |
+| `--log-level <level>` | `info` | Log verbosity: `trace`, `debug`, `info`, `success`, `warning`, `error`, `critical`. Overrides `MINERU_LOG_LEVEL`. |
+| `--processing-window-size <n>` | `64` | Page processing window. Overrides `MINERU_PROCESSING_WINDOW_SIZE`. |
+| `--page-concurrency <n>` | `4` | Official page admission concurrency (any positive value; still bounded below by the window and HTTP concurrency). Overrides `MINERU_OFFICIAL_PAGE_CONCURRENCY`. |
+| `--render-workers <n>` | `3` | Rendering workers; effective count is capped by available parallelism and selected pages, not by 3. Overrides `MINERU_PDF_RENDER_THREADS`. |
+| `--render-timeout-seconds <n>` | `300` | Per-render timeout. Overrides `MINERU_PDF_RENDER_TIMEOUT`. |
+| `--batch-size <n>` | `32` | Per-page semantic inference request admission (inference batching), distinct from page concurrency and the processing window. Overrides `MINERU_BATCH_SIZE`. |
+| `--total-deadline-seconds <n>` | `86400` | Per-document total deadline. Overrides `MINERU_TOTAL_DEADLINE_SECONDS`. |
+| `--max-pdf-bytes <n>` | `536870912` | Resident source-PDF cap. Overrides `MINERU_MAX_PDF_BYTES`. |
+| `--max-pages <n>` | `10000` | Maximum selected pages per document. Overrides `MINERU_MAX_PAGES`. |
+| `--max-page-pixels <n>` | `100000000` | Per-page pixel cap. Overrides `MINERU_MAX_PAGE_PIXELS`. |
+| `--max-rendered-image-bytes <n>` | `67108864` | Per-render RGB cap. Overrides `MINERU_MAX_RENDERED_IMAGE_BYTES`. |
+| `--max-in-flight-image-bytes <n>` | `134217728` | In-flight RGB budget. Overrides `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`. |
+| `--max-raw-output-bytes <n>` | `134217728` | Per-document raw output budget. Overrides `MINERU_MAX_RAW_OUTPUT_BYTES`. |
+| `--max-layout-blocks-per-page <n>` | `256` | Layout block cap per page. Overrides `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE`. |
+| `--max-semantic-requests-per-page <n>` | `128` | Semantic request cap per page. Overrides `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE`. |
+| `--max-encoded-request-bytes <n>` | `16777216` | Encoded request cap. Overrides `MINERU_MAX_ENCODED_REQUEST_BYTES`. |
+| `--max-encoded-batch-bytes <n>` | `67108864` | Encoded batch cap. Overrides `MINERU_MAX_ENCODED_BATCH_BYTES`. |
+| `--max-total-asset-bytes <n>` | `1073741824` | Total asset cap. Overrides `MINERU_MAX_TOTAL_ASSET_BYTES`. |
+| `--max-staged-text-bytes <n>` | `268435456` | Staged text cap. Overrides `MINERU_MAX_STAGED_TEXT_BYTES`. |
+
+All numeric flags are strict: malformed, non-finite, zero-where-invalid, overflowing, or platform-unrepresentable values fail before any network or output work. Precedence is `CLI > environment > compiled default` for every knob.
+
+VLM transport knobs (each also has an environment spelling):
+
+| Flag | Default | Overrides |
+| --- | ---: | --- |
+| `--http-max-concurrency <n>` | `100` | `MINERU_VLM_HTTP_CONCURRENCY` |
+| `--http-timeout-seconds <n>` | `600` | `MINERU_VLM_HTTP_TIMEOUT` |
+| `--connect-timeout-seconds <n>` | `10` | `MINERU_VLM_CONNECT_TIMEOUT` |
+| `--http-max-keepalive-connections <n>` | `20` | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` |
+| `--http-keepalive-expiry-seconds <n>` | `5` | `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` |
+| `--http-max-retries <n>` | `3` | `MINERU_VLM_HTTP_MAX_RETRIES` |
+| `--http-retry-backoff-factor <f>` | `0.5` | `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` |
+| `--max-remote-image-bytes <n>` | `33554432` | `MINERU_VLM_MAX_IMAGE_BYTES` |
+| `--max-decoded-pixels <n>` | `100000000` | `MINERU_VLM_MAX_DECODED_PIXELS` |
+| `--max-images-per-request <n>` | `64` | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` |
+| `--max-redirects <n>` | `3` | `MINERU_VLM_MAX_REDIRECTS` |
+| `--http-max-response-bytes <n>` | `10485760` | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` |
+| `--vlm-debug <true\|false>` | `false` | Sends `vllm_xargs.debug` in the VLM request body. Overrides `MINERU_VL_DEBUG_ENABLE`. |
+
+Diagnostic/human-output truncation caps remain compiled and are not configurable. The existing `--max-input-bytes`, `--max-encoded-document-bytes`, and `--max-output-bytes` pairs are unchanged.
 
 In direct mode, non-default values for `--method`, `--effort`, and `--lang` produce a warning and are ignored. `--client-side-output-generation=true` is rejected in API mode.
+
+In API mode, the local VLM transport knobs (`--page-concurrency`, `--processing-window-size`, `--render-*`, `--batch-size`, all `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--vlm-debug` and their environment spellings) fail explicitly, because the remote server performs parsing and those controls would have no consumer; `MINERU_VL_SERVER` is submitted as the per-task `server_url` when `--url` is absent.
 
 ---
 
@@ -194,30 +237,90 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `--host <IP>` | `127.0.0.1` | Bind address. A non-loopback address also requires `MINERU_API_PUBLIC_BIND_EXPOSED`, otherwise startup fails. |
 | `--port <port>` | `8000` | Listening port. |
 | `--output-root <directory>` | `./output` | Root directory for task output and temporary files. |
-| `--concurrency <n>` | `3` outside macOS, `1` on macOS | Number of tasks processed concurrently. |
+| `--concurrency <n>` | `3` | Number of tasks processed concurrently. |
 | `--shutdown-on-stdin-eof` | Off | Gracefully exit when stdin closes; suitable for parent-process management. |
 
-`--output-root`, `--concurrency`, and `--shutdown-on-stdin-eof` override their corresponding environment variables; when omitted, the environment-variable value or the table default remains in effect. When `--concurrency` is explicitly supplied, macOS is no longer forced to 1.
+`--output-root`, `--concurrency`, and `--shutdown-on-stdin-eof` override their corresponding environment variables; when omitted, the environment-variable value or the table default remains in effect. Explicit values are honored on every platform; there is no macOS concurrency floor.
 
 ### Environment variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `MINERU_API_OUTPUT_ROOT` | `./output` | Output root directory. |
-| `MINERU_API_MAX_CONCURRENT_REQUESTS` | `3` outside macOS, `1` on macOS | Number of concurrent tasks; non-positive or invalid values cause startup to fail. |
+| `MINERU_API_MAX_CONCURRENT_REQUESTS` | `3` | Number of concurrent tasks; non-positive or invalid values cause startup to fail. |
 | `MINERU_API_TASK_RETENTION_SECONDS` | `86400` | Retention period for terminal task records. |
 | `MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS` | `300` | Cleanup scan interval. |
 | `MINERU_API_PUBLIC_BIND_EXPOSED` | Off | Allow binding a non-loopback address. |
 | `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` | Off | Allow POST parsing requests when publicly bound. |
 | `MINERU_API_SHUTDOWN_ON_STDIN_EOF` | Off | Equivalent to `--shutdown-on-stdin-eof`. |
+| `MINERU_API_RECORD_CAP` | `32` | Max concurrent task records. |
+| `MINERU_API_FILE_CAP` | `536870912` | Per-upload file byte cap. |
+| `MINERU_API_BODY_CAP` | `537001984` | Multipart request body byte cap. |
+| `MINERU_API_TEXT_CAP` | `65536` | Per-form text field byte cap. |
+| `MINERU_API_TEXT_TOTAL_CAP` | `262144` | Aggregate form text byte cap. |
+| `MINERU_API_FORM_FIELDS_CAP` | `32` | Max multipart form fields. |
+| `MINERU_OFFICE_INPUT_BYTES` | `33554432` | Office helper input byte cap (child-environment). |
+| `MINERU_OFFICE_OUTPUT_BYTES` | `67108864` | Office helper output PDF byte cap. |
+| `MINERU_OFFICE_STDERR_BYTES` | `4096` | Office helper stderr diagnostic cap. |
+| `MINERU_OFFICE_WALL_SECONDS` | `180` | Office helper managed wall-time cap. |
+| `MINERU_OFFICE_CPU_SECONDS` | `120` | Office helper CPU-seconds rlimit. |
+| `MINERU_OFFICE_NOFILE` | `256` | Office helper NOFILE rlimit. |
+| `MINERU_OFFICE_ADDRESS_SPACE_BYTES` | `1073741824` | Office helper address-space rlimit (Linux). |
+| `MINERU_OFFICE_ACTIVE_PROCESS_LIMIT` | `8` | Office helper Windows job active-process limit. |
+| `MINERU_OFFICE_PROCESS_MEMORY_BYTES` | `1073741824` | Office helper Windows per-process memory limit. |
+| `MINERU_OFFICE_JOB_MEMORY_BYTES` | `1073741824` | Office helper Windows job memory limit. |
+| `MINERU_OFFICE_PROCESS_TIME_SECONDS` | `120` | Office helper Windows per-process user time. |
+| `MINERU_OFFICE_JOB_TIME_SECONDS` | `120` | Office helper Windows per-job user time. |
+| `MINERU_OOXML_ARCHIVE_BYTES` | `536870912` | OOXML preflight archive byte cap. |
+| `MINERU_OOXML_EXPANDED_BYTES` | `268435456` | OOXML preflight expanded byte cap. |
+| `MINERU_OOXML_XML_ENTRY_BYTES` | `8388608` | OOXML per-XML-entry byte cap. |
+| `MINERU_OOXML_XML_TOTAL_BYTES` | `33554432` | OOXML aggregate XML byte cap. |
+| `MINERU_OOXML_RATIO` | `500` | OOXML entry compression ratio cap. |
+| `MINERU_OOXML_XML_DEPTH` | `128` | OOXML XML depth cap. |
+| `MINERU_OOXML_XML_EVENTS` | `100000` | OOXML XML event cap. |
+| `MINERU_OOXML_XML_ATTRIBUTES` | `256` | OOXML per-element attribute cap. |
+| `MINERU_OOXML_XML_NAMESPACES` | `256` | OOXML per-element namespace cap. |
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
-| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | Official direct-route page concurrency; integer from 1 through 8 (`2` is the low-memory fallback). |
+| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | Official direct-route page concurrency; any positive value. |
 | `MINERU_PDF_RENDER_THREADS` | `3` | Number of rendering workers. |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | Timeout in seconds for a single render. |
-| `MINERU_FORMULA_ENABLE` | On | Default for formula recognition. |
-| `MINERU_TABLE_ENABLE` | On | Default for table recognition. |
+| `MINERU_FORMULA_ENABLE` | On | Default for formula recognition (strict `true`/`false`, case-insensitive). |
+| `MINERU_TABLE_ENABLE` | On | Default for table recognition (strict `true`/`false`). |
+| `MINERU_IMAGE_ANALYSIS_ENABLE` | On | Default for image analysis (strict `true`/`false`). |
+| `MINERU_LOG_LEVEL` | `info` | Log verbosity; `critical` silences progress. |
+| `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
+| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | Official page admission concurrency (any positive value). |
+| `MINERU_PDF_RENDER_THREADS` | `3` | Rendering workers. |
+| `MINERU_PDF_RENDER_TIMEOUT` | `300` | Per-render timeout in seconds. |
+| `MINERU_BATCH_SIZE` | `32` | Per-page semantic inference request admission. |
+| `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | Per-document total deadline. |
+| `MINERU_MAX_PDF_BYTES` | `536870912` | Resident source-PDF cap. |
+| `MINERU_MAX_PAGES` | `10000` | Maximum selected pages per document. |
+| `MINERU_MAX_PAGE_PIXELS` | `100000000` | Per-page pixel cap. |
+| `MINERU_MAX_RENDERED_IMAGE_BYTES` | `67108864` | Per-render RGB cap. |
+| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `134217728` | In-flight RGB budget. |
+| `MINERU_MAX_RAW_OUTPUT_BYTES` | `134217728` | Per-document raw output budget. |
+| `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE` | `256` | Layout block cap per page. |
+| `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE` | `128` | Semantic request cap per page. |
+| `MINERU_MAX_ENCODED_REQUEST_BYTES` | `16777216` | Encoded request cap. |
+| `MINERU_MAX_ENCODED_BATCH_BYTES` | `67108864` | Encoded batch cap. |
+| `MINERU_MAX_TOTAL_ASSET_BYTES` | `1073741824` | Total asset cap. |
+| `MINERU_MAX_STAGED_TEXT_BYTES` | `268435456` | Staged text cap. |
+| `MINERU_VLM_HTTP_CONCURRENCY` | `100` | VLM HTTP concurrency. |
+| `MINERU_VLM_HTTP_TIMEOUT` | `600` | VLM HTTP request timeout in seconds. |
+| `MINERU_VLM_CONNECT_TIMEOUT` | `10` | Connect timeout in seconds. |
+| `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` | `20` | Keepalive pool size. |
+| `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` | `5` | Keepalive expiry in seconds. |
+| `MINERU_VLM_HTTP_MAX_RETRIES` | `3` | HTTP retry count. |
+| `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` | `0.5` | Retry backoff factor. |
+| `MINERU_VLM_MAX_IMAGE_BYTES` | `33554432` | Remote image byte cap. |
+| `MINERU_VLM_MAX_DECODED_PIXELS` | `100000000` | Decoded-pixel cap. |
+| `MINERU_VLM_MAX_IMAGES_PER_REQUEST` | `64` | Images per request cap. |
+| `MINERU_VLM_MAX_REDIRECTS` | `3` | Redirect cap. |
+| `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP response cap. |
+| `MINERU_VL_DEBUG_ENABLE` | Off | VLM request debug flag (strict `true`/`false`). |
 
-Boolean variables accept `1`, `true`, `yes`, and `on` (case-insensitive); other values are treated as off. Invalid numeric values other than concurrency fall back to their defaults.
+For the canonical CLI, every numeric and boolean variable is strict: booleans accept only case-insensitive `true`/`false` (`1`, `yes`, `on` now fail instead of silently meaning off); malformed, non-finite, zero-where-invalid, overflowing, or unrepresentable numeric values fail before any network or output work rather than falling back. (The service startup keeps its legacy fallbacks until the service lane lands; its concurrency setting still fails on non-positive values.)
 
 ### HTTP interface
 
@@ -330,9 +433,9 @@ When authentication is required, set `BearerToken::new(...)` on the public `bear
 
 ### Document-limit controls
 
-`--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`, `--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES`, and `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` accept unsigned decimal bytes (whitespace and `_` are allowed). CLI overrides environment, then the compiled default: 4_293_918_719 input bytes, 8 GiB encoded document bytes, and 8 GiB output bytes. Explicit invalid, zero, or over-ceiling values fail; hard ceilings are 16 GiB, 64 GiB, and 16 GiB respectively.
+`--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`, `--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES`, and `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` accept unsigned decimal bytes (whitespace and `_` are allowed). CLI overrides environment, then the compiled default: 4_293_918_719 input bytes, 8 GiB encoded document bytes, and 8 GiB output bytes. Explicit invalid, zero, overflowing, or platform-unrepresentable values fail; there are no arbitrary hard ceilings — a configured value is used as policy rather than clamped to another constant.
 
-These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above 512 MiB before `lopdf` loads them, and one VLM response remains capped at 10 MiB. Configure encoded policy on `mineru-vlm-api`; canonical remote mode rejects its encoded override. Ordinary legacy `mineru-vlm` keeps its resident parser cap and requires `--official-output` for an encoded-document override.
+These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above the resident cap (`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`, default 512 MiB) before `lopdf` loads them, and one VLM response remains capped at 10 MiB (`--http-max-response-bytes`). Configure encoded policy on `mineru-vlm-api`; canonical remote mode rejects its encoded override. Ordinary legacy `mineru-vlm` keeps its resident parser cap and requires `--official-output` for an encoded-document override.
 
 | Item | Default |
 | --- | ---: |
@@ -340,8 +443,10 @@ These are disk/document totals, not resident allocations: parsed PDFs and the cu
 | Per-page pixels / rendered RGB image | 100,000,000 / 64 MiB |
 | Response body / all assets | 10 MiB / 1 GiB |
 | Layout blocks per page / page window | 256 / 64 pages |
+| Semantic requests per page / inference batch | 128 / 32 |
 | Concurrent in-flight rendered images | 128 MiB |
-| Request concurrency / rendering workers | 100 / 3 (rendering is actually at most 3) |
+| Request concurrency / rendering workers | 100 / 3 (workers are further bounded by CPU and selected pages, not capped at 3) |
+| Official page admission concurrency | 4 (no fixed ceiling) |
 | Connection / per-request / total parsing timeout | 10 seconds / 600 seconds / 24 hours |
 
 ### Sources of defaults and capacity

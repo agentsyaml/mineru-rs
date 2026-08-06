@@ -49,7 +49,29 @@ pub(crate) struct MineruApiClient {
     timing: Timing,
 }
 impl MineruApiClient {
+    #[cfg(test)]
     pub(crate) fn new(base_url: &str) -> Result<Self, String> {
+        Self::with_connect_timeout(base_url, Duration::from_secs(10))
+    }
+
+    /// Crate-private construction carrying the frozen Phase-1B transport timing.
+    pub(crate) fn new_with_transport(
+        base_url: &str,
+        connect_timeout: Duration,
+        acquisition: Duration,
+        send: Duration,
+        interval: Duration,
+    ) -> Result<Self, String> {
+        let mut client = Self::with_connect_timeout(base_url, connect_timeout)?;
+        client.timing = Timing {
+            acquisition,
+            send,
+            interval,
+        };
+        Ok(client)
+    }
+
+    fn with_connect_timeout(base_url: &str, connect_timeout: Duration) -> Result<Self, String> {
         let base = normalize_api_url(base_url);
         if base.is_empty() {
             return Err("API URL is empty".into());
@@ -70,7 +92,7 @@ impl MineruApiClient {
         let redirect_origin = parsed.clone();
         let client = Client::builder()
             .redirect(redirect_policy(redirect_origin))
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(connect_timeout)
             .build()
             .map_err(|_| "unable to construct API client".to_string())?;
         Ok(Self {

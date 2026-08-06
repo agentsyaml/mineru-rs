@@ -1120,25 +1120,42 @@ fn retry_error(e: &reqwest::Error) -> bool {
 fn retry_status(s: StatusCode) -> bool {
     s == StatusCode::TOO_MANY_REQUESTS || s == StatusCode::REQUEST_TIMEOUT || s.is_server_error()
 }
+/// Ceiling for a server-provided `Retry-After` hint (seconds). The hint is server-controlled, not
+/// operator-configurable, so it is capped to keep deadline-free paths (e.g. `/v1/models`
+/// discovery) from stalling for hours on a hostile or buggy server. The operator's own
+/// `retry_backoff` factor remains uncapped.
+const RETRY_AFTER_HINT_CAP_SECS: u64 = 300;
+fn retry_after_hint(value: &str) -> Option<Duration> {
+    if let Ok(n) = value.parse::<u64>() {
+        return Some(Duration::from_secs(n.min(RETRY_AFTER_HINT_CAP_SECS)));
+    }
+    httpdate::parse_http_date(value)
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::now()).ok())
+        .map(|wait| wait.min(Duration::from_secs(RETRY_AFTER_HINT_CAP_SECS)))
+}
 fn retry_after(r: &reqwest::Response) -> Option<Duration> {
     let s = r
         .headers()
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
         .ok()?;
-    if let Ok(n) = s.parse::<u64>() {
-        return Some(Duration::from_secs(n.min(60)));
+    retry_after_hint(s)
+}
+/// Exponential backoff from the configured factor with no fixed cap. The exponent is bounded to
+/// keep the float arithmetic finite, and a non-finite/overflowing result maps to the largest
+/// representable wait rather than panicking in `Duration::from_secs_f32`.
+fn retry_backoff(attempt: usize, f: f32) -> Duration {
+    let exponent = u32::try_from(attempt).unwrap_or(u32::MAX).min(128);
+    let seconds = f.max(0.0) * 2f32.powi(exponent as i32);
+    if seconds.is_finite() {
+        Duration::try_from_secs_f32(seconds).unwrap_or(Duration::MAX)
+    } else {
+        Duration::MAX
     }
-    httpdate::parse_http_date(s)
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::now()).ok())
-        .map(|d| d.min(Duration::from_secs(60)))
 }
 async fn retry_wait(attempt: usize, f: f32, hint: Option<Duration>) {
-    tokio::time::sleep(hint.unwrap_or_else(|| {
-        Duration::from_secs_f32((f.max(0.) * 2f32.powi(attempt as i32)).min(60.))
-    }))
-    .await
+    tokio::time::sleep(hint.unwrap_or_else(|| retry_backoff(attempt, f))).await
 }
 async fn read_limited(
     mut r: reqwest::Response,
@@ -1275,7 +1292,8 @@ fn sse_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        ByteBudget, VlmHttpClient, build_body, global, json_worker, model_candidates, strip_end,
+        ByteBudget, VlmHttpClient, build_body, global, json_worker, model_candidates,
+        retry_after_hint, retry_backoff, strip_end,
     };
     use crate::{
         SamplingParams, TaskWorkLease, VlmError, VlmHttpConfig, VlmImageInput, VlmRequest,
@@ -1290,7 +1308,7 @@ mod tests {
         io::Cursor,
         net::{IpAddr, Ipv4Addr},
         sync::Arc,
-        time::Duration,
+        time::{Duration, SystemTime},
     };
     use url::Url;
 
@@ -1315,6 +1333,35 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn retry_backoff_follows_the_configured_factor_without_a_fixed_cap() {
+        // Default factor 0.5: exponential waits 0.5, 1, 2, 4 seconds.
+        assert_eq!(retry_backoff(0, 0.5), Duration::from_millis(500));
+        assert_eq!(retry_backoff(1, 0.5), Duration::from_secs(1));
+        assert_eq!(retry_backoff(2, 0.5), Duration::from_secs(2));
+        assert_eq!(retry_backoff(3, 0.5), Duration::from_secs(4));
+        // The removed 60 s ceiling: a large configured factor yields waits above 60 s.
+        assert!(retry_backoff(7, 2.0) > Duration::from_secs(60));
+        // A zero factor waits immediately; extreme exponents stay overflow-safe.
+        assert!(retry_backoff(0, 0.0).is_zero());
+        assert_eq!(retry_backoff(usize::MAX, 0.5), Duration::MAX);
+    }
+
+    #[test]
+    fn server_retry_after_hint_is_capped_while_operator_backoff_is_not() {
+        // A hostile/buggy server hint is capped at 5 minutes.
+        assert_eq!(retry_after_hint("3600"), Some(Duration::from_secs(300)));
+        assert_eq!(retry_after_hint("120"), Some(Duration::from_secs(120)));
+        // HTTP-date hints are capped the same way.
+        let far_future = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(7200));
+        assert_eq!(
+            retry_after_hint(&far_future),
+            Some(Duration::from_secs(300))
+        );
+        // The operator factor remains uncapped above the server-hint ceiling.
+        assert!(retry_backoff(8, 2.0) > Duration::from_secs(300));
     }
 
     #[test]

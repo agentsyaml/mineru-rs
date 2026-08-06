@@ -20,18 +20,19 @@ struct Cli {
     page_start: Option<u32>,
     #[arg(long)]
     page_end: Option<u32>,
-    #[arg(long)]
-    no_formula: bool,
-    #[arg(long)]
-    no_table: bool,
-    #[arg(long)]
-    no_image_analysis: bool,
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    no_formula: Option<bool>,
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    no_table: Option<bool>,
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    no_image_analysis: Option<bool>,
     /// Rust-only: use the bounded transactional direct route and official-shaped output.
     #[arg(long)]
     official_output: bool,
-    /// Rust-only document grouping for --official-output; not MinerU's page window.
-    #[arg(long, requires = "official_output", default_value_t = 1)]
-    batch_size: usize,
+    /// Semantic inference request admission per page for --official-output (default 32).
+    /// This is real inference batching, distinct from document grouping and the page window.
+    #[arg(long, requires = "official_output")]
+    batch_size: Option<usize>,
     #[arg(long)]
     max_input_bytes: Option<String>,
     #[arg(long, requires = "official_output")]
@@ -50,11 +51,20 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if !cli.official_output && std::env::var_os("MINERU_MAX_ENCODED_DOCUMENT_BYTES").is_some() {
-        return Err(
-            "MINERU_MAX_ENCODED_DOCUMENT_BYTES applies only to --official-output; configure the server for ordinary mode"
-                .into(),
-        );
+    if !cli.official_output {
+        // Route/service/server-owned frozen-environment knobs cannot act in ordinary mode;
+        // reject them before any network or output work (mirrors canonical direct mode).
+        if let Some(message) =
+            mineru::command::legacy_ordinary_mode_error(|name| std::env::var_os(name))
+        {
+            return Err(message.into());
+        }
+        if std::env::var_os("MINERU_MAX_ENCODED_DOCUMENT_BYTES").is_some() {
+            return Err(
+                "MINERU_MAX_ENCODED_DOCUMENT_BYTES applies only to --official-output; configure the server for ordinary mode"
+                    .into(),
+            );
+        }
     }
     let document_limits = mineru::DocumentLimitPolicy::resolve(
         &mineru::DocumentLimitOverrides {
@@ -76,7 +86,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             no_formula: cli.no_formula,
             no_table: cli.no_table,
             no_image_analysis: cli.no_image_analysis,
-            batch_size: cli.batch_size,
+            // Absent means the official route's compiled default (32); an explicit value is the
+            // real per-page semantic inference admission.
+            batch_size: cli.batch_size.unwrap_or(32),
             document_limits,
         };
         return mineru::command::run_legacy_direct(options)
@@ -85,16 +97,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     let base_url = cli.base_url.ok_or("--base-url is required")?;
     let model = cli.model.ok_or("--model is required")?;
-    let mut config = ClientConfig::new(&base_url, &model)?;
+    let mut config = ClientConfig::from_env(&base_url, &model)?;
     let input = read_input_exact(
         &cli.input,
         document_limits.max_input_bytes,
         config.limits.max_pdf_bytes,
     )?;
-    config.limits.max_total_asset_bytes = config
-        .limits
-        .max_total_asset_bytes
-        .min(usize::try_from(document_limits.max_output_bytes).unwrap_or(usize::MAX));
+    let max_output = usize::try_from(document_limits.max_output_bytes).unwrap_or(usize::MAX);
+    if config.limits.max_total_asset_bytes > max_output {
+        if std::env::var_os("MINERU_MAX_TOTAL_ASSET_BYTES").is_some() {
+            return Err(format!(
+                "MINERU_MAX_TOTAL_ASSET_BYTES={} exceeds the derived document budget MINERU_MAX_OUTPUT_BYTES={}; raise the output budget or lower MINERU_MAX_TOTAL_ASSET_BYTES",
+                config.limits.max_total_asset_bytes, document_limits.max_output_bytes
+            )
+            .into());
+        }
+        config.limits.max_total_asset_bytes = max_output;
+    }
     config.bearer_token = cli
         .api_key
         .or_else(|| std::env::var("MINERU_VL_API_KEY").ok())
@@ -109,9 +128,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             PdfInput::Bytes(input),
             ParseOptions {
                 page_range,
-                formula: !cli.no_formula,
-                table: !cli.no_table,
-                image_analysis: !cli.no_image_analysis,
+                formula: !cli.no_formula.unwrap_or(false),
+                table: !cli.no_table.unwrap_or(false),
+                image_analysis: !cli.no_image_analysis.unwrap_or(false),
                 max_new_tokens: None,
                 allow_truncated: true,
             },
@@ -278,5 +297,54 @@ mod tests {
                 .to_string()
                 .contains("only to --official-output")
         );
+    }
+
+    #[test]
+    fn ordinary_mode_rejects_inert_route_and_service_env_before_network() {
+        for (name, value) in [
+            ("MINERU_OFFICIAL_PAGE_CONCURRENCY", "8"),
+            ("MINERU_API_RECORD_CAP", "40"),
+            ("MINERU_ARCHIVE_MAX_ENTRIES", "5"),
+        ] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::ordinary_mode_inert_env_child",
+                    "--nocapture",
+                ])
+                .env("MINERU_VLM_INERT_ENV_CHILD", "1")
+                .env("MINERU_VLM_INERT_ENV_NAME", name)
+                .env_remove("MINERU_MAX_INPUT_BYTES")
+                .env_remove("MINERU_MAX_OUTPUT_BYTES")
+                .env_remove("MINERU_MAX_ENCODED_DOCUMENT_BYTES")
+                .env(name, value)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_mode_inert_env_child() {
+        if std::env::var_os("MINERU_VLM_INERT_ENV_CHILD").is_none() {
+            return;
+        }
+        let name = std::env::var("MINERU_VLM_INERT_ENV_NAME").unwrap();
+        let cli = Cli::try_parse_from([
+            "mineru-vlm",
+            "a.pdf",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--model",
+            "mock",
+        ])
+        .unwrap();
+        // The guard rejects the inert env before any network or output work, naming it clearly.
+        let error = run(cli).await.unwrap_err().to_string();
+        assert!(error.contains(&name), "{name}: {error}");
     }
 }

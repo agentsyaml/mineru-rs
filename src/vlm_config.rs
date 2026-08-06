@@ -122,7 +122,9 @@ impl VlmHttpConfig {
             connect_timeout: Duration::from_secs(10),
             max_keepalive_connections: 20,
             keepalive_expiry: Duration::from_secs(5),
-            debug: env_debug_with(&get).unwrap_or(false),
+            // The debug knob resolves strictly through `CoreOverrides.vlm_debug` in the
+            // resolve_core path; the lenient env read was removed with the lenient parser.
+            debug: false,
             max_retries: 3,
             retry_backoff_factor: 0.5,
             skip_model_name_checking: false,
@@ -150,13 +152,6 @@ fn env_nonempty_with(get: &impl Fn(&str) -> Option<String>, name: &str) -> Optio
     get(name)
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty())
-}
-fn env_debug_with(get: &impl Fn(&str) -> Option<String>) -> Option<bool> {
-    get("MINERU_VL_DEBUG_ENABLE").and_then(|v| match v.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" => Some(true),
-        "0" | "false" | "no" => Some(false),
-        _ => None,
-    })
 }
 #[derive(Debug, Clone)]
 pub struct MinerUVlmConfig {

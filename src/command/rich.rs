@@ -1,4 +1,4 @@
-use super::{CommandCallback, CommandEvent, CommandScope, plain};
+use super::{CommandCallback, CommandEvent, CommandScope, RunClock, plain};
 use crate::{ProgressEvent, sanitize_event_text};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::{
@@ -62,6 +62,7 @@ struct State {
     color: bool,
     steady: bool,
     show_progress: bool,
+    clock: RunClock,
 }
 
 impl Renderer {
@@ -105,6 +106,7 @@ impl Renderer {
                 color,
                 steady,
                 show_progress,
+                clock: RunClock::start(),
             }),
             level,
         })
@@ -566,7 +568,9 @@ fn print_status(state: &State, status: &str, ansi: &str, message: &str) {
     } else {
         status.to_owned()
     };
-    let _ = state.multi.println(format!("{status}  {message}"));
+    let _ = state
+        .multi
+        .println(format!("{} {status}  {message}", state.clock.stamp()));
 }
 
 fn clean(value: &str) -> String {

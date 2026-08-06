@@ -1,15 +1,14 @@
 //! Internal support for the official MinerU API client.
 //!
 //! Transport, discovery, archive extraction, and CLI wiring intentionally live in later phases.
-#![allow(dead_code)] // P2A defines the private domain consumed by later P2 phases.
 
-mod archive;
+pub mod archive;
 mod http;
 pub(crate) mod ooxml;
 pub(crate) mod planning;
 mod remote_preview;
 mod runner;
-mod zip_scan;
+pub mod zip_scan;
 
 use crate::input_prepare::DocumentKind;
 use serde_json::Value;
@@ -83,30 +82,6 @@ pub fn normalize_remote_language(value: &str) -> Result<String, String> {
     }
 }
 #[doc(hidden)]
-pub fn parse_remote_api_env(get: impl Fn(&str) -> Option<String>) -> Result<RemoteApiEnv, String> {
-    parse_remote_env(get).map(Into::into)
-}
-pub(crate) async fn run_remote_api_documents_scoped_with_workers(
-    documents: Vec<RemoteApiDocument>,
-    output: PathBuf,
-    api_url: String,
-    options: RemoteApiOptions,
-    env: RemoteApiEnv,
-    events: Option<crate::command::CommandCallback>,
-    office: crate::OfficeWorkers,
-) -> Result<Vec<RemoteApiFailure>, String> {
-    run_remote_api_documents_scoped_with_workers_and_policy(
-        documents,
-        output,
-        api_url,
-        options,
-        env,
-        events,
-        office,
-        crate::DocumentLimitPolicy::defaults(),
-    )
-    .await
-}
 pub(crate) async fn run_remote_api_documents_scoped_with_workers_and_policy(
     documents: Vec<RemoteApiDocument>,
     output: PathBuf,
@@ -116,9 +91,20 @@ pub(crate) async fn run_remote_api_documents_scoped_with_workers_and_policy(
     events: Option<crate::command::CommandCallback>,
     office: crate::OfficeWorkers,
     policy: crate::DocumentLimitPolicy,
+    response_cap: usize,
+    service: crate::command::service::ResolvedService,
 ) -> Result<Vec<RemoteApiFailure>, String> {
     runner::run_documents_scoped_with_workers(
-        documents, &output, &api_url, options, env, events, office, policy,
+        documents,
+        &output,
+        &api_url,
+        options,
+        env,
+        events,
+        office,
+        policy,
+        response_cap,
+        service,
     )
     .await
 }
@@ -373,37 +359,6 @@ impl From<RemoteApiEnv> for RemoteEnv {
             download_timeout_seconds: v.download_timeout_seconds,
         }
     }
-}
-impl From<RemoteEnv> for RemoteApiEnv {
-    fn from(v: RemoteEnv) -> Self {
-        Self {
-            max_concurrent_requests: v.max_concurrent_requests,
-            result_timeout_seconds: v.result_timeout_seconds,
-            download_timeout_seconds: v.download_timeout_seconds,
-        }
-    }
-}
-pub(crate) fn parse_remote_env(get: impl Fn(&str) -> Option<String>) -> Result<RemoteEnv, String> {
-    let max = match get("MINERU_API_MAX_CONCURRENT_REQUESTS") {
-        None => 3,
-        Some(value) => value
-            .trim()
-            .parse::<usize>()
-            .ok()
-            .filter(|v| *v > 0)
-            .ok_or("MINERU_API_MAX_CONCURRENT_REQUESTS must be positive")?,
-    };
-    let timeout = |name: &str, default: f64| {
-        get(name)
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .filter(|v| v.is_finite() && *v >= 1.0)
-            .unwrap_or(default)
-    };
-    Ok(RemoteEnv {
-        max_concurrent_requests: max,
-        result_timeout_seconds: timeout("MINERU_TASK_RESULT_TIMEOUT_SECONDS", 3600.0),
-        download_timeout_seconds: timeout("MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS", 600.0),
-    })
 }
 
 #[cfg(test)]
@@ -737,58 +692,5 @@ mod tests {
         ] {
             assert!(validate_health("x", &bad).is_err());
         }
-        assert_eq!(
-            parse_remote_env(|_| None).unwrap(),
-            RemoteEnv {
-                max_concurrent_requests: 3,
-                result_timeout_seconds: 3600.,
-                download_timeout_seconds: 600.
-            }
-        );
-        assert!(
-            parse_remote_env(|n| (n == "MINERU_API_MAX_CONCURRENT_REQUESTS").then(|| "0".into()))
-                .is_err()
-        );
-        assert!(
-            parse_remote_env(|n| (n == "MINERU_API_MAX_CONCURRENT_REQUESTS").then(|| "bad".into()))
-                .is_err()
-        );
-        let env = parse_remote_env(|n| {
-            Some(
-                match n {
-                    "MINERU_API_MAX_CONCURRENT_REQUESTS" => " 4 ",
-                    "MINERU_TASK_RESULT_TIMEOUT_SECONDS" => " 1.5 ",
-                    _ => " 2.5 ",
-                }
-                .into(),
-            )
-        })
-        .unwrap();
-        assert_eq!(
-            (
-                env.max_concurrent_requests,
-                env.result_timeout_seconds,
-                env.download_timeout_seconds
-            ),
-            (4, 1.5, 2.5)
-        );
-        let fallback = parse_remote_env(|n| {
-            Some(
-                match n {
-                    "MINERU_API_MAX_CONCURRENT_REQUESTS" => "4",
-                    "MINERU_TASK_RESULT_TIMEOUT_SECONDS" => "0.5",
-                    _ => "nan",
-                }
-                .into(),
-            )
-        })
-        .unwrap();
-        assert_eq!(
-            (
-                fallback.result_timeout_seconds,
-                fallback.download_timeout_seconds
-            ),
-            (3600., 600.)
-        );
     }
 }

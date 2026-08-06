@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use super::{CommandCallback, CommandEvent};
+use super::{CommandCallback, CommandEvent, RunClock};
 use crate::{ProgressCallback, ProgressEvent, sanitize_event_text};
 
 const TEXT_CAP: usize = 512;
@@ -67,6 +67,7 @@ pub struct EventSink<W: Write + Send> {
     state: Mutex<State<W>>,
     tty: bool,
     level: LogLevel,
+    clock: Option<RunClock>,
 }
 
 struct State<W> {
@@ -79,6 +80,16 @@ struct State<W> {
 
 impl<W: Write + Send + 'static> EventSink<W> {
     pub fn new(writer: W, tty: bool, level: LogLevel) -> Self {
+        Self::with_clock(writer, tty, level, None)
+    }
+
+    /// CLI variant: prepend a run-relative elapsed stamp to every line.
+    /// The server keeps `new`, which stays byte-stable for its stderr contract.
+    pub(crate) fn with_elapsed(writer: W, tty: bool, level: LogLevel) -> Self {
+        Self::with_clock(writer, tty, level, Some(RunClock::start()))
+    }
+
+    fn with_clock(writer: W, tty: bool, level: LogLevel, clock: Option<RunClock>) -> Self {
         Self {
             state: Mutex::new(State {
                 writer,
@@ -89,10 +100,10 @@ impl<W: Write + Send + 'static> EventSink<W> {
             }),
             tty,
             level,
+            clock,
         }
     }
 
-    #[allow(dead_code)] // The canonical CLI wraps events to suppress duplicate failures.
     pub fn callback(self: &Arc<Self>) -> ProgressCallback {
         let sink = Arc::clone(self);
         Arc::new(move |event| sink.event(event))
@@ -172,7 +183,12 @@ impl<W: Write + Send + 'static> EventSink<W> {
             state.warnings = state.warnings.saturating_add(1);
             state.last_warning = detail.as_deref().unwrap_or(&primary).to_owned();
         }
-        let mut line = format!("{phrase}: {primary}");
+        let stamp = self
+            .clock
+            .as_ref()
+            .map(|clock| format!("{} ", clock.stamp()))
+            .unwrap_or_default();
+        let mut line = format!("{stamp}{phrase}: {primary}");
         if let Some(detail) = detail {
             line.push_str(": ");
             line.push_str(&detail);
@@ -373,7 +389,11 @@ mod command_tests {
     #[test]
     fn command_lifecycle_is_silent_and_progress_is_plain() {
         let buffer = Buffer::default();
-        let sink = Arc::new(EventSink::new(buffer.clone(), false, LogLevel::Info));
+        let sink = Arc::new(EventSink::with_elapsed(
+            buffer.clone(),
+            false,
+            LogLevel::Info,
+        ));
         let callback = sink.command_callback();
         callback(CommandEvent::RunPlanned {
             documents: 1,
@@ -390,7 +410,11 @@ mod command_tests {
                 document: "doc".into(),
             },
         });
-        assert_eq!(&*buffer.0.lock().unwrap(), b"document started: doc\n");
+        let line = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            line.starts_with("[+") && line.ends_with("] document started: doc\n"),
+            "{line:?}"
+        );
     }
 
     #[test]

@@ -255,7 +255,6 @@ pub struct VlmPreparedExtraction {
     pub sampling: Vec<Option<SamplingParams>>,
     pub block_indices: Vec<usize>,
 }
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelBlock {
     pub block_type: String,
@@ -334,25 +333,24 @@ fn model_protocol(message: &str) -> VlmError {
         message: message.into(),
     }
 }
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OfficialOutputManifest {
     pub root: PathBuf,
     pub stem: String,
     pub vlm_dir: PathBuf,
 }
-#[allow(dead_code)]
 pub fn sanitize_stem(value: &str) -> String {
     value
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if is_safe_stem_char(c) { c } else { '_' })
         .collect()
+}
+/// Characters that stay in official output stems because they are valid in
+/// filenames on every supported platform, including CJK and Unicode
+/// punctuation. Only NUL/control characters, path separators, and the
+/// Windows-reserved set `<>:"|?*` are replaced.
+pub(crate) fn is_safe_stem_char(c: char) -> bool {
+    !(c.is_control() || matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*'))
 }
 #[cfg(test)]
 mod tests {
@@ -424,7 +422,13 @@ mod tests {
 
     #[test]
     fn output_stem_is_safe() {
-        assert_eq!(sanitize_stem("a bad/pdf"), "a_bad_pdf");
+        assert_eq!(sanitize_stem("a bad/pdf"), "a bad_pdf");
+        assert_eq!(
+            sanitize_stem("a<b>c:d\"e|f?g*h\\i\0j"),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+        assert_eq!(sanitize_stem("a\u{1}b\u{7f}c"), "a_b_c");
+        assert_eq!(sanitize_stem("文档《报告》·2026"), "文档《报告》·2026");
     }
 
     #[test]

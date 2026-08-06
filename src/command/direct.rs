@@ -1,9 +1,8 @@
 //! Shared direct VLM runner for the canonical command and legacy CLI boundary.
-use super::env::{apply_route_env, official_page_concurrency};
 use crate::{
     MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialPdfOptions, ProgressCallback,
     ProgressEvent, RasterWorkers, VlmHeader, VlmHttpConfig, canonical_stem,
-    input_prepare::{DocumentKind, prepare_with_warning},
+    input_prepare::{DocumentKind, prepare_with_warning_and_ooxml},
 };
 #[cfg(unix)]
 use cap_fs_ext::MetadataExt;
@@ -23,6 +22,8 @@ use std::{
 
 pub(super) type WarningCallback = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
 type DirectError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+use super::RunClock;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum DirectMode {
@@ -83,28 +84,76 @@ pub(super) struct DirectOptions {
     pub api_key: Option<String>,
     pub page_start: Option<usize>,
     pub page_end: Option<usize>,
-    pub no_formula: bool,
-    pub no_table: bool,
-    pub no_image_analysis: bool,
-    pub batch_size: usize,
+    /// `Some` forces the boolean from a surface that owns it (the legacy `--no-*` flags).
+    /// `None` means the value was already resolved with strict default -> env -> CLI precedence
+    /// through `CoreOverrides` and must not be re-applied.
+    pub no_formula: Option<bool>,
+    pub no_table: Option<bool>,
+    pub no_image_analysis: Option<bool>,
     pub canonical_mixed: bool,
-    #[allow(dead_code)] // Phase 2 consumes this at the direct enforcement boundary.
     pub document_limits: crate::DocumentLimitPolicy,
 }
 
-fn apply_document_limits(route: &mut OfficialPdfOptions, limits: crate::DocumentLimitPolicy) {
-    if let Ok(value) = usize::try_from(limits.max_encoded_document_bytes) {
-        route.max_encoded_document_bytes = route.max_encoded_document_bytes.min(value);
+/// Caps each resident route budget at the aggregate document policy budget.
+///
+/// A resident budget that was explicitly configured (via `CoreOverrides`) must never be silently
+/// reduced by the derivation; that unresolvable inversion is an error. Reducing only the compiled
+/// default to the derived policy budget remains the legitimate aggregate derivation.
+fn apply_document_limits(
+    route: &mut OfficialPdfOptions,
+    limits: crate::DocumentLimitPolicy,
+    core: &super::env::CoreOverrides,
+) -> Result<(), DirectError> {
+    route.max_encoded_document_bytes = cap_resident(
+        route.max_encoded_document_bytes,
+        // No CoreOverrides knob owns the resident encoded-document budget; the policy value IS
+        // the operator's explicit input, so capping the compiled default is always legitimate.
+        false,
+        limits.max_encoded_document_bytes,
+        "MINERU_MAX_ENCODED_DOCUMENT_BYTES",
+    )?;
+    route.max_raw_output_bytes = cap_resident(
+        route.max_raw_output_bytes,
+        core.max_raw_output_bytes.is_some(),
+        limits.raw_output_bytes,
+        "MINERU_MAX_RAW_OUTPUT_BYTES",
+    )?;
+    route.max_total_asset_bytes = cap_resident(
+        route.max_total_asset_bytes,
+        core.max_total_asset_bytes.is_some(),
+        limits.asset_total_bytes,
+        "MINERU_MAX_TOTAL_ASSET_BYTES",
+    )?;
+    route.max_staged_text_bytes = cap_resident(
+        route.max_staged_text_bytes,
+        core.max_staged_text_bytes.is_some(),
+        limits.staged_text_bytes,
+        "MINERU_MAX_STAGED_TEXT_BYTES",
+    )?;
+    Ok(())
+}
+
+/// Checked aggregate derivation: a budget that cannot be represented on this platform never
+/// caps the (already `usize`) resident value; an explicit resident value that the derivation
+/// would shrink fails loudly instead of being silently reduced.
+fn cap_resident(
+    resident: usize,
+    resident_explicit: bool,
+    budget: u64,
+    name: &str,
+) -> Result<usize, DirectError> {
+    let Ok(budget) = usize::try_from(budget) else {
+        return Ok(resident);
+    };
+    if resident > budget {
+        if resident_explicit {
+            return Err(err(format!(
+                "{name}={resident} exceeds the derived document budget {budget}; raise the output budget or lower {name}"
+            )));
+        }
+        return Ok(budget);
     }
-    if let Ok(value) = usize::try_from(limits.raw_output_bytes) {
-        route.max_raw_output_bytes = route.max_raw_output_bytes.min(value);
-    }
-    if let Ok(value) = usize::try_from(limits.asset_total_bytes) {
-        route.max_total_asset_bytes = route.max_total_asset_bytes.min(value);
-    }
-    if let Ok(value) = usize::try_from(limits.staged_text_bytes) {
-        route.max_staged_text_bytes = route.max_staged_text_bytes.min(value);
-    }
+    Ok(resident)
 }
 
 fn err(s: impl Into<String>) -> DirectError {
@@ -469,7 +518,11 @@ fn output_chain(
     }
     Ok(root)
 }
-fn config(options: &DirectOptions, env: &super::Environment) -> Result<VlmHttpConfig, DirectError> {
+fn config(
+    options: &DirectOptions,
+    env: &super::Environment,
+    mut http: VlmHttpConfig,
+) -> Result<VlmHttpConfig, DirectError> {
     let server = clean(options.base_url.clone(), options.server_option_label)?;
     let model = clean(options.model.clone(), "--model")?;
     let key = clean(
@@ -479,35 +532,56 @@ fn config(options: &DirectOptions, env: &super::Environment) -> Result<VlmHttpCo
             .or_else(|| env.string("MINERU_VL_API_KEY")),
         "--api-key",
     )?;
-    let mut config = env.vlm_http_config();
     if let Some(server) = server {
-        config.server_url = Some(server.parse()?);
-        config.invalid_server_url = false;
+        http.server_url = Some(server.parse()?);
+        http.invalid_server_url = false;
     }
     if let Some(model) = model {
-        config.model_name = Some(model);
+        http.model_name = Some(model);
     }
-    config.model_name = config
+    http.model_name = http
         .model_name
         .map(|m| m.trim().to_owned())
         .filter(|m| !m.is_empty());
-    config.skip_model_name_checking = config.model_name.is_some();
+    http.skip_model_name_checking = http.model_name.is_some();
     if let Some(key) = key {
-        config
-            .headers
+        http.headers
             .push(VlmHeader::new("Authorization", format!("Bearer {key}"))?);
     }
-    Ok(config)
+    Ok(http)
+}
+
+/// Resolves the strict core policy (compiled default -> frozen environment -> CLI). The formula,
+/// table, and image-analysis booleans resolve through `CoreOverrides`; the legacy `--no-*` flags
+/// force their values only when the owning surface actually provided them.
+fn resolved_route(
+    options: &DirectOptions,
+    env: &super::Environment,
+    overrides: &super::RunOverrides,
+) -> Result<super::env::ResolvedCore, DirectError> {
+    let mut resolved =
+        super::env::resolve_core(|name| env.os(name), &overrides.core).map_err(err)?;
+    resolved.route.start_page = options.page_start.unwrap_or(0);
+    resolved.route.end_page = options.page_end;
+    if let Some(no_formula) = options.no_formula {
+        resolved.route.formula_enable = !no_formula;
+    }
+    if let Some(no_table) = options.no_table {
+        resolved.route.table_enable = !no_table;
+    }
+    if let Some(no_image_analysis) = options.no_image_analysis {
+        resolved.route.image_analysis = !no_image_analysis;
+    }
+    Ok(resolved)
 }
 
 struct Progress<W: Write> {
     sink: W,
     tty: bool,
     failed: bool,
-    batch: usize,
-    total_batches: usize,
     count: usize,
     done: usize,
+    clock: RunClock,
 }
 impl<W: Write> Progress<W> {
     fn new(sink: W, tty: bool) -> Self {
@@ -515,13 +589,13 @@ impl<W: Write> Progress<W> {
             sink,
             tty,
             failed: false,
-            batch: 0,
-            total_batches: 0,
             count: 0,
             done: 0,
+            clock: RunClock::start(),
         }
     }
     fn say(&mut self, s: impl std::fmt::Display, final_state: bool) {
+        let stamp = self.clock.stamp();
         if self.tty {
             let width = 20;
             let filled = if self.count == 0 {
@@ -531,9 +605,7 @@ impl<W: Write> Progress<W> {
             };
             let _ = write!(
                 self.sink,
-                "\rbatch {}/{} [{}{}] {}/{}: {s}\x1b[K",
-                self.batch,
-                self.total_batches,
+                "\r{stamp} [{}{}] {}/{}: {s}\x1b[K",
                 "█".repeat(filled),
                 "░".repeat(width - filled),
                 self.done,
@@ -544,7 +616,7 @@ impl<W: Write> Progress<W> {
             }
             let _ = self.sink.flush();
         } else {
-            let _ = writeln!(self.sink, "{s}");
+            let _ = writeln!(self.sink, "{stamp} {s}");
         }
     }
 }
@@ -552,7 +624,17 @@ impl<W: Write> Progress<W> {
 pub(super) async fn run_legacy(
     options: DirectOptions,
     env: super::Environment,
+    overrides: super::RunOverrides,
 ) -> Result<(), DirectError> {
+    // The legacy direct lane never runs a remote API client or task service; explicit
+    // remote-only or server-owned controls are behaviorless and rejected before work.
+    if let Some(message) = super::remote_only_service_error(&overrides.service, &env) {
+        return Err(err(message));
+    }
+    if let Some(message) = super::server_owned_error(&overrides.service, &env) {
+        return Err(err(message));
+    }
+    let service = resolve_service_for_env(&env, &overrides)?;
     run_impl(
         options,
         None,
@@ -561,26 +643,8 @@ pub(super) async fn run_legacy(
         DirectMode::LegacyOutput,
         None,
         env,
-    )
-    .await
-}
-
-#[allow(dead_code)]
-pub(super) async fn run_with_events(
-    options: DirectOptions,
-    office_workers: OfficeWorkers,
-    env: super::Environment,
-    events: Option<ProgressCallback>,
-    warnings: Option<WarningCallback>,
-) -> Result<(), DirectError> {
-    run_impl(
-        options,
-        events,
-        None,
-        warnings,
-        DirectMode::CallbackOutput,
-        Some(office_workers),
-        env,
+        overrides,
+        service,
     )
     .await
 }
@@ -589,6 +653,8 @@ pub(super) async fn run_with_scoped_events(
     options: DirectOptions,
     office_workers: OfficeWorkers,
     env: super::Environment,
+    overrides: super::RunOverrides,
+    service: super::service::ResolvedService,
     events: Option<super::CommandCallback>,
     warnings: Option<WarningCallback>,
 ) -> Result<(), DirectError> {
@@ -600,8 +666,21 @@ pub(super) async fn run_with_scoped_events(
         DirectMode::CallbackOutput,
         Some(office_workers),
         env,
+        overrides,
+        service,
     )
     .await
+}
+
+/// Legacy/public entries have no explicit Phase-1B CLI seam; resolve the frozen snapshot only.
+fn resolve_service_for_env(
+    env: &super::Environment,
+    overrides: &super::RunOverrides,
+) -> Result<super::service::ResolvedService, DirectError> {
+    let policy =
+        crate::DocumentLimitPolicy::resolve(&overrides.document_limits, |name| env.os(name))
+            .map_err(err)?;
+    super::service::resolve_service(&(|name| env.os(name)), &overrides.service, policy).map_err(err)
 }
 
 async fn run_impl(
@@ -612,9 +691,11 @@ async fn run_impl(
     mode: DirectMode,
     office_workers: Option<OfficeWorkers>,
     env: super::Environment,
+    overrides: super::RunOverrides,
+    service: super::service::ResolvedService,
 ) -> Result<(), DirectError> {
     if !options.canonical_mixed {
-        return run_legacy_impl(options, &env).await;
+        return run_legacy_impl(options, &env, &overrides, service).await;
     }
     let office_workers = office_workers.ok_or_else(|| err("office workers unavailable"))?;
     let raster_workers = RasterWorkers::default();
@@ -627,6 +708,8 @@ async fn run_impl(
         warnings,
         mode,
         &env,
+        &overrides,
+        &service,
     )
     .await;
     office_workers.drain().await;
@@ -668,24 +751,18 @@ fn enumerate_legacy(
 async fn run_legacy_impl(
     options: DirectOptions,
     env: &super::Environment,
+    overrides: &super::RunOverrides,
+    _service: super::service::ResolvedService,
 ) -> Result<(), DirectError> {
-    if options.batch_size == 0 {
-        return Err(err("--batch-size must be greater than zero"));
-    }
-    let configured_page_concurrency =
-        official_page_concurrency(|name| env.os(name)).map_err(err)?;
-    let mut route = OfficialPdfOptions::default();
-    apply_document_limits(&mut route, options.document_limits);
+    let mut resolved = resolved_route(&options, env, overrides)?;
+    apply_document_limits(
+        &mut resolved.route,
+        options.document_limits,
+        &overrides.core,
+    )?;
     let totals =
         crate::document_limits::OfficialDocumentTotals::from_policy(options.document_limits);
-    route.start_page = options.page_start.unwrap_or(0);
-    route.end_page = options.page_end;
-    route.formula_enable = !options.no_formula;
-    route.table_enable = !options.no_table;
-    route.image_analysis = !options.no_image_analysis;
-    if apply_route_env(&mut route, |name| env.os(name)) {
-        eprintln!("warning: invalid MINERU_PROCESSING_WINDOW_SIZE; using 64");
-    }
+    let route = resolved.route;
     route.validate()?;
     let input = absolute(&options.input)?;
     let output = absolute(&options.output)?;
@@ -720,72 +797,59 @@ async fn run_legacy_impl(
     for path in skipped {
         eprintln!("skipped unsupported input: {}", path.display());
     }
-    let http = config(&options, env)?;
+    let http = config(&options, env, resolved.http)?;
     let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
-        configured_page_concurrency,
+        resolved.page_concurrency,
         route.processing_window_size,
         http.max_concurrency,
-    );
+    )
+    .map_err(|error| err(error.to_string()))?;
     let client = MinerUVlmClient::connect(http, MinerUVlmConfig::default()).await?;
     let total = candidates.len();
-    let batches = total.div_ceil(options.batch_size);
     let mut progress = Progress::new(std::io::stderr(), std::io::stderr().is_terminal());
     let mut completed = 0;
-    for (i, batch) in candidates.chunks(options.batch_size).enumerate() {
-        progress.batch = i + 1;
-        progress.total_batches = batches;
-        progress.count = batch.len();
-        progress.done = 0;
+    for (path, stem) in &candidates {
+        progress.count = total;
         progress.say(
-            format_args!("batch {}/{}: {} document(s)", i + 1, batches, batch.len()),
+            format_args!(
+                "document {}/{}: processing {}",
+                completed + 1,
+                total,
+                path.display()
+            ),
             false,
         );
-        for (path, stem) in batch {
-            progress.say(
-                format_args!(
-                    "document {}/{}: processing {}",
-                    completed + 1,
-                    total,
-                    path.display()
-                ),
-                false,
-            );
-            let result = async {
-                let snapshot = snapshot(
-                    path,
-                    route.max_pdf_bytes,
-                    options.document_limits.max_input_bytes,
-                )?;
-                let root = output_chain(&output, stem, input_dir.as_ref(), "vlm")?;
-                client
-                    .parse_and_write_official_pdf_with_totals_and_page_concurrency(
-                        crate::PdfInput::Bytes(snapshot.bytes),
-                        route.clone(),
-                        &root,
-                        stem,
-                        totals,
-                        page_concurrency.clone(),
-                    )
-                    .await
-                    .map_err(|e| Box::new(e) as DirectError)
-            }
-            .await;
-            if let Err(error) = result {
-                progress.failed = true;
-                progress.say(format_args!("failed {}", path.display()), true);
-                return Err(error);
-            }
-            completed += 1;
-            progress.done += 1;
-            progress.say(
-                format_args!("document {completed}/{total}: completed {}", path.display()),
-                false,
-            );
+        let result = async {
+            let snapshot = snapshot(
+                path,
+                route.max_pdf_bytes,
+                options.document_limits.max_input_bytes,
+            )?;
+            let root = output_chain(&output, stem, input_dir.as_ref(), "vlm")?;
+            client
+                .parse_and_write_official_pdf_with_totals_and_page_concurrency(
+                    crate::PdfInput::Bytes(snapshot.bytes),
+                    route.clone(),
+                    &root,
+                    stem,
+                    totals,
+                    page_concurrency.clone(),
+                )
+                .await
+                .map_err(|e| Box::new(e) as DirectError)
         }
-        if !progress.failed {
-            progress.done = progress.count;
-            progress.say(format_args!("batch {}/{}: completed", i + 1, batches), true);
+        .await;
+        if let Err(error) = result {
+            progress.failed = true;
+            progress.say(format_args!("failed {}", path.display()), true);
+            return Err(error);
         }
+        completed += 1;
+        progress.done += 1;
+        progress.say(
+            format_args!("document {completed}/{total}: completed {}", path.display()),
+            false,
+        );
     }
     Ok(())
 }
@@ -799,32 +863,18 @@ async fn run_inner(
     warnings: Option<WarningCallback>,
     mode: DirectMode,
     env: &super::Environment,
+    overrides: &super::RunOverrides,
+    service: &super::service::ResolvedService,
 ) -> Result<(), DirectError> {
-    if options.batch_size == 0 {
-        return Err(err("--batch-size must be greater than zero"));
-    }
-    let configured_page_concurrency =
-        official_page_concurrency(|name| env.os(name)).map_err(err)?;
-    let mut route = OfficialPdfOptions::default();
-    apply_document_limits(&mut route, options.document_limits);
+    let mut resolved = resolved_route(options, env, overrides)?;
+    apply_document_limits(
+        &mut resolved.route,
+        options.document_limits,
+        &overrides.core,
+    )?;
     let totals =
         crate::document_limits::OfficialDocumentTotals::from_policy(options.document_limits);
-    route.start_page = options.page_start.unwrap_or(0);
-    route.end_page = options.page_end;
-    route.formula_enable = !options.no_formula;
-    route.table_enable = !options.no_table;
-    route.image_analysis = !options.no_image_analysis;
-    if apply_route_env(&mut route, |name| env.os(name)) {
-        if mode == DirectMode::LegacyOutput {
-            eprintln!("warning: invalid MINERU_PROCESSING_WINDOW_SIZE; using 64");
-        } else {
-            emit_warning(
-                &warnings,
-                "MINERU_PROCESSING_WINDOW_SIZE",
-                "invalid value; using 64",
-            );
-        }
-    }
+    let route = resolved.route;
     let input = absolute(&options.input)?;
     let output = absolute(&options.output)?;
     let (_, inputs, skipped) = discover_inputs(&input)?;
@@ -864,168 +914,154 @@ async fn run_inner(
             emit_warning(&warnings, "unsupported input", &path.display().to_string());
         }
     }
-    let http = config(options, env)?;
+    let http = config(options, env, resolved.http)?;
     let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
-        configured_page_concurrency,
+        resolved.page_concurrency,
         route.processing_window_size,
         http.max_concurrency,
-    );
+    )
+    .map_err(|error| err(error.to_string()))?;
     let client = MinerUVlmClient::connect(http, MinerUVlmConfig::default()).await?;
     let total = candidates.len();
-    let batches = total.div_ceil(options.batch_size);
     let mut progress = Progress::new(std::io::stderr(), std::io::stderr().is_terminal());
     let mut completed = 0;
-    for (i, batch) in candidates.chunks(options.batch_size).enumerate() {
-        progress.batch = i + 1;
-        progress.total_batches = batches;
-        progress.count = batch.len();
-        progress.done = 0;
+    progress.count = total;
+    for (candidate_id, path, kind, stem) in &candidates {
+        let task_events = document_events(&command_events, &events, *candidate_id);
         if mode == DirectMode::LegacyOutput {
             progress.say(
-                format_args!("batch {}/{}: {} document(s)", i + 1, batches, batch.len()),
+                format_args!(
+                    "document {}/{}: processing {}",
+                    completed + 1,
+                    total,
+                    path.display()
+                ),
                 false,
             );
         }
-        for (candidate_id, path, kind, stem) in batch {
-            let task_events = document_events(&command_events, &events, *candidate_id);
-            if mode == DirectMode::LegacyOutput {
-                progress.say(
-                    format_args!(
-                        "document {}/{}: processing {}",
-                        completed + 1,
-                        total,
-                        path.display()
-                    ),
-                    false,
-                );
-            }
+        if mode == DirectMode::CallbackOutput {
+            emit_event(
+                &task_events,
+                ProgressEvent::DocumentStarted {
+                    document: stem.clone(),
+                },
+            );
+        }
+        let cleanup_warning = cleanup_warning_callback(&warnings);
+        let result = async {
+            let deadline = Instant::now()
+                .checked_add(route.total_deadline)
+                .ok_or_else(|| err("input deadline overflow"))?;
+            let snapshot = snapshot(
+                path,
+                route.max_pdf_bytes,
+                options.document_limits.max_input_bytes,
+            )?;
+            let bytes = snapshot.bytes;
+            let target = if kind.is_office() { "office" } else { "vlm" };
+            let root = output_chain(&output, stem, input_dir.as_ref(), target)?;
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| err("input deadline expired"))?;
+            let (prepared, warning) = prepare_with_warning_and_ooxml(
+                bytes,
+                *kind,
+                &route,
+                office_workers,
+                raster_workers,
+                remaining,
+                service.ooxml,
+            )
+            .await
+            .map_err(err)?;
             if mode == DirectMode::CallbackOutput {
+                if let Some(message) = warning {
+                    emit_event(
+                        &task_events,
+                        ProgressEvent::OfficeWarning {
+                            document: stem.clone(),
+                            message,
+                        },
+                    );
+                }
                 emit_event(
                     &task_events,
-                    ProgressEvent::DocumentStarted {
+                    ProgressEvent::DocumentPrepared {
                         document: stem.clone(),
                     },
                 );
             }
-            let cleanup_warning = cleanup_warning_callback(&warnings);
-            let result = async {
-                let deadline = Instant::now()
-                    .checked_add(route.total_deadline)
-                    .ok_or_else(|| err("input deadline overflow"))?;
-                let snapshot = snapshot(
-                    path,
-                    route.max_pdf_bytes,
-                    options.document_limits.max_input_bytes,
-                )?;
-                let bytes = snapshot.bytes;
-                let target = if kind.is_office() { "office" } else { "vlm" };
-                let root = output_chain(&output, stem, input_dir.as_ref(), target)?;
-                let remaining = deadline
-                    .checked_duration_since(Instant::now())
-                    .filter(|d| !d.is_zero())
-                    .ok_or_else(|| err("input deadline expired"))?;
-                let (prepared, warning) = prepare_with_warning(
-                    bytes,
-                    *kind,
-                    &route,
-                    office_workers,
-                    raster_workers,
-                    remaining,
-                )
-                .await
-                .map_err(err)?;
-                if mode == DirectMode::CallbackOutput {
-                    if let Some(message) = warning {
-                        emit_event(
-                            &task_events,
-                            ProgressEvent::OfficeWarning {
-                                document: stem.clone(),
-                                message,
-                            },
-                        );
-                    }
-                    emit_event(
-                        &task_events,
-                        ProgressEvent::DocumentPrepared {
-                            document: stem.clone(),
-                        },
-                    );
-                }
-                let mut route = route.clone();
-                if !kind.supports_page_range() {
-                    route.start_page = 0;
-                    route.end_page = None;
-                }
-                route.total_deadline = deadline
-                    .checked_duration_since(Instant::now())
-                    .filter(|d| !d.is_zero())
-                    .ok_or_else(|| err("input deadline expired"))?;
-                if mode == DirectMode::CallbackOutput {
-                    client
-                        .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
-                            prepared,
-                            route,
-                            &root,
-                            stem,
-                            task_events.clone(),
-                            cleanup_warning,
-                            totals,
-                            page_concurrency.clone(),
-                        )
-                        .await
-                        .map_err(|e| -> DirectError { Box::new(e) })
-                } else {
-                    client
-                        .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
-                            prepared,
-                            route,
-                            &root,
-                            stem,
-                            None,
-                            None,
-                            totals,
-                            page_concurrency.clone(),
-                        )
-                        .await
-                        .map_err(|e| -> DirectError { Box::new(e) })
-                }
+            let mut route = route.clone();
+            if !kind.supports_page_range() {
+                route.start_page = 0;
+                route.end_page = None;
             }
-            .await;
-            if let Err(e) = result {
-                if mode == DirectMode::CallbackOutput {
-                    emit_event(
-                        &task_events,
-                        ProgressEvent::DocumentFailed {
-                            document: stem.clone(),
-                            message: e.to_string(),
-                        },
-                    );
-                }
-                progress.failed = true;
-                if mode == DirectMode::LegacyOutput {
-                    progress.say(format_args!("failed {}", path.display()), true);
-                }
-                return Err(e);
-            }
-            completed += 1;
-            progress.done += 1;
+            route.total_deadline = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| err("input deadline expired"))?;
             if mode == DirectMode::CallbackOutput {
-                emit_event(
-                    &task_events,
-                    ProgressEvent::DocumentCompleted {
-                        document: stem.clone(),
-                    },
-                );
+                client
+                    .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
+                        prepared,
+                        route,
+                        &root,
+                        stem,
+                        task_events.clone(),
+                        cleanup_warning,
+                        totals,
+                        page_concurrency.clone(),
+                    )
+                    .await
+                    .map_err(|e| -> DirectError { Box::new(e) })
             } else {
-                progress.say(
-                    format_args!("document {completed}/{total}: completed {}", path.display()),
-                    false,
-                );
+                client
+                    .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
+                        prepared,
+                        route,
+                        &root,
+                        stem,
+                        None,
+                        None,
+                        totals,
+                        page_concurrency.clone(),
+                    )
+                    .await
+                    .map_err(|e| -> DirectError { Box::new(e) })
             }
         }
-        if mode == DirectMode::LegacyOutput && !progress.failed {
-            progress.done = progress.count;
-            progress.say(format_args!("batch {}/{}: completed", i + 1, batches), true);
+        .await;
+        if let Err(e) = result {
+            if mode == DirectMode::CallbackOutput {
+                emit_event(
+                    &task_events,
+                    ProgressEvent::DocumentFailed {
+                        document: stem.clone(),
+                        message: e.to_string(),
+                    },
+                );
+            }
+            progress.failed = true;
+            if mode == DirectMode::LegacyOutput {
+                progress.say(format_args!("failed {}", path.display()), true);
+            }
+            return Err(e);
+        }
+        completed += 1;
+        progress.done += 1;
+        if mode == DirectMode::CallbackOutput {
+            emit_event(
+                &task_events,
+                ProgressEvent::DocumentCompleted {
+                    document: stem.clone(),
+                },
+            );
+        } else {
+            progress.say(
+                format_args!("document {completed}/{total}: completed {}", path.display()),
+                false,
+            );
         }
     }
     Ok(())
@@ -1033,139 +1069,147 @@ async fn run_inner(
 
 #[cfg(test)]
 mod tests {
-    use super::super::env::{Decimal, decimal};
     use super::*;
     use std::collections::HashMap;
-    use std::{ffi::OsString, time::Duration};
+    use std::ffi::OsString;
 
     fn snapshot_pdf(path: &Path, cap: usize, max: u64) -> Result<Snapshot, DirectError> {
         snapshot(path, cap, max)
     }
 
-    #[test]
-    fn decimal_matches_python_integer_lexing() {
-        for (value, expected) in [
-            ("  +001_024\u{2003}", Decimal::Positive(1024)),
-            ("0", Decimal::NonPositive),
-            ("-0", Decimal::NonPositive),
-            ("-2", Decimal::NonPositive),
-            ("-999999999999999999999999999999", Decimal::NonPositive),
-            (
-                "999999999999999999999999999999",
-                Decimal::Positive(u64::MAX),
-            ),
-            ("", Decimal::Invalid),
-            ("1.0", Decimal::Invalid),
-            ("1e3", Decimal::Invalid),
-            ("0x10", Decimal::Invalid),
-            ("text", Decimal::Invalid),
-            ("_1", Decimal::Invalid),
-            ("1_", Decimal::Invalid),
-            ("1__0", Decimal::Invalid),
-            ("+", Decimal::Invalid),
-            ("--1", Decimal::Invalid),
-        ] {
-            assert_eq!(
-                decimal(&OsString::from(value), u64::MAX),
-                expected,
-                "{value:?}"
-            );
+    fn test_options() -> DirectOptions {
+        DirectOptions {
+            input: PathBuf::new(),
+            output: PathBuf::new(),
+            base_url: None,
+            server_option_label: "--url",
+            model: None,
+            api_key: None,
+            page_start: None,
+            page_end: None,
+            no_formula: None,
+            no_table: None,
+            no_image_analysis: None,
+            canonical_mixed: true,
+            document_limits: crate::DocumentLimitPolicy::defaults(),
         }
     }
 
     #[test]
-    fn route_env_applies_numeric_and_boolean_overrides() {
-        let values = HashMap::from([
-            ("MINERU_PROCESSING_WINDOW_SIZE", OsString::from("0")),
-            ("MINERU_PDF_RENDER_THREADS", OsString::from("+007")),
-            (
-                "MINERU_PDF_RENDER_TIMEOUT",
-                OsString::from("999999999999999999999999999999"),
-            ),
-            ("MINERU_FORMULA_ENABLE", OsString::from("TrUe")),
-            ("MINERU_TABLE_ENABLE", OsString::from(" yes")),
+    fn boolean_route_resolution_is_strict_default_env_cli() {
+        // Strict env beats the compiled default; the legacy `--no-*` force only when present.
+        let env_values = HashMap::from([
+            ("MINERU_FORMULA_ENABLE", OsString::from("false")),
+            ("MINERU_TABLE_ENABLE", OsString::from("TrUe")),
         ]);
-        let mut route = OfficialPdfOptions::default();
-        assert!(!apply_route_env(&mut route, |name| values
-            .get(name)
-            .cloned()));
-        assert_eq!(route.processing_window_size, 1);
-        assert_eq!(route.render_workers, 7);
-        assert_eq!(route.render_timeout, Duration::from_secs(u64::MAX));
-        assert!(route.formula_enable);
-        assert!(!route.table_enable);
-    }
-
-    #[test]
-    fn route_env_defaults_invalid_values_and_preserves_absent_booleans() {
-        let values = HashMap::from([
-            ("MINERU_PROCESSING_WINDOW_SIZE", OsString::from("1__0")),
-            ("MINERU_PDF_RENDER_THREADS", OsString::from("-2")),
-            ("MINERU_PDF_RENDER_TIMEOUT", OsString::from("1e3")),
-            ("MINERU_FORMULA_ENABLE", OsString::from(" true ")),
-            ("MINERU_TABLE_ENABLE", OsString::from("")),
-        ]);
-        let mut route = OfficialPdfOptions {
-            formula_enable: false,
-            table_enable: true,
-            processing_window_size: 22,
-            render_workers: 23,
-            render_timeout: Duration::from_secs(24),
-            ..Default::default()
+        let env = super::super::Environment::from_values(env_values);
+        let options = DirectOptions {
+            no_formula: None,
+            no_table: None,
+            no_image_analysis: None,
+            ..test_options()
         };
-        assert!(apply_route_env(&mut route, |name| values
-            .get(name)
-            .cloned()));
-        assert_eq!(route.processing_window_size, 64);
-        assert_eq!(route.render_workers, 3);
-        assert_eq!(route.render_timeout, Duration::from_secs(300));
-        assert!(!route.formula_enable);
-        assert!(!route.table_enable);
+        let resolved = resolved_route(&options, &env, &super::super::RunOverrides::default())
+            .expect("strict booleans resolve");
+        assert!(!resolved.route.formula_enable);
+        assert!(resolved.route.table_enable);
+        assert!(resolved.route.image_analysis);
 
-        let mut route = OfficialPdfOptions {
-            formula_enable: false,
-            table_enable: true,
-            ..Default::default()
+        // An explicit legacy `--no-*` value is the surface's CLI and wins over env.
+        let forced = DirectOptions {
+            no_formula: Some(true),
+            ..test_options()
         };
-        assert!(!apply_route_env(&mut route, |_| None));
-        assert!(!route.formula_enable);
-        assert!(route.table_enable);
-    }
-
-    #[test]
-    fn route_env_boolean_values_require_exact_true() {
-        for value in [" true", "true ", "1", "yes", ""] {
-            let values = HashMap::from([("MINERU_FORMULA_ENABLE", OsString::from(value))]);
-            let mut route = OfficialPdfOptions::default();
-            assert!(!apply_route_env(&mut route, |name| values
-                .get(name)
-                .cloned()));
-            assert!(!route.formula_enable, "{value:?}");
-        }
+        let resolved = resolved_route(&forced, &env, &super::super::RunOverrides::default())
+            .expect("strict booleans resolve");
+        assert!(!resolved.route.formula_enable);
     }
 
     #[cfg(unix)]
     #[test]
-    fn route_env_non_utf8_values_are_invalid_or_false() {
+    fn boolean_route_env_rejects_non_utf8_values() {
         use std::os::unix::ffi::OsStringExt;
 
-        let values = HashMap::from([
-            (
-                "MINERU_PROCESSING_WINDOW_SIZE",
-                OsString::from_vec(vec![0xff]),
-            ),
-            ("MINERU_PDF_RENDER_THREADS", OsString::from_vec(vec![0xff])),
-            ("MINERU_PDF_RENDER_TIMEOUT", OsString::from_vec(vec![0xff])),
-            ("MINERU_FORMULA_ENABLE", OsString::from_vec(vec![0xff])),
-        ]);
+        let env = super::super::Environment::from_values(HashMap::from([(
+            "MINERU_FORMULA_ENABLE",
+            OsString::from_vec(vec![0xff]),
+        )]));
+        let options = DirectOptions {
+            no_formula: None,
+            ..test_options()
+        };
+        let error = resolved_route(&options, &env, &super::super::RunOverrides::default())
+            .expect_err("non-UTF-8 boolean fails before work");
+        assert!(
+            error.to_string().contains("MINERU_FORMULA_ENABLE"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn strict_core_resolution_errors_before_work() {
+        // Malformed or zero-where-invalid frozen environment values fail resolution instead of
+        // falling back silently.
+        let env = super::super::Environment::from_values(HashMap::from([(
+            "MINERU_PDF_RENDER_TIMEOUT",
+            OsString::from("1e3"),
+        )]));
+        let error =
+            super::super::env::resolve_core(|name| env.os(name), &Default::default()).unwrap_err();
+        assert!(error.contains("MINERU_PDF_RENDER_TIMEOUT"), "{error}");
+        let env = super::super::Environment::from_values(HashMap::from([(
+            "MINERU_PROCESSING_WINDOW_SIZE",
+            OsString::from("0"),
+        )]));
+        assert!(super::super::env::resolve_core(|name| env.os(name), &Default::default()).is_err());
+    }
+
+    #[test]
+    fn document_limits_derive_resident_caps_but_never_shrink_explicit_values() {
+        // A small output budget derives small resident caps.
+        let policy = crate::DocumentLimitPolicy::new(4, 4, 1024).unwrap();
+        // (raw = staged = 1024/4 = 256, assets = 1024, encoded = 4)
+
+        // Compiled defaults are legitimately capped by the aggregate derivation.
         let mut route = OfficialPdfOptions::default();
-        assert!(apply_route_env(&mut route, |name| values
-            .get(name)
-            .cloned()));
-        assert_eq!(route.processing_window_size, 64);
-        assert_eq!(route.render_workers, 3);
-        assert_eq!(route.render_timeout, Duration::from_secs(300));
-        assert!(!route.formula_enable);
+        let core = super::super::env::CoreOverrides::default();
+        apply_document_limits(&mut route, policy, &core).unwrap();
+        assert_eq!(route.max_raw_output_bytes, 256);
+        assert_eq!(route.max_staged_text_bytes, 256);
+        assert_eq!(route.max_total_asset_bytes, 1024);
+        assert_eq!(route.max_encoded_document_bytes, 4);
+        assert_eq!(
+            route.max_encoded_document_bytes,
+            policy.max_encoded_document_bytes as usize
+        );
+
+        // An explicit resident value the derivation would shrink is an error, not a silent min().
+        // The route already carries the applied explicit value, mirroring the resolved flow.
+        let core = super::super::env::CoreOverrides {
+            max_raw_output_bytes: Some(1 << 20),
+            ..Default::default()
+        };
+        let route = OfficialPdfOptions {
+            max_raw_output_bytes: 1 << 20,
+            ..OfficialPdfOptions::default()
+        };
+        let error = apply_document_limits(&mut route.clone(), policy, &core).unwrap_err();
+        assert!(
+            error.to_string().contains("MINERU_MAX_RAW_OUTPUT_BYTES"),
+            "{error}"
+        );
+
+        // An explicit value that fits the derived budget is preserved exactly.
+        let core = super::super::env::CoreOverrides {
+            max_staged_text_bytes: Some(128),
+            ..Default::default()
+        };
+        let mut route = OfficialPdfOptions {
+            max_staged_text_bytes: 128,
+            ..OfficialPdfOptions::default()
+        };
+        apply_document_limits(&mut route, policy, &core).unwrap();
+        assert_eq!(route.max_staged_text_bytes, 128);
     }
 
     #[test]
@@ -1319,8 +1363,6 @@ mod tests {
     #[test]
     fn progress_tty_redraws_once_and_failure_cannot_succeed() {
         let mut tty = Progress::new(Vec::new(), true);
-        tty.batch = 1;
-        tty.total_batches = 1;
         tty.count = 2;
         tty.done = 1;
         tty.say("processing", false);
@@ -1328,7 +1370,7 @@ mod tests {
         tty.say("failed", true);
         let output = String::from_utf8(tty.sink).unwrap();
         assert!(
-            output.contains("\r")
+            output.starts_with("\r[+")
                 && output.contains("\x1b[K")
                 && output.contains("[██████████░░░░░░░░░░]")
         );
@@ -1340,7 +1382,14 @@ mod tests {
         plain.failed = true;
         plain.say("failed", true);
         let output = String::from_utf8(plain.sink).unwrap();
-        assert_eq!(output, "processing\nfailed\n");
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 2);
+        for (line, suffix) in lines.iter().zip(["processing", "failed"]) {
+            assert!(
+                line.starts_with("[+") && line.ends_with(&format!("] {suffix}")),
+                "{output:?}"
+            );
+        }
         assert!(!output.contains("completed"));
     }
 
@@ -1389,6 +1438,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_runner_stops_after_first_preparation_failure() {
+        use super::super::{CommandEvent, CommandScope, DocumentId};
         use std::sync::Mutex;
 
         let input = tempfile::tempdir().unwrap();
@@ -1398,7 +1448,8 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let event_callback = {
             let events = Arc::clone(&events);
-            Arc::new(move |event| events.lock().unwrap().push(event)) as ProgressCallback
+            Arc::new(move |event| events.lock().unwrap().push(event))
+                as super::super::CommandCallback
         };
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let warning_callback = {
@@ -1410,7 +1461,7 @@ mod tests {
                     .push((source.to_owned(), message.to_owned()))
             }) as WarningCallback
         };
-        let result = run_with_events(
+        let result = run_with_scoped_events(
             DirectOptions {
                 input: input.path().to_owned(),
                 output: output.path().to_owned(),
@@ -1420,32 +1471,56 @@ mod tests {
                 api_key: None,
                 page_start: None,
                 page_end: None,
-                no_formula: false,
-                no_table: false,
-                no_image_analysis: false,
-                batch_size: 1,
+                no_formula: None,
+                no_table: None,
+                no_image_analysis: None,
                 canonical_mixed: true,
                 document_limits: crate::DocumentLimitPolicy::defaults(),
             },
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
             super::super::Environment::process(),
+            super::super::RunOverrides::default(),
+            super::super::service::resolve_service(
+                &(|name| std::env::var_os(name)),
+                &super::super::service::ServiceOverrides::default(),
+                crate::DocumentLimitPolicy::defaults(),
+            )
+            .unwrap(),
             Some(event_callback),
             Some(warning_callback),
         )
         .await;
         assert_eq!(result.unwrap_err().to_string(), "invalid image");
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![
-                ProgressEvent::DocumentStarted {
-                    document: "a".into(),
-                },
-                ProgressEvent::DocumentFailed {
-                    document: "a".into(),
-                    message: "invalid image".into(),
-                },
-            ]
-        );
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events[0],
+            CommandEvent::RunPlanned {
+                documents: 2,
+                api_tasks: 0
+            }
+        ));
+        // The first document fails at preparation; the runner stops before starting the second.
+        assert!(matches!(
+            events[1],
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(1)),
+                event: ProgressEvent::DocumentStarted { .. },
+            }
+        ));
+        assert!(matches!(
+            events[2],
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(1)),
+                event: ProgressEvent::DocumentFailed { .. },
+            }
+        ));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(2)),
+                ..
+            }
+        )));
         assert!(warnings.lock().unwrap().is_empty());
     }
 
@@ -1544,15 +1619,21 @@ mod tests {
                 api_key: None,
                 page_start: None,
                 page_end: None,
-                no_formula: false,
-                no_table: false,
-                no_image_analysis: false,
-                batch_size: 1,
+                no_formula: None,
+                no_table: None,
+                no_image_analysis: None,
                 canonical_mixed: true,
                 document_limits: crate::DocumentLimitPolicy::defaults(),
             },
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
             super::super::Environment::process(),
+            super::super::RunOverrides::default(),
+            super::super::service::resolve_service(
+                &(|name| std::env::var_os(name)),
+                &super::super::service::ServiceOverrides::default(),
+                crate::DocumentLimitPolicy::defaults(),
+            )
+            .unwrap(),
             Some(callback),
             None,
         )

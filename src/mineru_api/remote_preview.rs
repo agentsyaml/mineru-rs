@@ -31,9 +31,10 @@ pub(super) fn read_artifacts(
     stem: &str,
     kind: DocumentKind,
     route: &OfficialPdfOptions,
+    response_cap: usize,
 ) -> Result<Artifacts, String> {
     let (middle, origin, _) = paths(stem, kind)?;
-    let resident = crate::official_route::route_limits(route);
+    let resident = crate::official_route::route_limits(route, response_cap);
     let middle_cap = route.max_staged_text_bytes.min(resident.max_response_bytes);
     let middle_cap =
         usize::try_from(middle_cap).map_err(|_| "preview middle exceeds resident limit")?;
@@ -49,13 +50,14 @@ pub(super) fn generate_and_publish(
     source_pdf: &[u8],
     middle: &[u8],
     route: &OfficialPdfOptions,
+    response_cap: usize,
     deadline: Instant,
 ) -> Result<PathBuf, String> {
     if Instant::now() >= deadline {
         return Err("preview deadline expired".into());
     }
     let pages = parse_middle(middle, route)?;
-    let resident = crate::official_route::route_limits(route);
+    let resident = crate::official_route::route_limits(route, response_cap);
     let asset_cap = route
         .max_total_asset_bytes
         .min(resident.max_total_asset_bytes);
@@ -65,7 +67,7 @@ pub(super) fn generate_and_publish(
         source_pdf,
         &pages,
         stem,
-        &crate::official_route::route_limits(route),
+        &crate::official_route::route_limits(route, response_cap),
         asset_cap,
         deadline,
     )
@@ -85,6 +87,8 @@ pub(super) async fn prepare_and_publish_downloaded(
     office_workers: &OfficeWorkers,
     raster_workers: &RasterWorkers,
     events: Option<ProgressCallback>,
+    response_cap: usize,
+    ooxml: crate::command::service::OoxmlLimits,
 ) -> Result<PathBuf, String> {
     let deadline = Instant::now()
         .checked_add(route.total_deadline)
@@ -96,7 +100,7 @@ pub(super) async fn prepare_and_publish_downloaded(
         let root = root.clone();
         let stem = stem.clone();
         let route = route.clone();
-        move || read_artifacts(&root, &stem, kind, &route)
+        move || read_artifacts(&root, &stem, kind, &route, response_cap)
     })
     .await
     .map_err(|_| "preview worker stopped")?
@@ -108,13 +112,14 @@ pub(super) async fn prepare_and_publish_downloaded(
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .ok_or("preview deadline expired")?;
-        let (prepared, warning) = crate::input_prepare::prepare_with_warning(
+        let (prepared, warning) = crate::input_prepare::prepare_with_warning_and_ooxml(
             Bytes::from(artifacts.origin),
             kind,
             &route,
             office_workers,
             raster_workers,
             remaining,
+            ooxml,
         )
         .await?;
         if let Some(message) = warning {
@@ -136,6 +141,7 @@ pub(super) async fn prepare_and_publish_downloaded(
             &source_pdf,
             &artifacts.middle,
             &route,
+            response_cap,
             deadline,
         )
     })
@@ -343,12 +349,18 @@ mod tests {
         let mut r = route();
         r.max_staged_text_bytes = middle().len();
         r.max_pdf_bytes = 1;
-        assert!(read_artifacts(root.path(), "doc", DocumentKind::Pdf, &r).is_ok());
+        assert!(
+            read_artifacts(root.path(), "doc", DocumentKind::Pdf, &r, 10 * 1024 * 1024).is_ok()
+        );
         r.max_pdf_bytes = 0;
-        assert!(read_artifacts(root.path(), "doc", DocumentKind::Pdf, &r).is_err());
+        assert!(
+            read_artifacts(root.path(), "doc", DocumentKind::Pdf, &r, 10 * 1024 * 1024).is_err()
+        );
         r.max_pdf_bytes = 1;
         r.max_staged_text_bytes = middle().len() - 1;
-        assert!(read_artifacts(root.path(), "doc", DocumentKind::Pdf, &r).is_err());
+        assert!(
+            read_artifacts(root.path(), "doc", DocumentKind::Pdf, &r, 10 * 1024 * 1024).is_err()
+        );
     }
     #[test]
     fn generates_pdf_and_office_mode_layouts() {
@@ -363,7 +375,8 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join(format!("{stem}_middle.json")), middle()).unwrap();
             std::fs::write(dir.join(format!("{stem}_origin.{}", kind.suffix())), source).unwrap();
-            let artifacts = read_artifacts(root.path(), stem, kind, &route).unwrap();
+            let artifacts =
+                read_artifacts(root.path(), stem, kind, &route, 10 * 1024 * 1024).unwrap();
             let path = generate_and_publish(
                 root.path(),
                 stem,
@@ -371,6 +384,7 @@ mod tests {
                 &artifacts.origin,
                 &artifacts.middle,
                 &route,
+                10 * 1024 * 1024,
                 Instant::now() + std::time::Duration::from_secs(2),
             )
             .unwrap();
@@ -404,6 +418,8 @@ mod tests {
             &office,
             &raster,
             None,
+            10 * 1024 * 1024,
+            crate::command::service::OoxmlLimits::default_resolved(),
         )
         .await
         .unwrap();
@@ -430,6 +446,8 @@ mod tests {
             &office,
             &raster,
             Some(callback),
+            10 * 1024 * 1024,
+            crate::command::service::OoxmlLimits::default_resolved(),
         )
         .await
         .unwrap();
@@ -460,7 +478,9 @@ mod tests {
                 &expired,
                 &office,
                 &raster,
-                None
+                None,
+                10 * 1024 * 1024,
+                crate::command::service::OoxmlLimits::default_resolved(),
             )
             .await
             .unwrap_err(),
@@ -474,7 +494,9 @@ mod tests {
                 &route(),
                 &office,
                 &raster,
-                None
+                None,
+                10 * 1024 * 1024,
+                crate::command::service::OoxmlLimits::default_resolved(),
             )
             .await
             .unwrap_err(),
@@ -496,12 +518,30 @@ mod tests {
         std::fs::write(outside.path().join("origin"), b"x").unwrap();
         symlink(outside.path().join("middle"), dir.join("doc_middle.json")).unwrap();
         std::fs::write(dir.join("doc_origin.pdf"), b"x").unwrap();
-        assert!(read_artifacts(root.path(), "doc", DocumentKind::Pdf, &route()).is_err());
+        assert!(
+            read_artifacts(
+                root.path(),
+                "doc",
+                DocumentKind::Pdf,
+                &route(),
+                10 * 1024 * 1024
+            )
+            .is_err()
+        );
         std::fs::remove_file(dir.join("doc_middle.json")).unwrap();
         std::fs::write(dir.join("doc_middle.json"), middle()).unwrap();
         std::fs::remove_file(dir.join("doc_origin.pdf")).unwrap();
         symlink(outside.path().join("origin"), dir.join("doc_origin.pdf")).unwrap();
-        assert!(read_artifacts(root.path(), "doc", DocumentKind::Pdf, &route()).is_err());
+        assert!(
+            read_artifacts(
+                root.path(),
+                "doc",
+                DocumentKind::Pdf,
+                &route(),
+                10 * 1024 * 1024
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read(outside.path().join("origin")).unwrap(), b"x");
     }
 }

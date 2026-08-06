@@ -1,6 +1,6 @@
 use super::{
     InputDocument, RemoteEnv, RemoteOptions, TaskFailure,
-    archive::{self, ArchiveLimits, DownloadedZip},
+    archive::{self, DownloadedZip},
     http::MineruApiClient,
     planning,
 };
@@ -18,9 +18,21 @@ pub(super) async fn run_documents_scoped_with_workers(
     events: Option<crate::command::CommandCallback>,
     office: OfficeWorkers,
     policy: crate::DocumentLimitPolicy,
+    response_cap: usize,
+    service: crate::command::service::ResolvedService,
 ) -> Result<Vec<super::RemoteApiFailure>, String> {
     run_documents_impl(
-        documents, output, api_url, options, env, None, events, office, policy,
+        documents,
+        output,
+        api_url,
+        options,
+        env,
+        None,
+        events,
+        office,
+        policy,
+        response_cap,
+        service,
     )
     .await
 }
@@ -35,6 +47,8 @@ async fn run_documents_impl(
     command_events: Option<crate::command::CommandCallback>,
     office: OfficeWorkers,
     policy: crate::DocumentLimitPolicy,
+    response_cap: usize,
+    service: crate::command::service::ResolvedService,
 ) -> Result<Vec<super::RemoteApiFailure>, String> {
     if options.client_side_output_generation {
         return Err("client-side output generation is unsupported".into());
@@ -127,7 +141,7 @@ async fn run_documents_impl(
         end: options.end,
         client_side: false,
         max_input_bytes: policy.max_input_bytes,
-        archive_limits: ArchiveLimits::from_document_limits(policy),
+        archive_limits: service.archive,
     };
     archive::preflight_output_root(output)?;
     let raster = RasterWorkers::default();
@@ -142,6 +156,8 @@ async fn run_documents_impl(
         route,
         office,
         raster,
+        response_cap,
+        service,
     )
     .await
     .map(|v| {
@@ -166,6 +182,8 @@ async fn run_core_owned(
     route: crate::OfficialPdfOptions,
     office: OfficeWorkers,
     raster: RasterWorkers,
+    response_cap: usize,
+    service: crate::command::service::ResolvedService,
 ) -> Result<Vec<TaskFailure>, String> {
     let result = run_core(
         documents,
@@ -175,7 +193,8 @@ async fn run_core_owned(
         env,
         events,
         command_events,
-        Some((&route, &office, &raster)),
+        Some((&route, response_cap, &office, &raster)),
+        service,
     )
     .await;
     office.drain().await;
@@ -202,10 +221,22 @@ async fn run_core(
     env: RemoteEnv,
     events: Option<ProgressCallback>,
     command_events: Option<crate::command::CommandCallback>,
-    preview: Option<(&crate::OfficialPdfOptions, &OfficeWorkers, &RasterWorkers)>,
+    preview: Option<(
+        &crate::OfficialPdfOptions,
+        usize,
+        &OfficeWorkers,
+        &RasterWorkers,
+    )>,
+    service: crate::command::service::ResolvedService,
 ) -> Result<Vec<TaskFailure>, String> {
     archive::preflight_output_root(output)?;
-    let client = Arc::new(MineruApiClient::new(api_url)?);
+    let client = Arc::new(MineruApiClient::new_with_transport(
+        api_url,
+        service.api_connect_timeout,
+        service.api_acquisition_timeout,
+        service.api_send_timeout,
+        service.api_poll_interval,
+    )?);
     let health = client.health().await?;
     let tasks = planning::plan_tasks(options.backend, &documents, health.processing_window_size)?;
     let concurrency = planning::effective_concurrency(
@@ -276,7 +307,7 @@ async fn run_core(
                             message,
                         });
                     } else {
-                        if let Some((route, office, raster)) = preview {
+                        if let Some((route, response_cap, office, raster)) = preview {
                             for document in &task.documents {
                                 let kind = crate::DocumentKind::from_suffix(&document.suffix)
                                     .expect("validated document kind");
@@ -289,6 +320,8 @@ async fn run_core(
                                     office,
                                     raster,
                                     task_events.clone(),
+                                    response_cap,
+                                    service.ooxml,
                                 )
                                 .await
                             {
@@ -538,6 +571,15 @@ mod tests {
         }
     }
 
+    fn service() -> crate::command::service::ResolvedService {
+        crate::command::service::resolve_service(
+            &(|_| None),
+            &crate::command::service::ServiceOverrides::default(),
+            crate::DocumentLimitPolicy::defaults(),
+        )
+        .unwrap()
+    }
+
     async fn assert_workers_draining(office: &OfficeWorkers, raster: &RasterWorkers) {
         assert!(matches!(
             office
@@ -607,6 +649,8 @@ mod tests {
                 crate::OfficialPdfOptions::default(),
                 office,
                 raster,
+                10 * 1024 * 1024,
+                service(),
             )
             .await
             .unwrap()
@@ -630,6 +674,8 @@ mod tests {
                 crate::OfficialPdfOptions::default(),
                 office,
                 raster,
+                10 * 1024 * 1024,
+                service(),
             )
             .await
             .is_err()
@@ -684,6 +730,8 @@ mod tests {
             Some(callback),
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
             crate::DocumentLimitPolicy::defaults(),
+            10 * 1024 * 1024,
+            service(),
         )
         .await
         .unwrap();
@@ -740,6 +788,8 @@ mod tests {
             Some(callback),
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
             crate::DocumentLimitPolicy::defaults(),
+            10 * 1024 * 1024,
+            service(),
         )
         .await
         .unwrap();
@@ -847,6 +897,8 @@ mod tests {
             Some(callback),
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
             crate::DocumentLimitPolicy::defaults(),
+            10 * 1024 * 1024,
+            service(),
         )
         .await
         .unwrap();
@@ -999,6 +1051,7 @@ mod tests {
                     Some(callback),
                     None,
                     None,
+                    service(),
                 )
             )
             .await
@@ -1108,6 +1161,7 @@ mod tests {
             None,
             None,
             None,
+            service(),
         )
         .await
         .unwrap();

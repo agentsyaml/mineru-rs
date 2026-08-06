@@ -9,16 +9,16 @@ const TOTAL_NAME_CAP: u64 = 32 * 1024 * 1024;
 const TOTAL_COMPONENT_CAP: u64 = 1_000_000;
 const ENTRY_CAP: u64 = 100_000;
 
-#[derive(Clone, Copy)]
-pub(super) struct ScanLimits {
-    pub(super) max_entries: u64,
-    pub(super) central_cap: u64,
-    pub(super) zip64_cap: u64,
-    pub(super) name_cap: usize,
-    pub(super) component_cap: usize,
-    pub(super) depth_cap: usize,
-    pub(super) total_name_cap: u64,
-    pub(super) total_component_cap: u64,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScanLimits {
+    pub(crate) max_entries: u64,
+    pub(crate) central_cap: u64,
+    pub(crate) zip64_cap: u64,
+    pub(crate) name_cap: usize,
+    pub(crate) component_cap: usize,
+    pub(crate) depth_cap: usize,
+    pub(crate) total_name_cap: u64,
+    pub(crate) total_component_cap: u64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -27,6 +27,8 @@ pub(super) enum ScanError {
     Limit,
 }
 impl ScanLimits {
+    /// Compiled-safe default scan policy. The entry count follows the caller's value exactly;
+    /// `ENTRY_CAP` is only the compiled default, never a hidden ceiling on operator values.
     pub(super) fn production(max_entries: u64) -> Self {
         Self {
             max_entries: max_entries.min(ENTRY_CAP),
@@ -38,6 +40,41 @@ impl ScanLimits {
             total_name_cap: TOTAL_NAME_CAP,
             total_component_cap: TOTAL_COMPONENT_CAP,
         }
+    }
+
+    /// Operator-resolved scan policy. `zip64_cap` (ZIP64 structure) and `component_cap`
+    /// (portable 255-byte components) stay immutable; every other capacity follows the
+    /// configured value with no hidden ceiling.
+    pub(crate) fn from_resolved(
+        max_entries: u64,
+        central_cap: u64,
+        name_cap: usize,
+        depth_cap: usize,
+        total_name_cap: u64,
+        total_component_cap: u64,
+    ) -> Result<Self, String> {
+        let limits = Self {
+            max_entries,
+            central_cap,
+            zip64_cap: ZIP64_CAP,
+            name_cap,
+            component_cap: COMPONENT_CAP,
+            depth_cap,
+            total_name_cap,
+            total_component_cap,
+        };
+        if limits.max_entries == 0
+            || limits.central_cap == 0
+            || limits.zip64_cap < 44
+            || limits.name_cap == 0
+            || limits.component_cap == 0
+            || limits.depth_cap == 0
+            || limits.total_name_cap == 0
+            || limits.total_component_cap == 0
+        {
+            return Err("ZIP scan limits must be positive".into());
+        }
+        Ok(limits)
     }
 }
 
@@ -93,7 +130,7 @@ pub(super) fn scan<R: Read + Seek>(
         count_saturated,
         size_or_offset_saturated,
     )?;
-    if count > limits.max_entries.min(ENTRY_CAP) || central_size > limits.central_cap {
+    if count > limits.max_entries || central_size > limits.central_cap {
         return Err(ScanError::Limit);
     }
     let central_end = central_start.checked_add(central_size).ok_or_else(bad)?;
@@ -342,9 +379,6 @@ fn validate_name(n: &[u8], l: ScanLimits, components: &mut u64) -> Result<(), Sc
         return Err(ScanError::Limit);
     }
     Ok(())
-}
-fn sentinel(e: &[u8]) -> bool {
-    u16at(e, 8) == u16::MAX || u32at(e, 12) == u32::MAX || u32at(e, 16) == u32::MAX
 }
 fn bad() -> ScanError {
     ScanError::Fallback

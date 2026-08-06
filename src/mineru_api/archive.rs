@@ -28,12 +28,13 @@ const BODY_CAP: usize = 64 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ArchiveLimits {
-    pub(super) max_entries: u64,
-    pub(super) max_compressed_bytes: u64,
-    pub(super) max_expanded_bytes: u64,
-    pub(super) max_entry_bytes: u64,
-    pub(super) max_ratio: u64,
+pub struct ArchiveLimits {
+    pub(crate) max_entries: u64,
+    pub(crate) max_compressed_bytes: u64,
+    pub(crate) max_expanded_bytes: u64,
+    pub(crate) max_entry_bytes: u64,
+    pub(crate) max_ratio: u64,
+    pub(crate) scan: ScanLimits,
 }
 
 impl Default for ArchiveLimits {
@@ -44,6 +45,7 @@ impl Default for ArchiveLimits {
             max_expanded_bytes: 32 * 1024 * 1024 * 1024,
             max_entry_bytes: 8 * 1024 * 1024 * 1024,
             max_ratio: 1000,
+            scan: ScanLimits::production(100_000),
         }
     }
 }
@@ -56,7 +58,28 @@ impl ArchiveLimits {
             max_expanded_bytes: policy.expanded_archive_bytes,
             max_entry_bytes: policy.archive_entry_bytes,
             max_ratio: 1000,
+            scan: ScanLimits::production(100_000),
         }
+    }
+
+    /// Document-derived byte caps combined with operator entry/ratio policy and the resolved
+    /// scan policy. No arbitrary entry or ratio ceiling is applied; configured values are policy.
+    pub(crate) fn from_document_limits_with_operator(
+        policy: crate::DocumentLimitPolicy,
+        max_entries: u64,
+        max_ratio: u64,
+        scan: ScanLimits,
+    ) -> Result<Self, String> {
+        let limits = Self {
+            max_entries,
+            max_compressed_bytes: policy.download_compressed_bytes,
+            max_expanded_bytes: policy.expanded_archive_bytes,
+            max_entry_bytes: policy.archive_entry_bytes,
+            max_ratio,
+            scan,
+        };
+        limits.validate()?;
+        Ok(limits)
     }
     fn validate(self) -> Result<Self, String> {
         if self.max_entries == 0
@@ -77,6 +100,7 @@ impl ArchiveLimits {
 #[derive(Debug)]
 pub(super) struct DownloadedZip(NamedTempFile);
 impl DownloadedZip {
+    #[cfg(test)]
     pub(super) fn path(&self) -> &Path {
         self.0.path()
     }
@@ -107,7 +131,7 @@ impl DownloadedZip {
         }
         let scanned = scan(
             &mut self.reopen().map_err(|_| "unable to open result archive")?,
-            ScanLimits::production(limits.max_entries),
+            limits.scan,
         )
         .map_err(|_| "invalid result archive")?;
         let mut zip = ZipArchive::with_config(
@@ -391,6 +415,7 @@ struct CommitState<'a> {
     backed_up: Vec<PathBuf>,
     created_dirs: Vec<PathBuf>,
     publications: usize,
+    #[cfg_attr(not(test), allow(dead_code))] // test fault-injection plumbing
     fault: CommitFault,
 }
 
@@ -1094,6 +1119,7 @@ mod tests {
             max_expanded_bytes: 64,
             max_entry_bytes: 32,
             max_ratio: 100,
+            scan: ScanLimits::production(8),
         }
     }
     fn archive(entries: &[(&str, &[u8], CompressionMethod)]) -> DownloadedZip {
@@ -1676,6 +1702,7 @@ mod tests {
         ];
         let mut exact = limits();
         exact.max_entries = 2;
+        exact.scan.max_entries = 2;
         assert!(
             archive(&entries)
                 .extract(tempfile::tempdir().unwrap().path(), exact)
@@ -1683,6 +1710,7 @@ mod tests {
         );
         let mut over = exact;
         over.max_entries = 1;
+        over.scan.max_entries = 1;
         assert!(
             archive(&entries)
                 .extract(tempfile::tempdir().unwrap().path(), over)

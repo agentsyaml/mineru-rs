@@ -20,10 +20,12 @@ struct TestProbe {
     stderr: AtomicUsize,
 }
 
+#[cfg(test)]
 const INPUT_CAP: usize = 32 * 1024 * 1024;
+#[cfg(test)]
 const OUTPUT_CAP: usize = 64 * 1024 * 1024;
+#[cfg(test)]
 const STDERR_CAP: usize = 4096;
-const MANAGED_WALL_CAP: Duration = Duration::from_secs(180);
 // Only the direct child is reaped. After this grace, cleanup continues detached so drain stays bounded.
 const CHILD_REAP_GRACE: Duration = Duration::from_millis(250);
 
@@ -49,6 +51,8 @@ struct State {
 pub struct OfficeWorkers {
     executable: PathBuf,
     prefix: Vec<OsString>,
+    limits: crate::command::service::OfficeLimits,
+    ooxml: crate::command::service::OoxmlLimits,
     state: Arc<Mutex<State>>,
     #[cfg(test)]
     probe: Arc<TestProbe>,
@@ -88,9 +92,38 @@ impl OfficeWorkers {
     }
     #[doc(hidden)]
     pub fn with_executable(executable: PathBuf) -> Self {
+        Self::with_executable_and_limits(
+            executable,
+            crate::command::service::OfficeLimits::default(),
+        )
+    }
+
+    /// Crate-private construction with a frozen Phase-1B office resource policy. The resolved
+    /// limits are enforced in this parent and written into the explicit child environment so the
+    /// helper reads them exactly once at startup.
+    pub(crate) fn with_executable_and_limits(
+        executable: PathBuf,
+        limits: crate::command::service::OfficeLimits,
+    ) -> Self {
+        Self::with_executable_and_policy(
+            executable,
+            limits,
+            crate::command::service::OoxmlLimits::default_resolved(),
+        )
+    }
+
+    /// Crate-private construction with the frozen office AND OOXML policy; both are written into
+    /// the explicit child environment so the helper's own preflight honors the same limits.
+    pub(crate) fn with_executable_and_policy(
+        executable: PathBuf,
+        limits: crate::command::service::OfficeLimits,
+        ooxml: crate::command::service::OoxmlLimits,
+    ) -> Self {
         Self {
             executable,
             prefix: Vec::new(),
+            limits,
+            ooxml,
             state: Arc::new(Mutex::new(State {
                 accepting: true,
                 next: 0,
@@ -112,6 +145,8 @@ impl OfficeWorkers {
                 "office_workers::tests::fake_child".into(),
                 "--nocapture".into(),
             ],
+            limits: crate::command::service::OfficeLimits::default(),
+            ooxml: crate::command::service::OoxmlLimits::default_resolved(),
             state: Arc::new(Mutex::new(State {
                 accepting: true,
                 next: 0,
@@ -140,7 +175,9 @@ impl OfficeWorkers {
         timeout: Duration,
     ) -> Result<(Vec<u8>, Option<String>), OfficeConvertError> {
         let input = input.into();
-        if input.len() > INPUT_CAP {
+        let limits = self.limits;
+        let ooxml = self.ooxml;
+        if input.len() > limits.input_bytes {
             return Err(OfficeConvertError::Failed("input too large".into()));
         }
         if timeout.is_zero() {
@@ -167,11 +204,15 @@ impl OfficeWorkers {
             state.owners.spawn(async move {
                 #[cfg(test)]
                 let result = owner(
-                    executable, prefix, format, input, timeout, cancel_rx, probe, ready,
+                    executable, prefix, format, input, timeout, cancel_rx, limits, ooxml, probe,
+                    ready,
                 )
                 .await;
                 #[cfg(not(test))]
-                let result = owner(executable, prefix, format, input, timeout, cancel_rx).await;
+                let result = owner(
+                    executable, prefix, format, input, timeout, cancel_rx, limits, ooxml,
+                )
+                .await;
                 let _ = result_tx.send(result);
                 state_ref.lock().await.cancels.remove(&id);
             });
@@ -606,12 +647,12 @@ mod tests {
     #[test]
     fn managed_wall_time_is_capped_independently_of_route_deadline() {
         assert_eq!(
-            managed_timeout(Duration::from_secs(1)),
+            managed_timeout(Duration::from_secs(1), Duration::from_secs(180)),
             Duration::from_secs(1)
         );
         assert_eq!(
-            managed_timeout(Duration::from_secs(24 * 60 * 60)),
-            MANAGED_WALL_CAP
+            managed_timeout(Duration::from_secs(24 * 60 * 60), Duration::from_secs(180)),
+            Duration::from_secs(180)
         );
     }
 
@@ -668,6 +709,8 @@ async fn owner(
     input: Bytes,
     timeout: Duration,
     mut cancel: watch::Receiver<bool>,
+    limits: crate::command::service::OfficeLimits,
+    ooxml: crate::command::service::OoxmlLimits,
     #[cfg(test)] probe: Arc<TestProbe>,
     #[cfg(test)] ready: Option<PathBuf>,
 ) -> Result<(Vec<u8>, Option<String>), OfficeConvertError> {
@@ -675,11 +718,15 @@ async fn owner(
     let route_deadline = now
         .checked_add(timeout)
         .ok_or_else(|| OfficeConvertError::Failed("invalid timeout".into()))?;
-    let deadline = route_deadline.min(now + managed_timeout(timeout));
+    let deadline = route_deadline.min(now + managed_timeout(timeout, limits.wall));
     let mut command = Command::new(executable);
     #[cfg(test)]
     let fake_child = !prefix.is_empty();
     command.args(prefix);
+    // The resolved parent policy is written into the explicit child environment; the helper
+    // reads it exactly once at startup and never re-reads a drifting process environment.
+    limits.apply_to_child_env(&mut command);
+    ooxml.apply_to_child_env(&mut command);
     #[cfg(test)]
     if fake_child {
         command.env("MINERU_OFFICE_FAKE_MODE", format);
@@ -733,12 +780,14 @@ async fn owner(
         stdin.write_all(&input).await.map_err(|_| ())?;
         stdin.shutdown().await.map_err(|_| ())
     }));
+    let output_cap = limits.output_bytes;
+    let stderr_cap = limits.stderr_bytes;
     let mut out = Some(tokio::spawn(async move {
         #[cfg(test)]
         if matches!(format, "pipe_failure" | "reap_wait_error") {
             return Err(ReadCapError::Io);
         }
-        let result = read_stdout_cap(&mut stdout, OUTPUT_CAP).await;
+        let result = read_stdout_cap(&mut stdout, output_cap).await;
         #[cfg(test)]
         match format {
             "child_exit_pipe_hang" => std::future::pending().await,
@@ -750,7 +799,7 @@ async fn owner(
         result
     }));
     let mut err = Some(tokio::spawn(async move {
-        let result = read_stderr_cap(&mut stderr, STDERR_CAP).await;
+        let result = read_stderr_cap(&mut stderr, stderr_cap).await;
         #[cfg(test)]
         if format == "child_failure_stderr_hang" {
             std::future::pending().await
@@ -879,7 +928,7 @@ async fn owner(
             ReapOutcome::AlreadyReaped => {}
         }
         return Err(OfficeConvertError::Failed(if child_failed {
-            sanitize(diagnostic.as_deref().unwrap_or_default())
+            sanitize(diagnostic.as_deref().unwrap_or_default(), stderr_cap)
         } else {
             message.into()
         }));
@@ -888,6 +937,7 @@ async fn owner(
     if !status.as_ref().is_some_and(|value| value.success()) {
         return Err(OfficeConvertError::Failed(sanitize(
             diagnostic.as_deref().unwrap_or_default(),
+            stderr_cap,
         )));
     }
     #[cfg(unix)]
@@ -910,6 +960,7 @@ async fn owner(
     if !output.starts_with(b"%PDF-") {
         return Err(OfficeConvertError::Failed(sanitize(
             diagnostic.as_deref().unwrap_or_default(),
+            stderr_cap,
         )));
     }
     let document = lopdf::Document::load_mem(&output)
@@ -920,7 +971,7 @@ async fn owner(
     let warning = diagnostic
         .as_deref()
         .filter(|bytes| !bytes.is_empty())
-        .map(|bytes| crate::sanitize_event_text(&String::from_utf8_lossy(bytes), STDERR_CAP));
+        .map(|bytes| crate::sanitize_event_text(&String::from_utf8_lossy(bytes), stderr_cap));
     Ok((output, warning))
 }
 
@@ -1002,8 +1053,8 @@ impl Drop for ProcessGroup {
     }
 }
 
-fn managed_timeout(remaining_route_deadline: Duration) -> Duration {
-    remaining_route_deadline.min(MANAGED_WALL_CAP)
+fn managed_timeout(remaining_route_deadline: Duration, wall: Duration) -> Duration {
+    remaining_route_deadline.min(wall)
 }
 enum ReadCapError {
     TooLarge,
@@ -1045,16 +1096,16 @@ async fn read_stderr_cap(
         bytes.extend_from_slice(&buf[..keep]);
     }
 }
-fn sanitize(bytes: &[u8]) -> String {
-    let mut text = crate::error::sanitize_vlm_error_bytes(bytes, STDERR_CAP)
+fn sanitize(bytes: &[u8], cap: usize) -> String {
+    let mut text = crate::error::sanitize_vlm_error_bytes(bytes, cap)
         .chars()
         .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
         .collect::<String>();
-    if text.len() > STDERR_CAP {
+    if text.len() > cap {
         let mut end = 0;
         for (start, character) in text.char_indices() {
             let next = start + character.len_utf8();
-            if next > STDERR_CAP {
+            if next > cap {
                 break;
             }
             end = next;

@@ -127,7 +127,8 @@ class BindingTests(unittest.TestCase):
             mineru_rs.__all__,
             ["RunReport", "canonical_stem", "run", "validate_pdf_options"],
         )
-        self.assertEqual(mineru_rs.canonical_stem("a bad/pdf"), "a_bad_pdf")
+        self.assertEqual(mineru_rs.canonical_stem("a bad/pdf"), "a bad_pdf")
+        self.assertEqual(mineru_rs.canonical_stem("文档《报告》"), "文档《报告》")
         self.assertEqual(mineru_rs.canonical_stem(""), "document")
         with self.assertRaises(ValueError):
             mineru_rs.canonical_stem("con")

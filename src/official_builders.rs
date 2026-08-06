@@ -1,5 +1,4 @@
 //! Private, fixture-shaped official VLM artifact construction.
-#![allow(dead_code)] // Stage 3 wires this private builder into the PDF path.
 
 use crate::{Asset, AssetKind, ModelBlock, ModelOutput, VlmError, VlmResult};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -30,6 +29,8 @@ pub(crate) struct OfficialBuildArtifacts {
     pub content_list: Value,
     pub content_list_v2: Value,
     pub markdown: String,
+    #[cfg_attr(not(test), allow(dead_code))]
+    // aggregated by the test builder; route assets come from prepared pages
     pub assets: Vec<Asset>,
 }
 
@@ -2658,7 +2659,6 @@ struct RowMetrics {
     row_idx: usize,
     effective_cols: usize,
     actual_cols: usize,
-    visual_cols: usize,
 }
 
 #[derive(Clone)]
@@ -2732,7 +2732,6 @@ fn scan_rows(rows: &[TableRow], initial: &TailOccupied, start_row_idx: usize) ->
             row_idx: start_row_idx + row_idx,
             effective_cols,
             actual_cols,
-            visual_cols: parsed.cells.len(),
         };
         if !parsed.cells.is_empty() {
             last_nonempty = Some(metric.clone());
@@ -3639,83 +3638,6 @@ fn compose_page(
     Ok((nodes, discarded))
 }
 
-pub(crate) fn build_official_artifacts(
-    pages: Vec<OfficialBuildPage>,
-    formula_enable: bool,
-    table_enable: bool,
-) -> VlmResult<OfficialBuildArtifacts> {
-    let mut assets: BTreeMap<String, Asset> = BTreeMap::new();
-    let mut prepared = Vec::new();
-    for page in pages {
-        let built = prepare_official_page(page, usize::MAX, usize::MAX)?;
-        for asset in built.assets {
-            let path = asset.relative_path.to_string_lossy().into_owned();
-            if let Some(existing) = assets.get(&path) {
-                if existing.data != asset.data {
-                    return err("asset path collision");
-                }
-            } else {
-                assets.insert(path, asset);
-            }
-        }
-        prepared.push(built.page);
-    }
-    let built = finalize_official_document(prepared, formula_enable, table_enable)?;
-    let model_output = built
-        .iter()
-        .flat_map(|page| page.model_output.clone())
-        .collect();
-    let infos: Vec<Value> = built
-        .iter()
-        .flat_map(|page| {
-            page.middle_json["pdf_info"]
-                .as_array()
-                .expect("builder created pdf_info")
-                .clone()
-        })
-        .collect();
-    let flat: Vec<Value> = built
-        .iter()
-        .flat_map(|page| {
-            page.content_list
-                .as_array()
-                .expect("builder created array")
-                .clone()
-        })
-        .collect();
-    let v2: Vec<Value> = built
-        .iter()
-        .flat_map(|page| {
-            page.content_list_v2
-                .as_array()
-                .expect("builder created array")
-                .clone()
-        })
-        .collect();
-    let markdown = built
-        .iter()
-        .map(|page| page.markdown.as_str())
-        .filter(|markdown| !markdown.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    Ok(OfficialBuildArtifacts {
-        model_output,
-        middle_json: json!({"pdf_info":infos,"_backend":"vlm","_version_name":"3.4.4"}),
-        content_list: Value::Array(flat),
-        content_list_v2: Value::Array(v2),
-        markdown,
-        assets: assets.into_values().collect(),
-    })
-}
-
-pub(crate) fn prepare_official_page(
-    page: OfficialBuildPage,
-    max_asset_bytes: usize,
-    max_text_bytes: usize,
-) -> VlmResult<OfficialPreparedArtifacts> {
-    prepare_official_page_until(page, max_asset_bytes, max_text_bytes, None)
-}
-
 pub(crate) fn prepare_official_page_until(
     page: OfficialBuildPage,
     max_asset_bytes: usize,
@@ -3775,14 +3697,6 @@ fn map_text_bytes(values: &serde_json::Map<String, Value>) -> Option<usize> {
             .checked_add(key.len())?
             .checked_add(value_text_bytes(value)?)
     })
-}
-
-pub(crate) fn finalize_official_document(
-    pages: Vec<OfficialPreparedPage>,
-    formula_enable: bool,
-    table_enable: bool,
-) -> VlmResult<Vec<OfficialBuildArtifacts>> {
-    finalize_official_document_until(pages, formula_enable, table_enable, None)
 }
 
 pub(crate) fn finalize_official_document_until(
@@ -3873,6 +3787,77 @@ mod tests {
         }
     }
 
+    /// Assembles official artifacts through the deadline-aware production builders (no deadline),
+    /// the same pipeline `build_official_artifacts` used before it was removed as test-only.
+    fn build_all(
+        pages: Vec<OfficialBuildPage>,
+        formula_enable: bool,
+        table_enable: bool,
+    ) -> VlmResult<OfficialBuildArtifacts> {
+        let mut assets: BTreeMap<String, Asset> = BTreeMap::new();
+        let mut prepared = Vec::new();
+        for page in pages {
+            let built = prepare_official_page_until(page, usize::MAX, usize::MAX, None)?;
+            for asset in built.assets {
+                let path = asset.relative_path.to_string_lossy().into_owned();
+                if let Some(existing) = assets.get(&path) {
+                    if existing.data != asset.data {
+                        return err("asset path collision");
+                    }
+                } else {
+                    assets.insert(path, asset);
+                }
+            }
+            prepared.push(built.page);
+        }
+        let built = finalize_official_document_until(prepared, formula_enable, table_enable, None)?;
+        let model_output = built
+            .iter()
+            .flat_map(|page| page.model_output.clone())
+            .collect();
+        let infos: Vec<Value> = built
+            .iter()
+            .flat_map(|page| {
+                page.middle_json["pdf_info"]
+                    .as_array()
+                    .expect("builder created pdf_info")
+                    .clone()
+            })
+            .collect();
+        let flat: Vec<Value> = built
+            .iter()
+            .flat_map(|page| {
+                page.content_list
+                    .as_array()
+                    .expect("builder created array")
+                    .clone()
+            })
+            .collect();
+        let v2: Vec<Value> = built
+            .iter()
+            .flat_map(|page| {
+                page.content_list_v2
+                    .as_array()
+                    .expect("builder created array")
+                    .clone()
+            })
+            .collect();
+        let markdown = built
+            .iter()
+            .map(|page| page.markdown.as_str())
+            .filter(|markdown| !markdown.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(OfficialBuildArtifacts {
+            model_output,
+            middle_json: json!({"pdf_info":infos,"_backend":"vlm","_version_name":"3.4.4"}),
+            content_list: Value::Array(flat),
+            content_list_v2: Value::Array(v2),
+            markdown,
+            assets: assets.into_values().collect(),
+        })
+    }
+
     fn page(blocks: Vec<ModelBlock>) -> OfficialBuildPage {
         OfficialBuildPage {
             slice_page_idx: 0,
@@ -3896,7 +3881,7 @@ mod tests {
             page_at(3, vec![block("text", [0.1, 0.1, 0.9, 0.9], Some("three"))]),
             page_at(5, vec![block("text", [0.1, 0.1, 0.9, 0.9], Some("five"))]),
         ];
-        let built = build_official_artifacts(source_indexes, true, true).unwrap();
+        let built = build_all(source_indexes, true, true).unwrap();
         assert_eq!(built.middle_json["pdf_info"][0]["page_idx"], 3);
         assert_eq!(built.middle_json["pdf_info"][1]["page_idx"], 5);
 
@@ -3905,7 +3890,7 @@ mod tests {
                 .into_iter()
                 .map(|index| page_at(index, vec![]))
                 .collect();
-            assert!(build_official_artifacts(pages, true, true).is_err());
+            assert!(build_all(pages, true, true).is_err());
         }
     }
 
@@ -4087,7 +4072,7 @@ mod tests {
     fn synthetic_crop_uses_point_coordinates_and_is_write_idempotent() {
         let visual = block("image", [0.25, 0.25, 0.75, 0.75], None);
         let duplicate = visual.clone();
-        let built = build_official_artifacts(
+        let built = build_all(
             vec![OfficialBuildPage {
                 slice_page_idx: 0,
                 page_size_points: [4.0, 4.0],
@@ -4123,7 +4108,7 @@ mod tests {
     #[test]
     fn multiple_visual_crops_keep_deterministic_paths_for_every_kind() {
         let image = RgbImage::from_pixel(100, 100, image::Rgb([3, 4, 5]));
-        let built = build_official_artifacts(
+        let built = build_all(
             vec![OfficialBuildPage {
                 snapshot: vec![
                     block("image", [0.1, 0.1, 0.2, 0.2], None),
@@ -4178,7 +4163,7 @@ mod tests {
     fn merge_prev_is_page_local_and_orphan_footnotes_are_text() {
         let mut continuation = block("text", [0.1, 0.1, 0.9, 0.2], Some("continuation"));
         continuation.merge_prev = Some(true);
-        let built = build_official_artifacts(
+        let built = build_all(
             vec![
                 page_at(
                     0,
@@ -4478,7 +4463,7 @@ mod tests {
         chart.sub_type = Some("bar".into());
         let mut image_block = block("image_block", [0.7, 0.4, 0.9, 0.6], None);
         image_block.sub_type = Some("ignored".into());
-        let built = build_official_artifacts(
+        let built = build_all(
             vec![page(vec![table, image, chart, image_block])],
             true,
             true,
@@ -4496,7 +4481,7 @@ mod tests {
             Some("<table><tr><td>x</td></tr></table>"),
         );
         truthy.extra.insert("cell_merge".into(), json!([0]));
-        let truthy = build_official_artifacts(vec![page(vec![truthy])], true, true).unwrap();
+        let truthy = build_all(vec![page(vec![truthy])], true, true).unwrap();
         assert_eq!(
             truthy.middle_json["pdf_info"][0]["preproc_blocks"][0]["cell_merge"],
             json!([0])
@@ -4563,7 +4548,7 @@ mod tests {
 
     #[test]
     fn finalizes_adjacent_pages_as_one_document() {
-        let refs = build_official_artifacts(
+        let refs = build_all(
             vec![
                 page_at(
                     0,
@@ -4605,7 +4590,7 @@ mod tests {
         // The route serializes these records after releasing page RGB.  Re-read them
         // before finalization to cover the document-scope staging seam specifically.
         let staged = vec![
-            prepare_official_page(
+            prepare_official_page_until(
                 page_at(
                     2,
                     vec![
@@ -4615,9 +4600,10 @@ mod tests {
                 ),
                 usize::MAX,
                 usize::MAX,
+                None,
             )
             .unwrap(),
-            prepare_official_page(
+            prepare_official_page_until(
                 page_at(
                     3,
                     vec![
@@ -4627,6 +4613,7 @@ mod tests {
                 ),
                 usize::MAX,
                 usize::MAX,
+                None,
             )
             .unwrap(),
         ];
@@ -4636,7 +4623,7 @@ mod tests {
                 serde_json::from_slice(&serde_json::to_vec(&prepared.page).unwrap()).unwrap()
             })
             .collect();
-        let canonical = finalize_official_document(pages, true, true).unwrap();
+        let canonical = finalize_official_document_until(pages, true, true, None).unwrap();
         assert_eq!(
             canonical[0].middle_json["pdf_info"][0]["para_blocks"][0]["blocks"]
                 .as_array()
@@ -4672,7 +4659,7 @@ mod tests {
                 ),
             ],
         );
-        let merged = build_official_artifacts(vec![first, second], true, true).unwrap();
+        let merged = build_all(vec![first, second], true, true).unwrap();
         assert_eq!(merged.middle_json["pdf_info"][0]["page_idx"], 0);
         assert_eq!(merged.middle_json["pdf_info"][1]["page_idx"], 1);
         assert!(
@@ -4702,7 +4689,7 @@ mod tests {
                 .is_none()
         );
 
-        let no_table_merge = build_official_artifacts(
+        let no_table_merge = build_all(
             vec![
                 page_at(
                     0,
@@ -4735,7 +4722,7 @@ mod tests {
 
     #[test]
     fn reference_list_continues_past_an_emptied_page() {
-        let refs = build_official_artifacts(
+        let refs = build_all(
             vec![
                 page_at(
                     0,
@@ -4794,7 +4781,7 @@ mod tests {
                 block("table", [0.1, 0.1, 0.9, 0.3], Some(content)),
             ]
         };
-        let tables = build_official_artifacts(
+        let tables = build_all(
             vec![
                 page_at(
                     0,
@@ -4846,7 +4833,7 @@ mod tests {
 
     #[test]
     fn caption_fallback_and_empty_list_marker_follow_magic_model() {
-        let built = build_official_artifacts(
+        let built = build_all(
             vec![page(vec![
                 block("table_caption", [0.1, 0.1, 0.5, 0.15], Some("Table")),
                 block("text", [0.5, 0.1, 0.9, 0.15], Some(" one")),
@@ -4871,7 +4858,7 @@ mod tests {
         text.merge_prev = Some(false);
         let mut reference = block("ref_text", [0.1, 0.6, 0.9, 0.7], Some("two"));
         reference.merge_prev = Some(true);
-        let built = build_official_artifacts(
+        let built = build_all(
             vec![page(vec![
                 block("header", [0.1, 0.01, 0.9, 0.05], Some("chrome")),
                 block("table_caption", [0.1, 0.1, 0.9, 0.15], Some("Table 1")),
@@ -4941,8 +4928,8 @@ mod tests {
             ),
             block("equation", [0.1, 0.5, 0.9, 0.6], Some("\\[ x \\]")),
         ];
-        let enabled = build_official_artifacts(vec![page(blocks.clone())], true, true).unwrap();
-        let disabled = build_official_artifacts(vec![page(blocks)], false, false).unwrap();
+        let enabled = build_all(vec![page(blocks.clone())], true, true).unwrap();
+        let disabled = build_all(vec![page(blocks)], false, false).unwrap();
         assert_eq!(enabled.content_list, disabled.content_list);
         assert_eq!(enabled.content_list_v2, disabled.content_list_v2);
         assert!(enabled.markdown.contains("<table"));
@@ -4983,20 +4970,20 @@ mod tests {
             },
         ];
         for invalid in invalid_pages {
-            assert!(build_official_artifacts(vec![invalid], true, true).is_err());
+            assert!(build_all(vec![invalid], true, true).is_err());
         }
-        assert!(build_official_artifacts(vec![page(vec![bad_bbox])], true, true).is_err());
-        assert!(build_official_artifacts(vec![page(vec![missing_angle])], true, true).is_err());
-        assert!(build_official_artifacts(vec![page(vec![missing_bbox])], true, true).is_err());
+        assert!(build_all(vec![page(vec![bad_bbox])], true, true).is_err());
+        assert!(build_all(vec![page(vec![missing_angle])], true, true).is_err());
+        assert!(build_all(vec![page(vec![missing_bbox])], true, true).is_err());
         assert!(
-            build_official_artifacts(
+            build_all(
                 vec![page(vec![block("unknown", [0.1, 0.1, 0.9, 0.9], None)])],
                 true,
                 true
             )
             .is_err()
         );
-        let orphan = build_official_artifacts(
+        let orphan = build_all(
             vec![page(vec![block(
                 "caption",
                 [0.1, 0.1, 0.9, 0.2],
@@ -5011,7 +4998,7 @@ mod tests {
             "text"
         );
         assert!(
-            build_official_artifacts(
+            build_all(
                 vec![page(vec![block(
                     "list",
                     [0.1, 0.1, 0.9, 0.2],
@@ -5023,7 +5010,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            build_official_artifacts(
+            build_all(
                 vec![page(vec![block("equation", [0.1, 0.1, 0.9, 0.2], None)])],
                 true,
                 true
@@ -5032,7 +5019,7 @@ mod tests {
         );
 
         let reversed = block("text", [0.9, 0.8, 0.1, 0.2], Some("x"));
-        let built = build_official_artifacts(vec![page(vec![reversed])], true, true).unwrap();
+        let built = build_all(vec![page(vec![reversed])], true, true).unwrap();
         assert_eq!(
             built.middle_json["pdf_info"][0]["preproc_blocks"][0]["bbox"],
             json!([10, 20, 90, 80])
@@ -5045,7 +5032,7 @@ mod tests {
             .into_iter()
             .map(|kind| block(kind, [0.1, 0.1, 0.9, 0.2], None))
             .collect();
-        let built = build_official_artifacts(vec![page(blocks)], false, false).unwrap();
+        let built = build_all(vec![page(blocks)], false, false).unwrap();
         assert!(!built.middle_json.to_string().contains("recognized"));
     }
 

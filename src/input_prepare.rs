@@ -197,6 +197,28 @@ pub async fn prepare_with_warning(
     raster_workers: &RasterWorkers,
     remaining: Duration,
 ) -> Result<(PreparedPdf, Option<String>), String> {
+    prepare_with_warning_and_ooxml(
+        bytes,
+        declared,
+        options,
+        workers,
+        raster_workers,
+        remaining,
+        crate::command::service::OoxmlLimits::default_resolved(),
+    )
+    .await
+}
+
+/// Crate-private variant carrying the frozen Phase-1B OOXML preflight policy.
+pub(crate) async fn prepare_with_warning_and_ooxml(
+    bytes: impl Into<Bytes>,
+    declared: DocumentKind,
+    options: &OfficialPdfOptions,
+    workers: &OfficeWorkers,
+    raster_workers: &RasterWorkers,
+    remaining: Duration,
+    ooxml: crate::command::service::OoxmlLimits,
+) -> Result<(PreparedPdf, Option<String>), String> {
     let bytes = bytes.into();
     let original = bytes.clone();
     let deadline = Instant::now()
@@ -230,7 +252,7 @@ pub async fn prepare_with_warning(
     }
     if declared.is_office() {
         let (bytes, detected) = tokio::task::spawn_blocking(move || {
-            let detected = ooxml::detect_bytes(&bytes);
+            let detected = ooxml::detect_bytes_with_limits(&bytes, ooxml);
             (bytes, detected)
         })
         .await

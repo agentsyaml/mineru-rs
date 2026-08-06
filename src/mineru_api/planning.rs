@@ -184,6 +184,15 @@ mod tests {
         assert_eq!(unique_stems(&["ß".into(), "ss".into()]), vec!["ß", "ss"]); // Known std lowercase gap.
     }
     #[test]
+    fn unique_stems_truncate_cjk_at_utf8_boundaries_and_suffix_collisions() {
+        let stems = unique_stems(&["文".repeat(100)]);
+        assert!(stems[0].len() <= 200 && stems[0].chars().all(|c| c == '文'));
+        assert_eq!(
+            unique_stems(&["文档".into(), "文档".into()]),
+            vec!["文档", "文档_2"]
+        );
+    }
+    #[test]
     fn pipeline_plans_and_other_backends_do_not_pack() {
         let docs = vec![d(5, 70), d(2, 40), d(4, 24), d(1, 24), d(3, 16)];
         let plan = plan_tasks(Backend::Pipeline, &docs, 64).unwrap();

@@ -6,11 +6,12 @@ pub mod env;
 #[doc(hidden)]
 pub mod plain;
 mod rich;
+#[doc(hidden)]
+pub mod service;
 
 use crate::{
-    OfficeWorkers, OfficialPdfOptions, ProgressCallback, ProgressEvent, RemoteApiDocument,
-    RemoteApiOptions, normalize_remote_language, parse_remote_api_env, sanitize_event_text,
-    selected_document_pages,
+    OfficeWorkers, ProgressCallback, ProgressEvent, RemoteApiDocument, RemoteApiOptions,
+    normalize_remote_language, sanitize_event_text, selected_document_pages,
 };
 use clap::{ArgAction, Parser, error::ErrorKind};
 use std::{
@@ -23,12 +24,13 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 const WARNING_CAP: usize = 64;
 const TEXT_CAP: usize = 512;
 const FAILURE_CAP: usize = 4096;
-const ENV_NAMES: [&str; 21] = [
+const ENV_NAMES: [&str; 92] = [
     "MINERU_LOG_LEVEL",
     "MINERU_PROCESSING_WINDOW_SIZE",
     "MINERU_OFFICIAL_PAGE_CONCURRENCY",
@@ -36,17 +38,88 @@ const ENV_NAMES: [&str; 21] = [
     "MINERU_PDF_RENDER_TIMEOUT",
     "MINERU_FORMULA_ENABLE",
     "MINERU_TABLE_ENABLE",
+    "MINERU_IMAGE_ANALYSIS_ENABLE",
     "MINERU_API_MAX_CONCURRENT_REQUESTS",
     "MINERU_TASK_RESULT_TIMEOUT_SECONDS",
     "MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS",
+    "MINERU_API_TASK_RETENTION_SECONDS",
+    "MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS",
+    "MINERU_API_RECORD_CAP",
+    "MINERU_API_FILE_CAP",
+    "MINERU_API_BODY_CAP",
+    "MINERU_API_TEXT_CAP",
+    "MINERU_API_TEXT_TOTAL_CAP",
+    "MINERU_API_FORM_FIELDS_CAP",
+    "MINERU_API_CONNECT_TIMEOUT_SECONDS",
+    "MINERU_API_ACQUISITION_TIMEOUT_SECONDS",
+    "MINERU_API_SEND_TIMEOUT_SECONDS",
+    "MINERU_API_POLL_INTERVAL_SECONDS",
+    "MINERU_ARCHIVE_MAX_ENTRIES",
+    "MINERU_ARCHIVE_MAX_RATIO",
+    "MINERU_ZIP_SCAN_CENTRAL_CAP",
+    "MINERU_ZIP_SCAN_NAME_CAP",
+    "MINERU_ZIP_SCAN_DEPTH_CAP",
+    "MINERU_ZIP_SCAN_TOTAL_NAME_CAP",
+    "MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP",
+    "MINERU_OOXML_ARCHIVE_BYTES",
+    "MINERU_OOXML_EXPANDED_BYTES",
+    "MINERU_OOXML_XML_ENTRY_BYTES",
+    "MINERU_OOXML_XML_TOTAL_BYTES",
+    "MINERU_OOXML_RATIO",
+    "MINERU_OOXML_XML_DEPTH",
+    "MINERU_OOXML_XML_EVENTS",
+    "MINERU_OOXML_XML_ATTRIBUTES",
+    "MINERU_OOXML_XML_NAMESPACES",
+    "MINERU_OFFICE_INPUT_BYTES",
+    "MINERU_OFFICE_OUTPUT_BYTES",
+    "MINERU_OFFICE_STDERR_BYTES",
+    "MINERU_OFFICE_WALL_SECONDS",
+    "MINERU_OFFICE_CPU_SECONDS",
+    "MINERU_OFFICE_NOFILE",
+    "MINERU_OFFICE_ADDRESS_SPACE_BYTES",
+    "MINERU_OFFICE_ACTIVE_PROCESS_LIMIT",
+    "MINERU_OFFICE_PROCESS_MEMORY_BYTES",
+    "MINERU_OFFICE_JOB_MEMORY_BYTES",
+    "MINERU_OFFICE_PROCESS_TIME_SECONDS",
+    "MINERU_OFFICE_JOB_TIME_SECONDS",
     "MINERU_VL_SERVER",
     "MINERU_VL_MODEL_NAME",
     "MINERU_VL_API_KEY",
     "MINERU_VL_DEBUG_ENABLE",
     "MINERU_VLM_END_TOKEN",
+    "MINERU_VLM_TEXT_BEFORE_IMAGE",
+    "MINERU_VLM_ALLOW_TRUNCATED_CONTENT",
+    "MINERU_VLM_ALLOW_REMOTE_IMAGES",
+    "MINERU_VLM_ALLOW_PRIVATE_REMOTE_IMAGES",
     "MINERU_MAX_INPUT_BYTES",
     "MINERU_MAX_ENCODED_DOCUMENT_BYTES",
     "MINERU_MAX_OUTPUT_BYTES",
+    "MINERU_MAX_PDF_BYTES",
+    "MINERU_MAX_PAGES",
+    "MINERU_MAX_PAGE_PIXELS",
+    "MINERU_MAX_RENDERED_IMAGE_BYTES",
+    "MINERU_MAX_IN_FLIGHT_IMAGE_BYTES",
+    "MINERU_MAX_RAW_OUTPUT_BYTES",
+    "MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE",
+    "MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE",
+    "MINERU_BATCH_SIZE",
+    "MINERU_MAX_ENCODED_REQUEST_BYTES",
+    "MINERU_MAX_ENCODED_BATCH_BYTES",
+    "MINERU_MAX_TOTAL_ASSET_BYTES",
+    "MINERU_MAX_STAGED_TEXT_BYTES",
+    "MINERU_TOTAL_DEADLINE_SECONDS",
+    "MINERU_VLM_HTTP_CONCURRENCY",
+    "MINERU_VLM_HTTP_TIMEOUT",
+    "MINERU_VLM_CONNECT_TIMEOUT",
+    "MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS",
+    "MINERU_VLM_HTTP_KEEPALIVE_EXPIRY",
+    "MINERU_VLM_HTTP_MAX_RETRIES",
+    "MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR",
+    "MINERU_VLM_MAX_IMAGE_BYTES",
+    "MINERU_VLM_MAX_DECODED_PIXELS",
+    "MINERU_VLM_MAX_IMAGES_PER_REQUEST",
+    "MINERU_VLM_MAX_REDIRECTS",
+    "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES",
     "TERM",
     "CI",
     "NO_COLOR",
@@ -134,6 +207,15 @@ impl RunOptions {
     }
 }
 
+/// Crate-private resolved CLI override seam. Public entry points (`run`, `run_with_context`)
+/// use default overrides; the canonical CLI builds this from its Clap surface.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RunOverrides {
+    pub document_limits: crate::DocumentLimitOverrides,
+    pub core: env::CoreOverrides,
+    pub service: service::ServiceOverrides,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RunReport {
     pub warnings: Vec<String>,
@@ -166,12 +248,23 @@ impl Environment {
         self.0.get(name).cloned()
     }
 
+    /// Builds a frozen environment map from a lookup over the documented env names.
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<OsString>) -> Self {
+        Self(Arc::new(
+            ENV_NAMES
+                .into_iter()
+                .filter_map(|name| lookup(name).map(|value| (name, value)))
+                .collect(),
+        ))
+    }
+
     pub(super) fn string(&self, name: &str) -> Option<String> {
         self.0.get(name)?.to_str().map(str::to_owned)
     }
 
-    fn vlm_http_config(&self) -> crate::VlmHttpConfig {
-        crate::VlmHttpConfig::from_env(|name| self.string(name))
+    #[cfg(test)]
+    pub(super) fn from_values(values: std::collections::HashMap<&'static str, OsString>) -> Self {
+        Self(Arc::new(values.into_iter().collect()))
     }
 }
 
@@ -211,8 +304,17 @@ impl RunContext {
         }))
     }
 
+    #[cfg(test)]
     fn office_workers(&self) -> OfficeWorkers {
         OfficeWorkers::with_executable(self.office_executable.clone())
+    }
+
+    fn office_workers_with_policy(
+        &self,
+        limits: service::OfficeLimits,
+        ooxml: service::OoxmlLimits,
+    ) -> OfficeWorkers {
+        OfficeWorkers::with_executable_and_policy(self.office_executable.clone(), limits, ooxml)
     }
 
     fn with_output(mut self, events: CommandCallback, warnings: direct::WarningCallback) -> Self {
@@ -238,7 +340,18 @@ pub async fn run_with_context(
         Arc::clone(&collected),
     );
     let warnings = combined_warnings(context.warnings.clone(), Arc::clone(&collected));
-    run_core(options, &context, Default::default(), events, warnings).await?;
+    // The public entry treats `RunOptions` boolean fields as explicit inputs with the same
+    // strict default -> frozen environment -> explicit precedence as the canonical CLI.
+    let overrides = RunOverrides {
+        core: env::CoreOverrides {
+            formula: Some(options.formula),
+            table: Some(options.table),
+            image_analysis: Some(options.image_analysis),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    run_core(options, &context, overrides, events, warnings).await?;
     Ok(RunReport {
         warnings: collected
             .lock()
@@ -314,12 +427,13 @@ fn combined_command_events(
 async fn run_core(
     options: RunOptions,
     context: &RunContext,
-    document_limit_overrides: crate::DocumentLimitOverrides,
+    overrides: RunOverrides,
     events: CommandCallback,
     warnings: direct::WarningCallback,
 ) -> Result<(), RunError> {
     if options.api_url.is_some()
-        && (document_limit_overrides
+        && (overrides
+            .document_limits
             .max_encoded_document_bytes
             .is_some()
             || context
@@ -331,10 +445,46 @@ async fn run_core(
             "max encoded document bytes cannot configure a remote server; configure the server",
         ));
     }
-    let document_limits = crate::DocumentLimitPolicy::resolve(&document_limit_overrides, |name| {
+    if options.api_url.is_some()
+        && let Some(message) = remote_local_transport_error(&overrides.core, &context.environment)
+    {
+        return Err(RunError::new(message));
+    }
+    if options.api_url.is_some()
+        && let Some(message) =
+            remote_local_service_transport_error(&overrides.service, &context.environment)
+    {
+        return Err(RunError::new(message));
+    }
+    let document_limits = crate::DocumentLimitPolicy::resolve(&overrides.document_limits, |name| {
         context.environment.os(name)
     })
     .map_err(RunError::new)?;
+    let mut resolved = env::resolve_core(|name| context.environment.os(name), &overrides.core)
+        .map_err(RunError::new)?;
+    // Remote-only Phase-1B controls cannot act in direct mode; server request caps are owned by
+    // the task-service CLI and cannot act from this client at all. No behaviorless configuration.
+    if options.api_url.is_none()
+        && let Some(message) = remote_only_service_error(&overrides.service, &context.environment)
+    {
+        return Err(RunError::new(message));
+    }
+    if let Some(message) = server_owned_error(&overrides.service, &context.environment) {
+        return Err(RunError::new(message));
+    }
+    let service = service::resolve_service(
+        &(|name| context.environment.os(name)),
+        &overrides.service,
+        document_limits,
+    )
+    .map_err(RunError::new)?;
+    // Resolved local VLM transport booleans feed the HTTP config with the same strict
+    // default -> environment -> CLI precedence as every other transport knob.
+    resolved.http.text_before_image = service.vlm_text_before_image;
+    resolved.http.allow_truncated_content = service.vlm_allow_truncated_content;
+    resolved.http.allow_remote_images = service.vlm_allow_remote_images;
+    resolved.http.allow_private_remote_images = service.vlm_allow_private_remote_images;
+    let office_workers = context.office_workers_with_policy(service.office, service.ooxml);
     if !matches!(options.method.as_str(), "auto" | "txt" | "ocr") {
         return Err(RunError::new(format!(
             "unsupported method: {}",
@@ -371,6 +521,9 @@ async fn run_core(
             api_url,
             language,
             document_limits,
+            resolved,
+            service,
+            office_workers,
             context,
             events,
             warnings,
@@ -387,15 +540,19 @@ async fn run_core(
                 api_key: None,
                 page_start: Some(options.start),
                 page_end: options.end,
-                no_formula: !options.formula,
-                no_table: !options.table,
-                no_image_analysis: !options.image_analysis,
-                batch_size: 1,
+                // Formula/table/image-analysis resolve through CoreOverrides with strict
+                // default -> frozen environment -> explicit CLI precedence, so the canonical
+                // runner does not re-apply option-derived booleans.
+                no_formula: None,
+                no_table: None,
+                no_image_analysis: None,
                 canonical_mixed: true,
                 document_limits,
             },
-            context.office_workers(),
+            office_workers,
             context.environment.clone(),
+            overrides,
+            service,
             Some(events),
             Some(warnings),
         )
@@ -409,6 +566,9 @@ async fn run_api(
     api_url: String,
     language: String,
     document_limits: crate::DocumentLimitPolicy,
+    resolved: env::ResolvedCore,
+    service: service::ResolvedService,
+    office_workers: OfficeWorkers,
     context: &RunContext,
     events: CommandCallback,
     warnings: direct::WarningCallback,
@@ -418,18 +578,18 @@ async fn run_api(
             "client-side output generation is unsupported",
         ));
     }
-    let env =
-        parse_remote_api_env(|name| context.environment.string(name)).map_err(RunError::new)?;
-    env::official_page_concurrency(|name| context.environment.os(name)).map_err(RunError::new)?;
-    let mut route = OfficialPdfOptions::default();
+    // The frozen startup snapshot is the only timing/concurrency source for the remote API
+    // client; no worker re-reads a drifting process environment after startup.
+    let env = crate::RemoteApiEnv {
+        max_concurrent_requests: service.remote_concurrency,
+        result_timeout_seconds: service.task_result_timeout.as_secs_f64(),
+        download_timeout_seconds: service.task_download_timeout.as_secs_f64(),
+    };
+    let mut route = resolved.route;
     route.start_page = options.start;
     route.end_page = options.end;
-    route.formula_enable = options.formula;
-    route.table_enable = options.table;
-    route.image_analysis = options.image_analysis;
-    if env::apply_route_env(&mut route, |name| context.environment.os(name)) {
-        warnings("MINERU_PROCESSING_WINDOW_SIZE", "invalid value; using 64");
-    }
+    // Formula/table/image-analysis arrive already resolved with strict default -> frozen
+    // environment -> explicit CLI precedence from `resolve_core`; no late env fallback.
     let start =
         u64::try_from(options.start).map_err(|_| RunError::new("page start exceeds u64"))?;
     let end = options
@@ -462,7 +622,9 @@ async fn run_api(
         method: options.method,
         effort: options.effort,
         language,
-        server_url: options.url,
+        server_url: options
+            .url
+            .or_else(|| context.environment.string("MINERU_VL_SERVER")),
         start,
         end,
         formula: route.formula_enable,
@@ -478,8 +640,10 @@ async fn run_api(
         remote_options,
         env,
         Some(events),
-        context.office_workers(),
+        office_workers,
         document_limits,
+        resolved.http.max_response_bytes,
+        service,
     )
     .await
     .map_err(RunError::new)?;
@@ -514,6 +678,309 @@ fn format_remote_failures(failures: &[crate::RemoteApiFailure]) -> String {
         &format!("{} API task(s) failed: {details}{suffix}", failures.len()),
         FAILURE_CAP,
     )
+}
+
+/// Local VLM transport controls accepted alongside a remote `--api-url` would silently do
+/// nothing, because the remote server performs parsing and the client-side preview does not
+/// consume these knobs. Reject them before any network or output work. `MINERU_VL_SERVER` is
+/// exempt because `run_api` maps it to the submitted `server_url`, and the model/key credentials
+/// are inert transport identity rather than behavior-loss configuration.
+fn remote_local_transport_error(
+    core: &env::CoreOverrides,
+    environment: &Environment,
+) -> Option<String> {
+    let mut controls = Vec::new();
+    let mut push = |flag: &str, env_name: &str, cli_set: bool| {
+        if cli_set || environment.os(env_name).is_some() {
+            controls.push(format!("{flag}/{env_name}"));
+        }
+    };
+    push(
+        "--page-concurrency",
+        "MINERU_OFFICIAL_PAGE_CONCURRENCY",
+        core.page_concurrency.is_some(),
+    );
+    push(
+        "--processing-window-size",
+        "MINERU_PROCESSING_WINDOW_SIZE",
+        core.processing_window_size.is_some(),
+    );
+    push(
+        "--render-workers",
+        "MINERU_PDF_RENDER_THREADS",
+        core.render_workers.is_some(),
+    );
+    push(
+        "--render-timeout-seconds",
+        "MINERU_PDF_RENDER_TIMEOUT",
+        core.render_timeout.is_some(),
+    );
+    push(
+        "--batch-size",
+        "MINERU_BATCH_SIZE",
+        core.batch_size.is_some(),
+    );
+    push(
+        "--http-max-concurrency",
+        "MINERU_VLM_HTTP_CONCURRENCY",
+        core.http_max_concurrency.is_some(),
+    );
+    push(
+        "--http-timeout-seconds",
+        "MINERU_VLM_HTTP_TIMEOUT",
+        core.http_timeout.is_some(),
+    );
+    push(
+        "--connect-timeout-seconds",
+        "MINERU_VLM_CONNECT_TIMEOUT",
+        core.connect_timeout.is_some(),
+    );
+    push(
+        "--http-max-keepalive-connections",
+        "MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS",
+        core.http_max_keepalive_connections.is_some(),
+    );
+    push(
+        "--http-keepalive-expiry-seconds",
+        "MINERU_VLM_HTTP_KEEPALIVE_EXPIRY",
+        core.http_keepalive_expiry.is_some(),
+    );
+    push(
+        "--http-max-retries",
+        "MINERU_VLM_HTTP_MAX_RETRIES",
+        core.http_max_retries.is_some(),
+    );
+    push(
+        "--http-retry-backoff-factor",
+        "MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR",
+        core.http_retry_backoff_factor.is_some(),
+    );
+    push(
+        "--max-remote-image-bytes",
+        "MINERU_VLM_MAX_IMAGE_BYTES",
+        core.max_remote_image_bytes.is_some(),
+    );
+    push(
+        "--max-decoded-pixels",
+        "MINERU_VLM_MAX_DECODED_PIXELS",
+        core.max_decoded_pixels.is_some(),
+    );
+    push(
+        "--max-images-per-request",
+        "MINERU_VLM_MAX_IMAGES_PER_REQUEST",
+        core.max_images_per_request.is_some(),
+    );
+    push(
+        "--max-redirects",
+        "MINERU_VLM_MAX_REDIRECTS",
+        core.max_redirects.is_some(),
+    );
+    push(
+        "--http-max-response-bytes",
+        "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES",
+        core.http_max_response_bytes.is_some(),
+    );
+    push(
+        "--vlm-debug",
+        "MINERU_VL_DEBUG_ENABLE",
+        core.vlm_debug.is_some(),
+    );
+    (!controls.is_empty()).then(|| {
+        format!(
+            "local VLM transport controls cannot configure a remote API server: {}",
+            controls.join(", ")
+        )
+    })
+}
+
+/// Local VLM transport booleans resolved through `ServiceOverrides` share the same
+/// remote-mode rejection as the core transport controls.
+fn remote_local_service_transport_error(
+    service: &service::ServiceOverrides,
+    environment: &Environment,
+) -> Option<String> {
+    let mut controls = Vec::new();
+    let mut push = |flag: &str, env_name: &str, cli_set: bool| {
+        if cli_set || environment.os(env_name).is_some() {
+            controls.push(format!("{flag}/{env_name}"));
+        }
+    };
+    push(
+        "--vlm-text-before-image",
+        "MINERU_VLM_TEXT_BEFORE_IMAGE",
+        service.vlm_text_before_image.is_some(),
+    );
+    push(
+        "--vlm-allow-truncated-content",
+        "MINERU_VLM_ALLOW_TRUNCATED_CONTENT",
+        service.vlm_allow_truncated_content.is_some(),
+    );
+    push(
+        "--vlm-allow-remote-images",
+        "MINERU_VLM_ALLOW_REMOTE_IMAGES",
+        service.vlm_allow_remote_images.is_some(),
+    );
+    push(
+        "--vlm-allow-private-remote-images",
+        "MINERU_VLM_ALLOW_PRIVATE_REMOTE_IMAGES",
+        service.vlm_allow_private_remote_images.is_some(),
+    );
+    (!controls.is_empty()).then(|| {
+        format!(
+            "local VLM transport controls cannot configure a remote API server: {}",
+            controls.join(", ")
+        )
+    })
+}
+
+/// Remote-only Phase-1B controls accepted alongside a direct run would silently do nothing,
+/// because no remote API client, result archive, or task poller exists in direct mode. Reject
+/// explicit/env remote-only controls before any output work; no behaviorless configuration.
+pub(super) fn remote_only_service_error(
+    service: &service::ServiceOverrides,
+    environment: &Environment,
+) -> Option<String> {
+    let mut controls = Vec::new();
+    let mut push = |flag: &str, env_name: &str, cli_set: bool| {
+        if cli_set || environment.os(env_name).is_some() {
+            controls.push(format!("{flag}/{env_name}"));
+        }
+    };
+    push(
+        "--api-max-concurrent-requests",
+        "MINERU_API_MAX_CONCURRENT_REQUESTS",
+        service.api_max_concurrent_requests.is_some(),
+    );
+    push(
+        "--task-result-timeout-seconds",
+        "MINERU_TASK_RESULT_TIMEOUT_SECONDS",
+        service.task_result_timeout.is_some(),
+    );
+    push(
+        "--task-result-download-timeout-seconds",
+        "MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS",
+        service.task_download_timeout.is_some(),
+    );
+    push(
+        "--api-connect-timeout-seconds",
+        "MINERU_API_CONNECT_TIMEOUT_SECONDS",
+        service.api_connect_timeout.is_some(),
+    );
+    push(
+        "--api-acquisition-timeout-seconds",
+        "MINERU_API_ACQUISITION_TIMEOUT_SECONDS",
+        service.api_acquisition_timeout.is_some(),
+    );
+    push(
+        "--api-send-timeout-seconds",
+        "MINERU_API_SEND_TIMEOUT_SECONDS",
+        service.api_send_timeout.is_some(),
+    );
+    push(
+        "--api-poll-interval-seconds",
+        "MINERU_API_POLL_INTERVAL_SECONDS",
+        service.api_poll_interval.is_some(),
+    );
+    push(
+        "--archive-max-entries",
+        "MINERU_ARCHIVE_MAX_ENTRIES",
+        service.archive_max_entries.is_some(),
+    );
+    push(
+        "--archive-max-ratio",
+        "MINERU_ARCHIVE_MAX_RATIO",
+        service.archive_max_ratio.is_some(),
+    );
+    push(
+        "--zip-scan-central-cap",
+        "MINERU_ZIP_SCAN_CENTRAL_CAP",
+        service.zip_central_cap.is_some(),
+    );
+    push(
+        "--zip-scan-name-cap",
+        "MINERU_ZIP_SCAN_NAME_CAP",
+        service.zip_name_cap.is_some(),
+    );
+    push(
+        "--zip-scan-depth-cap",
+        "MINERU_ZIP_SCAN_DEPTH_CAP",
+        service.zip_depth_cap.is_some(),
+    );
+    push(
+        "--zip-scan-total-name-cap",
+        "MINERU_ZIP_SCAN_TOTAL_NAME_CAP",
+        service.zip_total_name_cap.is_some(),
+    );
+    push(
+        "--zip-scan-total-component-cap",
+        "MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP",
+        service.zip_total_component_cap.is_some(),
+    );
+    (!controls.is_empty()).then(|| {
+        format!(
+            "remote API service controls cannot configure a direct run: {}",
+            controls.join(", ")
+        )
+    })
+}
+
+/// Task-service request caps are owned by the `mineru-vlm-api` CLI. Explicit values reaching
+/// this client could never act, so they are rejected before work.
+pub(super) fn server_owned_error(
+    service: &service::ServiceOverrides,
+    environment: &Environment,
+) -> Option<String> {
+    let mut controls = Vec::new();
+    let mut push = |env_name: &str, cli_set: bool| {
+        if cli_set || environment.os(env_name).is_some() {
+            controls.push(env_name.to_owned());
+        }
+    };
+    push("MINERU_API_RECORD_CAP", service.server_record_cap.is_some());
+    push("MINERU_API_FILE_CAP", service.server_file_cap.is_some());
+    push("MINERU_API_BODY_CAP", service.server_body_cap.is_some());
+    push("MINERU_API_TEXT_CAP", service.server_text_cap.is_some());
+    push(
+        "MINERU_API_TEXT_TOTAL_CAP",
+        service.server_text_total_cap.is_some(),
+    );
+    push(
+        "MINERU_API_FORM_FIELDS_CAP",
+        service.server_form_fields_cap.is_some(),
+    );
+    push(
+        "MINERU_API_TASK_RETENTION_SECONDS",
+        service.task_retention.is_some(),
+    );
+    push(
+        "MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS",
+        service.task_cleanup_interval.is_some(),
+    );
+    (!controls.is_empty()).then(|| {
+        format!(
+            "task-service request caps cannot configure this client; configure the server: {}",
+            controls.join(", ")
+        )
+    })
+}
+
+/// Rejects frozen-environment knobs that cannot act in the legacy `mineru-vlm` ordinary lane
+/// (no remote API client, result archive, task poller, or Office helper). Mirrors the canonical
+/// direct-mode rejection; ordinary mode has no CLI service surface, so only the frozen
+/// environment is checked. Runs before any network or output work.
+#[doc(hidden)]
+pub fn legacy_ordinary_mode_error(lookup: impl Fn(&str) -> Option<OsString>) -> Option<String> {
+    let environment = Environment::from_lookup(lookup);
+    // Official-route page admission cannot act without the official route.
+    if environment.os("MINERU_OFFICIAL_PAGE_CONCURRENCY").is_some() {
+        return Some(
+            "MINERU_OFFICIAL_PAGE_CONCURRENCY applies only to --official-output; configure the server for ordinary mode"
+                .into(),
+        );
+    }
+    let service = service::ServiceOverrides::default();
+    server_owned_error(&service, &environment)
+        .or_else(|| remote_only_service_error(&service, &environment))
 }
 
 fn behaviorless_warning(options: &RunOptions) -> Option<String> {
@@ -582,12 +1049,12 @@ struct Cli {
     start: usize,
     #[arg(short = 'e', long, help = "Zero-based inclusive last page")]
     end: Option<usize>,
-    #[arg(short = 'f', long, action = ArgAction::Set, default_value_t = true)]
-    formula: bool,
-    #[arg(short = 't', long, action = ArgAction::Set, default_value_t = true)]
-    table: bool,
-    #[arg(long, action = ArgAction::Set, default_value_t = true)]
-    image_analysis: bool,
+    #[arg(short = 'f', long, action = ArgAction::Set)]
+    formula: Option<bool>,
+    #[arg(short = 't', long, action = ArgAction::Set)]
+    table: Option<bool>,
+    #[arg(long, action = ArgAction::Set)]
+    image_analysis: Option<bool>,
     #[arg(long, action = ArgAction::Set, default_value_t = false)]
     client_side_output_generation: bool,
     #[arg(long)]
@@ -596,6 +1063,148 @@ struct Cli {
     max_encoded_document_bytes: Option<String>,
     #[arg(long)]
     max_output_bytes: Option<String>,
+    #[arg(long)]
+    log_level: Option<String>,
+    #[arg(long)]
+    processing_window_size: Option<String>,
+    #[arg(long)]
+    page_concurrency: Option<String>,
+    #[arg(long)]
+    render_workers: Option<String>,
+    #[arg(long)]
+    render_timeout_seconds: Option<String>,
+    #[arg(long)]
+    max_pdf_bytes: Option<String>,
+    #[arg(long)]
+    max_pages: Option<String>,
+    #[arg(long)]
+    max_page_pixels: Option<String>,
+    #[arg(long)]
+    max_rendered_image_bytes: Option<String>,
+    #[arg(long)]
+    max_in_flight_image_bytes: Option<String>,
+    #[arg(long)]
+    max_raw_output_bytes: Option<String>,
+    #[arg(long)]
+    max_layout_blocks_per_page: Option<String>,
+    #[arg(long)]
+    max_semantic_requests_per_page: Option<String>,
+    #[arg(long)]
+    batch_size: Option<String>,
+    #[arg(long)]
+    max_encoded_request_bytes: Option<String>,
+    #[arg(long)]
+    max_encoded_batch_bytes: Option<String>,
+    #[arg(long)]
+    max_total_asset_bytes: Option<String>,
+    #[arg(long)]
+    max_staged_text_bytes: Option<String>,
+    #[arg(long)]
+    total_deadline_seconds: Option<String>,
+    #[arg(long)]
+    http_max_concurrency: Option<String>,
+    #[arg(long)]
+    http_timeout_seconds: Option<String>,
+    #[arg(long)]
+    connect_timeout_seconds: Option<String>,
+    #[arg(long)]
+    http_max_keepalive_connections: Option<String>,
+    #[arg(long)]
+    http_keepalive_expiry_seconds: Option<String>,
+    #[arg(long)]
+    http_max_retries: Option<String>,
+    #[arg(long)]
+    http_retry_backoff_factor: Option<String>,
+    #[arg(long)]
+    max_remote_image_bytes: Option<String>,
+    #[arg(long)]
+    max_decoded_pixels: Option<String>,
+    #[arg(long)]
+    max_images_per_request: Option<String>,
+    #[arg(long)]
+    max_redirects: Option<String>,
+    #[arg(long)]
+    http_max_response_bytes: Option<String>,
+    #[arg(long)]
+    vlm_debug: Option<bool>,
+    #[arg(long, action = ArgAction::Set)]
+    vlm_text_before_image: Option<bool>,
+    #[arg(long, action = ArgAction::Set)]
+    vlm_allow_truncated_content: Option<bool>,
+    #[arg(long, action = ArgAction::Set)]
+    vlm_allow_remote_images: Option<bool>,
+    #[arg(long, action = ArgAction::Set)]
+    vlm_allow_private_remote_images: Option<bool>,
+    #[arg(long)]
+    api_max_concurrent_requests: Option<String>,
+    #[arg(long)]
+    task_result_timeout_seconds: Option<String>,
+    #[arg(long)]
+    task_result_download_timeout_seconds: Option<String>,
+    #[arg(long)]
+    api_connect_timeout_seconds: Option<String>,
+    #[arg(long)]
+    api_acquisition_timeout_seconds: Option<String>,
+    #[arg(long)]
+    api_send_timeout_seconds: Option<String>,
+    #[arg(long)]
+    api_poll_interval_seconds: Option<String>,
+    #[arg(long)]
+    archive_max_entries: Option<String>,
+    #[arg(long)]
+    archive_max_ratio: Option<String>,
+    #[arg(long)]
+    zip_scan_central_cap: Option<String>,
+    #[arg(long)]
+    zip_scan_name_cap: Option<String>,
+    #[arg(long)]
+    zip_scan_depth_cap: Option<String>,
+    #[arg(long)]
+    zip_scan_total_name_cap: Option<String>,
+    #[arg(long)]
+    zip_scan_total_component_cap: Option<String>,
+    #[arg(long)]
+    ooxml_archive_bytes: Option<String>,
+    #[arg(long)]
+    ooxml_expanded_bytes: Option<String>,
+    #[arg(long)]
+    ooxml_xml_entry_bytes: Option<String>,
+    #[arg(long)]
+    ooxml_xml_total_bytes: Option<String>,
+    #[arg(long)]
+    ooxml_ratio: Option<String>,
+    #[arg(long)]
+    ooxml_xml_depth: Option<String>,
+    #[arg(long)]
+    ooxml_xml_events: Option<String>,
+    #[arg(long)]
+    ooxml_xml_attributes: Option<String>,
+    #[arg(long)]
+    ooxml_xml_namespaces: Option<String>,
+    #[arg(long)]
+    office_input_bytes: Option<String>,
+    #[arg(long)]
+    office_output_bytes: Option<String>,
+    #[arg(long)]
+    office_stderr_bytes: Option<String>,
+    #[arg(long)]
+    office_wall_seconds: Option<String>,
+    #[arg(long)]
+    office_cpu_seconds: Option<String>,
+    #[arg(long)]
+    office_nofile: Option<String>,
+    #[arg(long)]
+    office_address_space_bytes: Option<String>,
+    #[arg(long)]
+    office_active_process_limit: Option<String>,
+    #[arg(long)]
+    office_process_memory_bytes: Option<String>,
+    #[arg(long)]
+    office_job_memory_bytes: Option<String>,
+    #[arg(long)]
+    office_process_time_seconds: Option<String>,
+    #[arg(long)]
+    office_job_time_seconds: Option<String>,
 }
 
 impl From<Cli> for RunOptions {
@@ -611,10 +1220,41 @@ impl From<Cli> for RunOptions {
             url: cli.url,
             start: cli.start,
             end: cli.end,
-            formula: cli.formula,
-            table: cli.table,
-            image_analysis: cli.image_analysis,
+            formula: cli.formula.unwrap_or(true),
+            table: cli.table.unwrap_or(true),
+            image_analysis: cli.image_analysis.unwrap_or(true),
             client_side_output_generation: cli.client_side_output_generation,
+        }
+    }
+}
+
+/// Run-relative elapsed clock shared by the plain and rich stderr renderers.
+/// The stamp mirrors indicatif's `{elapsed_precise}` rendering (`HH:MM:SS`,
+/// days-prefixed past 24h) so plain lines and rich bars stay consistent.
+pub(crate) struct RunClock(Instant);
+
+impl RunClock {
+    pub(crate) fn start() -> Self {
+        Self(Instant::now())
+    }
+
+    /// ANSI-free elapsed stamp since run start, e.g. `[+00:00:05]`.
+    pub(crate) fn stamp(&self) -> String {
+        format!("[+{}]", Self::render(self.0.elapsed()))
+    }
+
+    fn render(elapsed: Duration) -> String {
+        let mut t = elapsed.as_secs();
+        let seconds = t % 60;
+        t /= 60;
+        let minutes = t % 60;
+        t /= 60;
+        let hours = t % 24;
+        t /= 24;
+        if t > 0 {
+            format!("{t}d {hours:02}:{minutes:02}:{seconds:02}")
+        } else {
+            format!("{hours:02}:{minutes:02}:{seconds:02}")
         }
     }
 }
@@ -629,7 +1269,7 @@ impl CliOutput {
         if policy.rich {
             Self::Rich(rich::Renderer::stderr(level, policy.color))
         } else {
-            Self::Plain(Arc::new(plain::EventSink::new(
+            Self::Plain(Arc::new(plain::EventSink::with_elapsed(
                 std::io::stderr(),
                 false,
                 level,
@@ -669,14 +1309,31 @@ impl CliOutput {
 #[doc(hidden)]
 pub async fn run_cli(argv: Vec<OsString>, context: RunContext) -> i32 {
     let args = std::iter::once(OsString::from("mineru")).chain(argv);
-    let (options, document_limit_overrides) = match Cli::try_parse_from(args) {
+    let (options, overrides, cli_log_level) = match Cli::try_parse_from(args) {
         Ok(cli) => {
-            let document_limit_overrides = crate::DocumentLimitOverrides {
-                max_input_bytes: cli.max_input_bytes.clone(),
-                max_encoded_document_bytes: cli.max_encoded_document_bytes.clone(),
-                max_output_bytes: cli.max_output_bytes.clone(),
+            let overrides = RunOverrides {
+                document_limits: crate::DocumentLimitOverrides {
+                    max_input_bytes: cli.max_input_bytes.clone(),
+                    max_encoded_document_bytes: cli.max_encoded_document_bytes.clone(),
+                    max_output_bytes: cli.max_output_bytes.clone(),
+                },
+                core: match cli_core_overrides(&cli) {
+                    Ok(core) => core,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        return 1;
+                    }
+                },
+                service: match cli_service_overrides(&cli) {
+                    Ok(service) => service,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        return 1;
+                    }
+                },
             };
-            (RunOptions::from(cli), document_limit_overrides)
+            let log_level = cli.log_level.clone();
+            (RunOptions::from(cli), overrides, log_level)
         }
         Err(error) => {
             let code = if matches!(
@@ -691,7 +1348,11 @@ pub async fn run_cli(argv: Vec<OsString>, context: RunContext) -> i32 {
             return code;
         }
     };
-    let level = match plain::LogLevel::parse(context.environment.os("MINERU_LOG_LEVEL")) {
+    // Explicit CLI wins over the frozen environment, which wins over the compiled default.
+    let level_value = cli_log_level
+        .map(OsString::from)
+        .or_else(|| context.environment.os("MINERU_LOG_LEVEL"));
+    let level = match plain::LogLevel::parse(level_value) {
         Ok(level) => level,
         Err(error) => {
             eprintln!("{error}");
@@ -721,7 +1382,7 @@ pub async fn run_cli(argv: Vec<OsString>, context: RunContext) -> i32 {
     let result = run_core(
         options,
         &context,
-        document_limit_overrides,
+        overrides,
         events.clone(),
         output.warning_callback(),
     )
@@ -752,15 +1413,29 @@ pub struct LegacyDirectOptions {
     pub api_key: Option<String>,
     pub page_start: Option<usize>,
     pub page_end: Option<usize>,
-    pub no_formula: bool,
-    pub no_table: bool,
-    pub no_image_analysis: bool,
+    /// `Some(true)` disables; `None` leaves the strict env/default resolution untouched.
+    pub no_formula: Option<bool>,
+    pub no_table: Option<bool>,
+    pub no_image_analysis: Option<bool>,
     pub batch_size: usize,
     pub document_limits: crate::DocumentLimitPolicy,
 }
 
+/// Maps the public hidden `LegacyDirectOptions.batch_size` onto the real inference admission
+/// field (`OfficialPdfOptions::max_requests_per_batch`), not onto input-document grouping.
+fn legacy_batch_core(batch_size: usize) -> Result<env::CoreOverrides, RunError> {
+    if batch_size == 0 {
+        return Err(RunError::new("batch size must be greater than zero"));
+    }
+    Ok(env::CoreOverrides {
+        batch_size: Some(batch_size),
+        ..Default::default()
+    })
+}
+
 #[doc(hidden)]
 pub async fn run_legacy_direct(options: LegacyDirectOptions) -> Result<(), RunError> {
+    let core = legacy_batch_core(options.batch_size)?;
     direct::run_legacy(
         direct::DirectOptions {
             input: options.input,
@@ -774,24 +1449,157 @@ pub async fn run_legacy_direct(options: LegacyDirectOptions) -> Result<(), RunEr
             no_formula: options.no_formula,
             no_table: options.no_table,
             no_image_analysis: options.no_image_analysis,
-            batch_size: options.batch_size,
             canonical_mixed: false,
             document_limits: options.document_limits,
         },
         Environment::process(),
+        RunOverrides {
+            core,
+            ..Default::default()
+        },
     )
     .await
     .map_err(RunError::new)
+}
+
+/// Maps the canonical Clap surface onto typed core overrides. The flag-to-environment-name
+/// correspondence is one-to-one; strict parsing produces errors before any work begins.
+fn cli_core_overrides(cli: &Cli) -> Result<env::CoreOverrides, String> {
+    let value = |name: &str| -> Option<OsString> {
+        let flag: Option<&str> = match name {
+            "MINERU_PROCESSING_WINDOW_SIZE" => cli.processing_window_size.as_deref(),
+            "MINERU_OFFICIAL_PAGE_CONCURRENCY" => cli.page_concurrency.as_deref(),
+            "MINERU_PDF_RENDER_THREADS" => cli.render_workers.as_deref(),
+            "MINERU_PDF_RENDER_TIMEOUT" => cli.render_timeout_seconds.as_deref(),
+            "MINERU_MAX_PDF_BYTES" => cli.max_pdf_bytes.as_deref(),
+            "MINERU_MAX_PAGES" => cli.max_pages.as_deref(),
+            "MINERU_MAX_PAGE_PIXELS" => cli.max_page_pixels.as_deref(),
+            "MINERU_MAX_RENDERED_IMAGE_BYTES" => cli.max_rendered_image_bytes.as_deref(),
+            "MINERU_MAX_IN_FLIGHT_IMAGE_BYTES" => cli.max_in_flight_image_bytes.as_deref(),
+            "MINERU_MAX_RAW_OUTPUT_BYTES" => cli.max_raw_output_bytes.as_deref(),
+            "MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE" => cli.max_layout_blocks_per_page.as_deref(),
+            "MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE" => {
+                cli.max_semantic_requests_per_page.as_deref()
+            }
+            "MINERU_BATCH_SIZE" => cli.batch_size.as_deref(),
+            "MINERU_MAX_ENCODED_REQUEST_BYTES" => cli.max_encoded_request_bytes.as_deref(),
+            "MINERU_MAX_ENCODED_BATCH_BYTES" => cli.max_encoded_batch_bytes.as_deref(),
+            "MINERU_MAX_TOTAL_ASSET_BYTES" => cli.max_total_asset_bytes.as_deref(),
+            "MINERU_MAX_STAGED_TEXT_BYTES" => cli.max_staged_text_bytes.as_deref(),
+            "MINERU_TOTAL_DEADLINE_SECONDS" => cli.total_deadline_seconds.as_deref(),
+            "MINERU_VLM_HTTP_CONCURRENCY" => cli.http_max_concurrency.as_deref(),
+            "MINERU_VLM_HTTP_TIMEOUT" => cli.http_timeout_seconds.as_deref(),
+            "MINERU_VLM_CONNECT_TIMEOUT" => cli.connect_timeout_seconds.as_deref(),
+            "MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS" => {
+                cli.http_max_keepalive_connections.as_deref()
+            }
+            "MINERU_VLM_HTTP_KEEPALIVE_EXPIRY" => cli.http_keepalive_expiry_seconds.as_deref(),
+            "MINERU_VLM_HTTP_MAX_RETRIES" => cli.http_max_retries.as_deref(),
+            "MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR" => cli.http_retry_backoff_factor.as_deref(),
+            "MINERU_VLM_MAX_IMAGE_BYTES" => cli.max_remote_image_bytes.as_deref(),
+            "MINERU_VLM_MAX_DECODED_PIXELS" => cli.max_decoded_pixels.as_deref(),
+            "MINERU_VLM_MAX_IMAGES_PER_REQUEST" => cli.max_images_per_request.as_deref(),
+            "MINERU_VLM_MAX_REDIRECTS" => cli.max_redirects.as_deref(),
+            "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES" => cli.http_max_response_bytes.as_deref(),
+            _ => return None,
+        };
+        flag.map(OsString::from)
+    };
+    let mut core = env::parse_core_overrides(&value)?;
+    core.formula = cli.formula;
+    core.table = cli.table;
+    core.image_analysis = cli.image_analysis;
+    core.vlm_debug = cli.vlm_debug;
+    Ok(core)
+}
+
+/// Maps the canonical Clap surface onto typed service overrides. The flag-to-environment-name
+/// correspondence is one-to-one; strict parsing produces errors before any work begins.
+fn cli_service_overrides(cli: &Cli) -> Result<service::ServiceOverrides, String> {
+    let value = |name: &str| -> Option<OsString> {
+        let flag: Option<&str> = match name {
+            "MINERU_API_MAX_CONCURRENT_REQUESTS" => cli.api_max_concurrent_requests.as_deref(),
+            "MINERU_TASK_RESULT_TIMEOUT_SECONDS" => cli.task_result_timeout_seconds.as_deref(),
+            "MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS" => {
+                cli.task_result_download_timeout_seconds.as_deref()
+            }
+            "MINERU_API_CONNECT_TIMEOUT_SECONDS" => cli.api_connect_timeout_seconds.as_deref(),
+            "MINERU_API_ACQUISITION_TIMEOUT_SECONDS" => {
+                cli.api_acquisition_timeout_seconds.as_deref()
+            }
+            "MINERU_API_SEND_TIMEOUT_SECONDS" => cli.api_send_timeout_seconds.as_deref(),
+            "MINERU_API_POLL_INTERVAL_SECONDS" => cli.api_poll_interval_seconds.as_deref(),
+            "MINERU_ARCHIVE_MAX_ENTRIES" => cli.archive_max_entries.as_deref(),
+            "MINERU_ARCHIVE_MAX_RATIO" => cli.archive_max_ratio.as_deref(),
+            "MINERU_ZIP_SCAN_CENTRAL_CAP" => cli.zip_scan_central_cap.as_deref(),
+            "MINERU_ZIP_SCAN_NAME_CAP" => cli.zip_scan_name_cap.as_deref(),
+            "MINERU_ZIP_SCAN_DEPTH_CAP" => cli.zip_scan_depth_cap.as_deref(),
+            "MINERU_ZIP_SCAN_TOTAL_NAME_CAP" => cli.zip_scan_total_name_cap.as_deref(),
+            "MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP" => cli.zip_scan_total_component_cap.as_deref(),
+            "MINERU_OOXML_ARCHIVE_BYTES" => cli.ooxml_archive_bytes.as_deref(),
+            "MINERU_OOXML_EXPANDED_BYTES" => cli.ooxml_expanded_bytes.as_deref(),
+            "MINERU_OOXML_XML_ENTRY_BYTES" => cli.ooxml_xml_entry_bytes.as_deref(),
+            "MINERU_OOXML_XML_TOTAL_BYTES" => cli.ooxml_xml_total_bytes.as_deref(),
+            "MINERU_OOXML_RATIO" => cli.ooxml_ratio.as_deref(),
+            "MINERU_OOXML_XML_DEPTH" => cli.ooxml_xml_depth.as_deref(),
+            "MINERU_OOXML_XML_EVENTS" => cli.ooxml_xml_events.as_deref(),
+            "MINERU_OOXML_XML_ATTRIBUTES" => cli.ooxml_xml_attributes.as_deref(),
+            "MINERU_OOXML_XML_NAMESPACES" => cli.ooxml_xml_namespaces.as_deref(),
+            "MINERU_OFFICE_INPUT_BYTES" => cli.office_input_bytes.as_deref(),
+            "MINERU_OFFICE_OUTPUT_BYTES" => cli.office_output_bytes.as_deref(),
+            "MINERU_OFFICE_STDERR_BYTES" => cli.office_stderr_bytes.as_deref(),
+            "MINERU_OFFICE_WALL_SECONDS" => cli.office_wall_seconds.as_deref(),
+            "MINERU_OFFICE_CPU_SECONDS" => cli.office_cpu_seconds.as_deref(),
+            "MINERU_OFFICE_NOFILE" => cli.office_nofile.as_deref(),
+            "MINERU_OFFICE_ADDRESS_SPACE_BYTES" => cli.office_address_space_bytes.as_deref(),
+            "MINERU_OFFICE_ACTIVE_PROCESS_LIMIT" => cli.office_active_process_limit.as_deref(),
+            "MINERU_OFFICE_PROCESS_MEMORY_BYTES" => cli.office_process_memory_bytes.as_deref(),
+            "MINERU_OFFICE_JOB_MEMORY_BYTES" => cli.office_job_memory_bytes.as_deref(),
+            "MINERU_OFFICE_PROCESS_TIME_SECONDS" => cli.office_process_time_seconds.as_deref(),
+            "MINERU_OFFICE_JOB_TIME_SECONDS" => cli.office_job_time_seconds.as_deref(),
+            "MINERU_API_RECORD_CAP" => None,
+            "MINERU_API_FILE_CAP" => None,
+            "MINERU_API_BODY_CAP" => None,
+            "MINERU_API_TEXT_CAP" => None,
+            "MINERU_API_TEXT_TOTAL_CAP" => None,
+            "MINERU_API_FORM_FIELDS_CAP" => None,
+            _ => return None,
+        };
+        flag.map(OsString::from)
+    };
+    let mut service = service::parse_service_overrides(&value)?;
+    service.vlm_text_before_image = cli.vlm_text_before_image;
+    service.vlm_allow_truncated_content = cli.vlm_allow_truncated_content;
+    service.vlm_allow_remote_images = cli.vlm_allow_remote_images;
+    service.vlm_allow_private_remote_images = cli.vlm_allow_private_remote_images;
+    Ok(service)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{
+        collections::HashMap,
         future::Future,
         process::Command,
         sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        time::Duration,
     };
+
+    #[test]
+    fn run_clock_renders_indicatif_style_elapsed() {
+        assert_eq!(RunClock::render(Duration::from_secs(0)), "00:00:00");
+        assert_eq!(RunClock::render(Duration::from_secs(5)), "00:00:05");
+        assert_eq!(RunClock::render(Duration::from_secs(65)), "00:01:05");
+        assert_eq!(RunClock::render(Duration::from_secs(3661)), "01:01:01");
+        assert_eq!(
+            RunClock::render(Duration::from_secs(24 * 3600 + 61)),
+            "1d 00:01:01"
+        );
+        let stamp = RunClock::start().stamp();
+        assert!(stamp.starts_with("[+") && stamp.ends_with(']'));
+        assert!(!stamp.contains('\x1b'));
+    }
 
     #[test]
     fn run_error_sanitizes_secrets_controls_and_length_at_creation() {
@@ -961,18 +1769,24 @@ mod tests {
                 std::env::set_var("MINERU_VLM_END_TOKEN", "late-end");
             }
         }
-        let config = context.environment.vlm_http_config();
+        // The snapshot is read before the late mutation, so the frozen values still surface.
         match mode.as_str() {
             "present" => {
                 assert_eq!(
-                    config.authorization().as_deref(),
-                    Some("Bearer snapshot-key")
+                    context.environment.string("MINERU_VL_API_KEY").as_deref(),
+                    Some("snapshot-key")
                 );
-                assert_eq!(config.end_token, "snapshot-end");
+                assert_eq!(
+                    context
+                        .environment
+                        .string("MINERU_VLM_END_TOKEN")
+                        .as_deref(),
+                    Some("snapshot-end")
+                );
             }
             "absent" | "non-utf8" => {
-                assert_eq!(config.authorization(), None);
-                assert_eq!(config.end_token, "<|im_end|>");
+                assert_eq!(context.environment.string("MINERU_VL_API_KEY"), None);
+                assert_eq!(context.environment.string("MINERU_VLM_END_TOKEN"), None);
             }
             _ => panic!("unknown child mode"),
         }
@@ -1087,22 +1901,127 @@ mod tests {
     }
 
     #[test]
-    fn parser_contract_rejects_old_and_missing_options() {
+    fn legacy_batch_size_drives_inference_admission_not_document_grouping() {
+        // A positive legacy batch feeds OfficialPdfOptions::max_requests_per_batch.
+        let core = legacy_batch_core(5).unwrap();
+        assert_eq!(core.batch_size, Some(5));
+        let resolved = env::resolve_core(|_| None, &core).unwrap();
+        assert_eq!(resolved.route.max_requests_per_batch, 5);
+        // Zero remains invalid rather than silently meaning "document chunk".
+        assert!(legacy_batch_core(0).is_err());
+    }
+
+    #[test]
+    fn cli_requires_path_and_output_and_rejects_unknown_flags() {
         assert!(Cli::try_parse_from(["mineru"]).is_err());
-        for option in [
-            "--server-url",
-            "--model",
-            "--api-key",
+        assert!(Cli::try_parse_from(["mineru", "-p", "a"]).is_err());
+        assert!(Cli::try_parse_from(["mineru", "-o", "b"]).is_err());
+        // The current surface rejects unknown spellings but accepts the real boolean options.
+        assert!(Cli::try_parse_from(["mineru", "-p", "a", "-o", "b", "--bogus"]).is_err());
+        assert!(
+            Cli::try_parse_from(["mineru", "-p", "a", "-o", "b", "--formula", "false"]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["mineru", "-p", "a", "-o", "b", "--vlm-debug", "true"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn cli_core_overrides_maps_every_flag_and_applies_batch() {
+        let cli = Cli::try_parse_from([
+            "mineru",
+            "-p",
+            "a",
+            "-o",
+            "b",
+            "--processing-window-size",
+            "32",
+            "--page-concurrency",
+            "12",
+            "--render-workers",
+            "8",
+            "--render-timeout-seconds",
+            "120",
+            "--max-pdf-bytes",
+            "9",
+            "--max-pages",
+            "10",
+            "--max-page-pixels",
+            "11",
+            "--max-rendered-image-bytes",
+            "12",
+            "--max-in-flight-image-bytes",
+            "13",
+            "--max-raw-output-bytes",
+            "14",
+            "--max-layout-blocks-per-page",
+            "15",
+            "--max-semantic-requests-per-page",
+            "16",
             "--batch-size",
-            "--start-page",
-            "--end-page",
-            "--no-formula",
-            "--no-table",
-            "--no-image-analysis",
-            "--log-level",
-        ] {
-            assert!(Cli::try_parse_from(["mineru", "-p", "a", "-o", "b", option, "x"]).is_err());
-        }
+            "17",
+            "--max-encoded-request-bytes",
+            "18",
+            "--max-encoded-batch-bytes",
+            "19",
+            "--max-total-asset-bytes",
+            "20",
+            "--max-staged-text-bytes",
+            "21",
+            "--total-deadline-seconds",
+            "22",
+            "--http-max-concurrency",
+            "23",
+            "--http-timeout-seconds",
+            "24",
+            "--connect-timeout-seconds",
+            "25",
+            "--http-max-keepalive-connections",
+            "26",
+            "--http-keepalive-expiry-seconds",
+            "27",
+            "--http-max-retries",
+            "28",
+            "--http-retry-backoff-factor",
+            "0.5",
+            "--max-remote-image-bytes",
+            "29",
+            "--max-decoded-pixels",
+            "30",
+            "--max-images-per-request",
+            "31",
+            "--max-redirects",
+            "32",
+            "--http-max-response-bytes",
+            "33",
+        ])
+        .unwrap();
+        let core = cli_core_overrides(&cli).unwrap();
+        assert_eq!(core.processing_window_size, Some(32));
+        assert_eq!(core.page_concurrency, Some(12));
+        assert_eq!(core.render_workers, Some(8));
+        assert_eq!(core.max_layout_blocks_per_page, Some(15));
+        assert_eq!(core.max_semantic_requests_per_page, Some(16));
+        assert_eq!(core.batch_size, Some(17));
+        assert_eq!(core.http_max_concurrency, Some(23));
+        assert_eq!(core.http_retry_backoff_factor, Some(0.5));
+        assert_eq!(core.max_decoded_pixels, Some(30));
+        // The batch flag genuinely feeds the inference admission field.
+        let resolved = env::resolve_core(|_| None, &core).unwrap();
+        assert_eq!(resolved.route.max_requests_per_batch, 17);
+        // Malformed CLI values fail before any work.
+        let cli = Cli::try_parse_from([
+            "mineru",
+            "-p",
+            "a",
+            "-o",
+            "b",
+            "--processing-window-size",
+            "0",
+        ])
+        .unwrap();
+        let error = cli_core_overrides(&cli).unwrap_err();
+        assert!(error.contains("MINERU_PROCESSING_WINDOW_SIZE"), "{error}");
     }
 
     #[test]
@@ -1159,5 +2078,490 @@ mod tests {
             assert!(run_with_context(options, context).await.is_err());
             assert_eq!(warnings.load(AtomicOrdering::Relaxed), 1);
         }
+    }
+
+    #[test]
+    fn cli_service_overrides_maps_every_flag_and_applies_strictly() {
+        let cli = Cli::try_parse_from([
+            "mineru",
+            "-p",
+            "a",
+            "-o",
+            "b",
+            "--vlm-text-before-image",
+            "true",
+            "--vlm-allow-remote-images",
+            "false",
+            "--api-max-concurrent-requests",
+            "12",
+            "--task-result-timeout-seconds",
+            "13",
+            "--task-result-download-timeout-seconds",
+            "14",
+            "--api-connect-timeout-seconds",
+            "15",
+            "--api-acquisition-timeout-seconds",
+            "16",
+            "--api-send-timeout-seconds",
+            "17",
+            "--api-poll-interval-seconds",
+            "18",
+            "--archive-max-entries",
+            "19",
+            "--archive-max-ratio",
+            "20",
+            "--zip-scan-central-cap",
+            "21",
+            "--zip-scan-name-cap",
+            "22",
+            "--zip-scan-depth-cap",
+            "23",
+            "--zip-scan-total-name-cap",
+            "24",
+            "--zip-scan-total-component-cap",
+            "25",
+            "--ooxml-archive-bytes",
+            "26",
+            "--ooxml-expanded-bytes",
+            "27",
+            "--ooxml-xml-entry-bytes",
+            "28",
+            "--ooxml-xml-total-bytes",
+            "29",
+            "--ooxml-ratio",
+            "30",
+            "--ooxml-xml-depth",
+            "31",
+            "--ooxml-xml-events",
+            "32",
+            "--ooxml-xml-attributes",
+            "33",
+            "--ooxml-xml-namespaces",
+            "34",
+            "--office-input-bytes",
+            "35",
+            "--office-output-bytes",
+            "36",
+            "--office-stderr-bytes",
+            "37",
+            "--office-wall-seconds",
+            "38",
+            "--office-cpu-seconds",
+            "39",
+            "--office-nofile",
+            "40",
+            "--office-address-space-bytes",
+            "41",
+            "--office-active-process-limit",
+            "42",
+            "--office-process-memory-bytes",
+            "43",
+            "--office-job-memory-bytes",
+            "44",
+            "--office-process-time-seconds",
+            "45",
+            "--office-job-time-seconds",
+            "46",
+        ])
+        .unwrap();
+        let service = cli_service_overrides(&cli).unwrap();
+        assert_eq!(service.vlm_text_before_image, Some(true));
+        assert_eq!(service.vlm_allow_remote_images, Some(false));
+        assert_eq!(service.api_max_concurrent_requests, Some(12));
+        assert_eq!(service.archive_max_entries, Some(19));
+        assert_eq!(service.zip_depth_cap, Some(23));
+        assert_eq!(service.ooxml_xml_events, Some(32));
+        assert_eq!(service.office_input_bytes, Some(35));
+        assert_eq!(service.office_active_process_limit, Some(42));
+        assert_eq!(service.office_job_time_seconds, Some(46));
+        // Strict malformed CLI values fail before any work.
+        let cli =
+            Cli::try_parse_from(["mineru", "-p", "a", "-o", "b", "--office-wall-seconds", "0"])
+                .unwrap();
+        let error = cli_service_overrides(&cli).unwrap_err();
+        assert!(error.contains("MINERU_OFFICE_WALL_SECONDS"), "{error}");
+    }
+
+    #[test]
+    fn remote_only_service_controls_are_rejected_in_direct_mode() {
+        let environment = Environment::from_values(
+            [("MINERU_TASK_RESULT_TIMEOUT_SECONDS", OsString::from("900"))]
+                .into_iter()
+                .collect(),
+        );
+        let message =
+            remote_only_service_error(&service::ServiceOverrides::default(), &environment).unwrap();
+        assert!(
+            message.contains("MINERU_TASK_RESULT_TIMEOUT_SECONDS"),
+            "{message}"
+        );
+        // CLI-set controls are rejected too.
+        let message = remote_only_service_error(
+            &service::ServiceOverrides {
+                archive_max_entries: Some(5),
+                ..Default::default()
+            },
+            &Environment::from_values(HashMap::new()),
+        )
+        .unwrap();
+        assert!(message.contains("--archive-max-entries"), "{message}");
+        // Remote-only controls are fine when the API URL is present (the caller checks first).
+        assert!(
+            remote_only_service_error(
+                &service::ServiceOverrides {
+                    api_send_timeout: Some(Duration::from_secs(1)),
+                    ..Default::default()
+                },
+                &Environment::from_values(HashMap::new()),
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn server_owned_caps_are_rejected_on_the_canonical_client() {
+        let environment = Environment::from_values(
+            [("MINERU_API_RECORD_CAP", OsString::from("40"))]
+                .into_iter()
+                .collect(),
+        );
+        let message =
+            server_owned_error(&service::ServiceOverrides::default(), &environment).unwrap();
+        assert!(message.contains("MINERU_API_RECORD_CAP"), "{message}");
+        assert!(message.contains("configure the server"), "{message}");
+    }
+
+    #[test]
+    fn local_transport_booleans_are_rejected_in_remote_mode() {
+        let environment = Environment::from_values(
+            [("MINERU_VLM_ALLOW_REMOTE_IMAGES", OsString::from("true"))]
+                .into_iter()
+                .collect(),
+        );
+        let message = remote_local_service_transport_error(
+            &service::ServiceOverrides::default(),
+            &environment,
+        )
+        .unwrap();
+        assert!(
+            message.contains("MINERU_VLM_ALLOW_REMOTE_IMAGES"),
+            "{message}"
+        );
+    }
+
+    /// Every flag/env in each of the four mode-applicability surfaces must be rejected, both when
+    /// CLI-set and when present in the frozen environment. The same tables drive the exact-count
+    /// assertion on the all-set message, so a knob added to a rejection function without a row
+    /// here (or vice versa) fails the test instead of drifting.
+    #[test]
+    fn mode_rejection_covers_every_knob_in_each_surface() {
+        let no_env = Environment::from_values(HashMap::new());
+
+        let core_rows: &[(&str, &str, fn(&mut env::CoreOverrides))] = &[
+            (
+                "--page-concurrency",
+                "MINERU_OFFICIAL_PAGE_CONCURRENCY",
+                |c| c.page_concurrency = Some(4),
+            ),
+            (
+                "--processing-window-size",
+                "MINERU_PROCESSING_WINDOW_SIZE",
+                |c| c.processing_window_size = Some(2),
+            ),
+            ("--render-workers", "MINERU_PDF_RENDER_THREADS", |c| {
+                c.render_workers = Some(2)
+            }),
+            (
+                "--render-timeout-seconds",
+                "MINERU_PDF_RENDER_TIMEOUT",
+                |c| c.render_timeout = Some(Duration::from_secs(2)),
+            ),
+            ("--batch-size", "MINERU_BATCH_SIZE", |c| {
+                c.batch_size = Some(2)
+            }),
+            (
+                "--http-max-concurrency",
+                "MINERU_VLM_HTTP_CONCURRENCY",
+                |c| c.http_max_concurrency = Some(2),
+            ),
+            ("--http-timeout-seconds", "MINERU_VLM_HTTP_TIMEOUT", |c| {
+                c.http_timeout = Some(Duration::from_secs(2))
+            }),
+            (
+                "--connect-timeout-seconds",
+                "MINERU_VLM_CONNECT_TIMEOUT",
+                |c| c.connect_timeout = Some(Duration::from_secs(2)),
+            ),
+            (
+                "--http-max-keepalive-connections",
+                "MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS",
+                |c| c.http_max_keepalive_connections = Some(2),
+            ),
+            (
+                "--http-keepalive-expiry-seconds",
+                "MINERU_VLM_HTTP_KEEPALIVE_EXPIRY",
+                |c| c.http_keepalive_expiry = Some(Duration::from_secs(2)),
+            ),
+            ("--http-max-retries", "MINERU_VLM_HTTP_MAX_RETRIES", |c| {
+                c.http_max_retries = Some(2)
+            }),
+            (
+                "--http-retry-backoff-factor",
+                "MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR",
+                |c| c.http_retry_backoff_factor = Some(0.5),
+            ),
+            (
+                "--max-remote-image-bytes",
+                "MINERU_VLM_MAX_IMAGE_BYTES",
+                |c| c.max_remote_image_bytes = Some(1024),
+            ),
+            (
+                "--max-decoded-pixels",
+                "MINERU_VLM_MAX_DECODED_PIXELS",
+                |c| c.max_decoded_pixels = Some(1024),
+            ),
+            (
+                "--max-images-per-request",
+                "MINERU_VLM_MAX_IMAGES_PER_REQUEST",
+                |c| c.max_images_per_request = Some(2),
+            ),
+            ("--max-redirects", "MINERU_VLM_MAX_REDIRECTS", |c| {
+                c.max_redirects = Some(2)
+            }),
+            (
+                "--http-max-response-bytes",
+                "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES",
+                |c| c.http_max_response_bytes = Some(1024),
+            ),
+            ("--vlm-debug", "MINERU_VL_DEBUG_ENABLE", |c| {
+                c.vlm_debug = Some(true)
+            }),
+        ];
+        assert_knob_rejection(core_rows, remote_local_transport_error);
+
+        let service_transport_rows: &[(&str, &str, fn(&mut service::ServiceOverrides))] = &[
+            (
+                "--vlm-text-before-image",
+                "MINERU_VLM_TEXT_BEFORE_IMAGE",
+                |s| s.vlm_text_before_image = Some(true),
+            ),
+            (
+                "--vlm-allow-truncated-content",
+                "MINERU_VLM_ALLOW_TRUNCATED_CONTENT",
+                |s| s.vlm_allow_truncated_content = Some(true),
+            ),
+            (
+                "--vlm-allow-remote-images",
+                "MINERU_VLM_ALLOW_REMOTE_IMAGES",
+                |s| s.vlm_allow_remote_images = Some(true),
+            ),
+            (
+                "--vlm-allow-private-remote-images",
+                "MINERU_VLM_ALLOW_PRIVATE_REMOTE_IMAGES",
+                |s| s.vlm_allow_private_remote_images = Some(true),
+            ),
+        ];
+        assert_knob_rejection(service_transport_rows, remote_local_service_transport_error);
+
+        let remote_only_rows: &[(&str, &str, fn(&mut service::ServiceOverrides))] = &[
+            (
+                "--api-max-concurrent-requests",
+                "MINERU_API_MAX_CONCURRENT_REQUESTS",
+                |s| s.api_max_concurrent_requests = Some(2),
+            ),
+            (
+                "--task-result-timeout-seconds",
+                "MINERU_TASK_RESULT_TIMEOUT_SECONDS",
+                |s| s.task_result_timeout = Some(Duration::from_secs(2)),
+            ),
+            (
+                "--task-result-download-timeout-seconds",
+                "MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS",
+                |s| s.task_download_timeout = Some(Duration::from_secs(2)),
+            ),
+            (
+                "--api-connect-timeout-seconds",
+                "MINERU_API_CONNECT_TIMEOUT_SECONDS",
+                |s| s.api_connect_timeout = Some(Duration::from_secs(2)),
+            ),
+            (
+                "--api-acquisition-timeout-seconds",
+                "MINERU_API_ACQUISITION_TIMEOUT_SECONDS",
+                |s| s.api_acquisition_timeout = Some(Duration::from_secs(2)),
+            ),
+            (
+                "--api-send-timeout-seconds",
+                "MINERU_API_SEND_TIMEOUT_SECONDS",
+                |s| s.api_send_timeout = Some(Duration::from_secs(2)),
+            ),
+            (
+                "--api-poll-interval-seconds",
+                "MINERU_API_POLL_INTERVAL_SECONDS",
+                |s| s.api_poll_interval = Some(Duration::from_secs(2)),
+            ),
+            ("--archive-max-entries", "MINERU_ARCHIVE_MAX_ENTRIES", |s| {
+                s.archive_max_entries = Some(2)
+            }),
+            ("--archive-max-ratio", "MINERU_ARCHIVE_MAX_RATIO", |s| {
+                s.archive_max_ratio = Some(2)
+            }),
+            (
+                "--zip-scan-central-cap",
+                "MINERU_ZIP_SCAN_CENTRAL_CAP",
+                |s| s.zip_central_cap = Some(2),
+            ),
+            ("--zip-scan-name-cap", "MINERU_ZIP_SCAN_NAME_CAP", |s| {
+                s.zip_name_cap = Some(2)
+            }),
+            ("--zip-scan-depth-cap", "MINERU_ZIP_SCAN_DEPTH_CAP", |s| {
+                s.zip_depth_cap = Some(2)
+            }),
+            (
+                "--zip-scan-total-name-cap",
+                "MINERU_ZIP_SCAN_TOTAL_NAME_CAP",
+                |s| s.zip_total_name_cap = Some(2),
+            ),
+            (
+                "--zip-scan-total-component-cap",
+                "MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP",
+                |s| s.zip_total_component_cap = Some(2),
+            ),
+        ];
+        assert_knob_rejection(remote_only_rows, remote_only_service_error);
+
+        let server_owned_rows: &[(&str, fn(&mut service::ServiceOverrides))] = &[
+            ("MINERU_API_RECORD_CAP", |s| s.server_record_cap = Some(2)),
+            ("MINERU_API_FILE_CAP", |s| s.server_file_cap = Some(2)),
+            ("MINERU_API_BODY_CAP", |s| s.server_body_cap = Some(2)),
+            ("MINERU_API_TEXT_CAP", |s| s.server_text_cap = Some(2)),
+            ("MINERU_API_TEXT_TOTAL_CAP", |s| {
+                s.server_text_total_cap = Some(2)
+            }),
+            ("MINERU_API_FORM_FIELDS_CAP", |s| {
+                s.server_form_fields_cap = Some(2)
+            }),
+            ("MINERU_API_TASK_RETENTION_SECONDS", |s| {
+                s.task_retention = Some(Duration::from_secs(2))
+            }),
+            ("MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS", |s| {
+                s.task_cleanup_interval = Some(Duration::from_secs(2))
+            }),
+        ];
+        for (env_name, set) in server_owned_rows {
+            let mut service = service::ServiceOverrides::default();
+            set(&mut service);
+            let message = server_owned_error(&service, &no_env)
+                .unwrap_or_else(|| panic!("CLI-set {env_name} must be rejected"));
+            assert!(message.contains(env_name), "{env_name}: {message}");
+            let environment =
+                Environment::from_values(HashMap::from([(*env_name, OsString::from("2"))]));
+            let message = server_owned_error(&service::ServiceOverrides::default(), &environment)
+                .unwrap_or_else(|| panic!("env {env_name} must be rejected"));
+            assert!(message.contains(env_name), "{env_name}: {message}");
+        }
+        // Every server-owned knob at once lists the exact full set.
+        let all_server = {
+            let mut service = service::ServiceOverrides::default();
+            for (_, set) in server_owned_rows {
+                set(&mut service);
+            }
+            service
+        };
+        let message = server_owned_error(&all_server, &no_env).unwrap();
+        assert_eq!(
+            message.matches("MINERU_").count(),
+            server_owned_rows.len(),
+            "{message}"
+        );
+    }
+
+    /// Runs the CLI-set and frozen-environment rejection checks for every (flag, env) row in a
+    /// table, then verifies the all-set message reports the exact number of knobs so a knob added
+    /// to a rejection function without a row here (or vice versa) fails the test.
+    fn assert_knob_rejection<T, F>(rows: &[(&'static str, &'static str, fn(&mut T))], reject: F)
+    where
+        T: Default,
+        F: Fn(&T, &Environment) -> Option<String>,
+    {
+        let no_env = Environment::from_values(HashMap::new());
+        for (flag, env_name, set) in rows {
+            let mut overrides = T::default();
+            set(&mut overrides);
+            let message = reject(&overrides, &no_env)
+                .unwrap_or_else(|| panic!("CLI {flag} must be rejected"));
+            assert!(message.contains(flag), "CLI {flag}: {message}");
+            let environment =
+                Environment::from_values(HashMap::from([(*env_name, OsString::from("2"))]));
+            let message = reject(&T::default(), &environment)
+                .unwrap_or_else(|| panic!("env {env_name} must be rejected"));
+            assert!(message.contains(env_name), "env {env_name}: {message}");
+        }
+        let all = {
+            let mut overrides = T::default();
+            for (_, _, set) in rows {
+                set(&mut overrides);
+            }
+            overrides
+        };
+        let message = reject(&all, &no_env).unwrap();
+        assert_eq!(message.matches("MINERU_").count(), rows.len(), "{message}");
+        let all_env = Environment::from_values(
+            rows.iter()
+                .map(|(_, env_name, _)| (*env_name, OsString::from("2")))
+                .collect(),
+        );
+        let message = reject(&T::default(), &all_env).unwrap();
+        assert_eq!(message.matches("MINERU_").count(), rows.len(), "{message}");
+    }
+
+    #[test]
+    fn legacy_ordinary_mode_rejects_inert_env_knobs_and_keeps_applicable_ones() {
+        let reject = |name: &str| {
+            legacy_ordinary_mode_error(|n| (n == name).then(|| OsString::from("2"))).is_some()
+        };
+        // Official-route page admission, server-owned caps, and remote-only service controls
+        // cannot act in the legacy ordinary lane.
+        for name in [
+            "MINERU_OFFICIAL_PAGE_CONCURRENCY",
+            "MINERU_API_RECORD_CAP",
+            "MINERU_API_TASK_RETENTION_SECONDS",
+            "MINERU_TASK_RESULT_TIMEOUT_SECONDS",
+            "MINERU_API_CONNECT_TIMEOUT_SECONDS",
+            "MINERU_ARCHIVE_MAX_ENTRIES",
+            "MINERU_ZIP_SCAN_DEPTH_CAP",
+        ] {
+            assert!(reject(name), "{name} must be rejected");
+        }
+        // Transport timing and document-limit knobs genuinely apply to ordinary mode.
+        for name in [
+            "MINERU_VLM_HTTP_TIMEOUT",
+            "MINERU_MAX_INPUT_BYTES",
+            "MINERU_MAX_OUTPUT_BYTES",
+            "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES",
+        ] {
+            assert!(!reject(name), "{name} must stay accepted");
+        }
+        // No configured environment is fine.
+        assert!(legacy_ordinary_mode_error(|_| None).is_none());
+    }
+
+    #[test]
+    fn service_snapshot_reaches_office_workers_and_remote_runner() {
+        // Resolve the service snapshot and confirm the office limits survive the child env.
+        let service = service::resolve_service(
+            &(|_| None),
+            &service::ServiceOverrides::default(),
+            crate::DocumentLimitPolicy::defaults(),
+        )
+        .unwrap();
+        assert_eq!(service.office.input_bytes, 32 * 1024 * 1024);
+        assert_eq!(service.ooxml.xml_events, 100_000);
+        assert_eq!(service.task_result_timeout, Duration::from_secs(3600));
+        let env = service.office.child_env();
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == service::OFFICE_INPUT_ENV
+                    && value.to_str() == Some("33554432"))
+        );
     }
 }

@@ -13,11 +13,12 @@ use mineru::{
 };
 use serde_json::{Value, json};
 use std::{
+    path::Path,
     sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{Barrier, Notify, oneshot};
 
@@ -652,7 +653,7 @@ async fn failed_office_route_preserves_existing_office_output_without_leaks() {
 #[tokio::test]
 #[ignore = "full PDF route/output integration e2e"]
 async fn closed_targets_allow_stem_collisions_without_cross_publication() {
-    assert_eq!(mineru::canonical_stem("../office").unwrap(), "___office");
+    assert_eq!(mineru::canonical_stem("../office").unwrap(), ".._office");
     let output = tempfile::tempdir().unwrap();
     let client = client().await;
     client
@@ -1163,4 +1164,912 @@ async fn window_failure_rolls_back_before_the_next_window() {
                 .to_string_lossy()
                 .starts_with(".vlm-staging-parent-"))
     );
+}
+
+/// A PDF whose pages have per-page MediaBox sizes, so a page can exceed one RGB half-slot while
+/// staying under the full in-flight image cap.
+fn sized_pdf(sizes: &[(f32, f32)]) -> Bytes {
+    let mut pdf = Document::with_version("1.5");
+    let page_tree = pdf.new_object_id();
+    let page_ids: Vec<_> = (0..sizes.len()).map(|_| pdf.new_object_id()).collect();
+    for (page, (width, height)) in page_ids.iter().zip(sizes) {
+        let contents = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
+        pdf.objects.insert(
+            *page,
+            Object::Dictionary(dictionary! {
+                "Type" => "Page", "Parent" => page_tree,
+                "MediaBox" => vec![0.into(), 0.into(), (*width).into(), (*height).into()],
+                "Contents" => contents,
+            }),
+        );
+    }
+    pdf.objects.insert(page_tree, Object::Dictionary(dictionary! {
+        "Type" => "Pages", "Kids" => page_ids.into_iter().map(Object::Reference).collect::<Vec<_>>(), "Count" => sizes.len() as i64,
+    }));
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => page_tree });
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    Bytes::from(bytes)
+}
+
+/// Server-side observation of VLM requests for the two-window overlap tests. Layout request
+/// numbers are 1-based admission order, so window N+1's first layout is `first_extra`.
+#[derive(Clone)]
+struct OverlapMock {
+    requests: Arc<AtomicUsize>,
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    layouts: Arc<AtomicUsize>,
+    layout_active: Arc<AtomicUsize>,
+    layout_peak: Arc<AtomicUsize>,
+    raw_response_bytes: Arc<AtomicUsize>,
+    request_body_bytes: Arc<AtomicUsize>,
+    seq: Arc<AtomicUsize>,
+    log: Arc<Mutex<Vec<(usize, String)>>>,
+    first_extra: usize,
+    last_extra: usize,
+    second_window_entered: Arc<Notify>,
+    release: Arc<tokio::sync::watch::Sender<bool>>,
+    hold_next_window: Arc<AtomicBool>,
+    fail_next_window: Arc<AtomicBool>,
+    page_zero_completed: Arc<Notify>,
+}
+
+/// Decrements the server-side activity counters even when a dropped client connection cancels
+/// the handler task, so `layout_active` genuinely reflects only live VLM work.
+struct ActiveGuard {
+    active: Arc<AtomicUsize>,
+    layout: Option<Arc<AtomicUsize>>,
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        if let Some(layout) = &self.layout {
+            layout.fetch_sub(1, Ordering::SeqCst);
+        }
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl OverlapMock {
+    fn new(first_extra: usize, last_extra: usize) -> Self {
+        Self {
+            requests: Arc::new(AtomicUsize::new(0)),
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+            layouts: Arc::new(AtomicUsize::new(0)),
+            layout_active: Arc::new(AtomicUsize::new(0)),
+            layout_peak: Arc::new(AtomicUsize::new(0)),
+            raw_response_bytes: Arc::new(AtomicUsize::new(0)),
+            request_body_bytes: Arc::new(AtomicUsize::new(0)),
+            seq: Arc::new(AtomicUsize::new(0)),
+            log: Arc::new(Mutex::new(Vec::new())),
+            first_extra,
+            last_extra,
+            second_window_entered: Arc::new(Notify::new()),
+            release: Arc::new(tokio::sync::watch::channel(false).0),
+            hold_next_window: Arc::new(AtomicBool::new(true)),
+            fail_next_window: Arc::new(AtomicBool::new(false)),
+            page_zero_completed: Arc::new(Notify::new()),
+        }
+    }
+
+    fn log_seq(&self, label: &str) -> Option<usize> {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, entry)| entry == label)
+            .map(|(seq, _)| *seq)
+    }
+
+    async fn assert_no_lingering_layout(&self, context: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Async sleep: a blocking sleep would stall every runtime worker the handlers run on.
+        while self.layout_active.load(Ordering::SeqCst) != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "lingering VLM work for {context}: layout_active={}",
+                self.layout_active.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+fn overlap_route(mock: OverlapMock) -> axum::routing::MethodRouter {
+    axum::routing::post(move |Json(request): Json<Value>| {
+        let state = mock.clone();
+        async move { overlap_handler_inner(state, axum::Json(request)).await }
+    })
+}
+
+async fn overlap_handler_inner(
+    state: OverlapMock,
+    Json(request): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    let body = request.to_string();
+    state
+        .request_body_bytes
+        .fetch_add(body.len(), Ordering::SeqCst);
+    state.requests.fetch_add(1, Ordering::SeqCst);
+    let is_layout = body.contains("Layout Detection");
+    let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
+    state.peak.fetch_max(active, Ordering::SeqCst);
+    let layout_counter = if is_layout {
+        let active = state.layout_active.fetch_add(1, Ordering::SeqCst) + 1;
+        state.layout_peak.fetch_max(active, Ordering::SeqCst);
+        Some(Arc::clone(&state.layout_active))
+    } else {
+        None
+    };
+    let _guard = ActiveGuard {
+        active: Arc::clone(&state.active),
+        layout: layout_counter,
+    };
+    let layout_number = if is_layout {
+        Some(state.layouts.fetch_add(1, Ordering::SeqCst) + 1)
+    } else {
+        None
+    };
+    if layout_number == Some(state.first_extra) {
+        let seq = state.seq.fetch_add(1, Ordering::SeqCst);
+        state
+            .log
+            .lock()
+            .unwrap()
+            .push((seq, format!("layout-{}", state.first_extra)));
+        state.second_window_entered.notify_one();
+    }
+    let held = layout_number.is_some_and(|number| {
+        state.hold_next_window.load(Ordering::SeqCst)
+            && (state.first_extra..=state.last_extra).contains(&number)
+    });
+    let result = if held {
+        if state.fail_next_window.load(Ordering::SeqCst) {
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        } else {
+            let release = state.release.subscribe();
+            // Timer-driven polling: axum/hyper handler tasks can be parked in a way that
+            // skips the internal watch wake-up after a client disconnect, so re-observe the
+            // released value on the tokio timer instead of relying on the change notification.
+            while !*release.borrow() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                if state.fail_next_window.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            if state.fail_next_window.load(Ordering::SeqCst) {
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            } else {
+                Ok(empty_completion())
+            }
+        }
+    } else {
+        Ok(empty_completion())
+    };
+    if let Ok(reply) = &result {
+        state
+            .raw_response_bytes
+            .fetch_add(reply.to_string().len(), Ordering::SeqCst);
+    }
+    result
+}
+
+/// Polls until no private staging directory remains under `output/stem`. Dropped staging
+/// futures schedule capability cleanup on a dedicated thread, so residue removal is async.
+async fn assert_clean_stem(output: &Path, stem: &str) {
+    let root = output.join(stem);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let any = match std::fs::read_dir(&root) {
+            Ok(entries) => entries
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().starts_with(".vlm-")),
+            Err(_) => false,
+        };
+        if !any {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "staging residue was not cleaned under {stem}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Runs a fresh single-page document through the same client after a failed route: the page
+/// semaphore, layout semaphore, and budgets must all still be usable.
+async fn assert_permits_reacquirable(client: &MinerUVlmClient, output: &Path) {
+    let manifest = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.parse_and_write_official_pdf(
+            PdfInput::Bytes(tiny_pdf(1)),
+            route_options(1),
+            output,
+            "again",
+        ),
+    )
+    .await
+    .expect("second parse hung: admission permits were not released")
+    .expect("second parse failed: admission permits leaked");
+    assert!(manifest.vlm_dir.join("again_middle.json").is_file());
+}
+
+fn published_page_indexes(manifest: &mineru::OfficialOutputManifest, stem: &str) -> Vec<u64> {
+    let middle: Value = serde_json::from_slice(
+        &std::fs::read(manifest.vlm_dir.join(format!("{stem}_middle.json"))).unwrap(),
+    )
+    .unwrap();
+    middle["pdf_info"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|page| page["page_idx"].as_u64().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn route_staging_overlaps_next_window_vlm() {
+    // 12 pages in two 6-page windows: the first layout of window N+1 (layout #7) must arrive
+    // before the final staged DocumentPageCompleted of window N (page 5), while window N+1's
+    // VLM is held on the server so the route provably cannot continue past phase B.
+    let mock = OverlapMock::new(7, 12);
+    let client = configured_client(
+        Router::new().route("/v1/chat/completions", overlap_route(mock.clone())),
+        8,
+    )
+    .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let callback: ProgressCallback = {
+        let mock = mock.clone();
+        let events = Arc::clone(&events);
+        Arc::new(move |event| {
+            if let ProgressEvent::DocumentPageCompleted {
+                page_index,
+                completed,
+                total,
+                ..
+            } = event
+            {
+                let seq = mock.seq.fetch_add(1, Ordering::SeqCst);
+                mock.log
+                    .lock()
+                    .unwrap()
+                    .push((seq, format!("completed-{page_index}")));
+                if page_index == 0 {
+                    mock.page_zero_completed.notify_one();
+                }
+                events.lock().unwrap().push((page_index, completed, total));
+            }
+        })
+    };
+
+    let output = tempfile::tempdir().unwrap();
+    let output_root = output.path().to_path_buf();
+    let prepared = PreparedPdf {
+        bytes: tiny_pdf(12),
+        kind: DocumentKind::Pdf,
+        original: tiny_pdf(12),
+    };
+    let route = tokio::spawn(async move {
+        client
+            .parse_and_write_prepared_pdf_with_events(
+                prepared,
+                route_options(6),
+                &output_root,
+                "overlap",
+                Some(callback),
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        mock.second_window_entered.notified(),
+    )
+    .await
+    .expect("window N+1 first layout did not enter");
+    // Wait for the final staged event of window N (page 5) while window N+1 VLM is held.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if mock.log_seq("completed-5").is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("window N staging did not complete");
+    assert!(
+        !route.is_finished(),
+        "route must still wait for held window N+1 VLM"
+    );
+
+    let layout_seq = mock
+        .log_seq("layout-7")
+        .expect("window N+1 first layout recorded");
+    let final_stage_seq = mock
+        .log_seq("completed-5")
+        .expect("window N final event recorded");
+    assert!(
+        layout_seq < final_stage_seq,
+        "window N+1 VLM must start before window N staging finishes (layout {layout_seq} vs staged {final_stage_seq})"
+    );
+
+    let _ = mock.release.send(true);
+    let manifest = tokio::time::timeout(Duration::from_secs(10), route)
+        .await
+        .expect("route timed out")
+        .unwrap()
+        .expect("overlapping route failed");
+
+    mock.assert_no_lingering_layout("overlap").await;
+    assert_eq!(mock.layouts.load(Ordering::SeqCst), 12);
+    assert_eq!(mock.requests.load(Ordering::SeqCst), 12);
+    assert!(mock.peak.load(Ordering::SeqCst) <= 8, "HTTP high water");
+    assert!(
+        mock.layout_peak.load(Ordering::SeqCst) <= 4,
+        "page/HTTP high water"
+    );
+    assert!(
+        mock.raw_response_bytes.load(Ordering::SeqCst) as u64
+            <= route_options(6).max_raw_output_bytes as u64
+    );
+    assert_eq!(
+        published_page_indexes(&manifest, "overlap"),
+        (0..12u64).collect::<Vec<_>>()
+    );
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|(index, _, _)| *index)
+            .collect::<Vec<_>>(),
+        (0..12).collect::<Vec<_>>()
+    );
+    assert!(
+        events
+            .iter()
+            .all(|(_, completed, total)| { *completed <= *total && *total == 12 }),
+        "completion counters stay bounded and document-total accurate"
+    );
+}
+
+#[tokio::test]
+async fn route_next_window_vlm_failure_disposes_partially_staged_window() {
+    let mock = OverlapMock::new(7, 12);
+    let client = configured_client(
+        Router::new().route("/v1/chat/completions", overlap_route(mock.clone())),
+        8,
+    )
+    .await;
+    let callback: ProgressCallback = {
+        let mock = mock.clone();
+        Arc::new(move |event| {
+            if let ProgressEvent::DocumentPageCompleted { page_index: 0, .. } = event {
+                mock.page_zero_completed.notify_one();
+            }
+        })
+    };
+
+    let output = tempfile::tempdir().unwrap();
+    let output_root = output.path().to_path_buf();
+    let client_for_route = client.clone();
+    let route_output = output_root.clone();
+    let route = tokio::spawn(async move {
+        client_for_route
+            .parse_and_write_prepared_pdf_with_events(
+                PreparedPdf {
+                    bytes: tiny_pdf(12),
+                    kind: DocumentKind::Pdf,
+                    original: tiny_pdf(12),
+                },
+                route_options(6),
+                &route_output,
+                "failed-vlm",
+                Some(callback),
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        mock.second_window_entered.notified(),
+    )
+    .await
+    .expect("window N+1 VLM did not start");
+    tokio::time::timeout(Duration::from_secs(5), mock.page_zero_completed.notified())
+        .await
+        .expect("window N was not partially staged");
+    assert!(!route.is_finished());
+    mock.fail_next_window.store(true, Ordering::SeqCst);
+    let _ = mock.release.send(true);
+
+    let error = tokio::time::timeout(Duration::from_secs(10), route)
+        .await
+        .expect("route timed out after next-window VLM failure")
+        .unwrap()
+        .expect_err("route must fail");
+    assert!(
+        matches!(error, mineru::VlmError::Http { status: 500, .. }),
+        "unexpected error: {error}"
+    );
+    mock.assert_no_lingering_layout("next-window VLM failure")
+        .await;
+    assert!(
+        (7..=12).contains(&mock.layouts.load(Ordering::SeqCst)),
+        "window N's six layouts plus at least one next-window layout were admitted"
+    );
+    assert!(!output_root.join("failed-vlm/vlm").exists());
+    assert_clean_stem(output.path(), "failed-vlm").await;
+    // The failed route's next-window requests may keep the layout counter inside the hold range;
+    // the re-acquirability probe must not inherit the failure mode.
+    mock.fail_next_window.store(false, Ordering::SeqCst);
+    let _ = mock.release.send(true);
+    assert_permits_reacquirable(&client, output.path()).await;
+}
+
+#[tokio::test]
+async fn route_staging_failure_drops_next_window_vlm() {
+    let mock = OverlapMock::new(7, 12);
+    let client = configured_client(
+        Router::new().route("/v1/chat/completions", overlap_route(mock.clone())),
+        8,
+    )
+    .await;
+    let callback: ProgressCallback = {
+        let mock = mock.clone();
+        Arc::new(move |event| {
+            if let ProgressEvent::DocumentPageCompleted { page_index: 0, .. } = event {
+                mock.page_zero_completed.notify_one();
+            }
+        })
+    };
+
+    // Staging budget calibrated so page 0 of window N stages fully and the next page's first
+    // preview write exceeds the cumulative staged-text allowance (see staging_failure_budget()).
+    let mut options = route_options(6);
+    options.max_staged_text_bytes = staging_failure_budget().await;
+
+    let output = tempfile::tempdir().unwrap();
+    let output_root = output.path().to_path_buf();
+    let client_for_route = client.clone();
+    let route_output = output_root.clone();
+    let route = tokio::spawn(async move {
+        client_for_route
+            .parse_and_write_prepared_pdf_with_events(
+                PreparedPdf {
+                    bytes: tiny_pdf(12),
+                    kind: DocumentKind::Pdf,
+                    original: tiny_pdf(12),
+                },
+                options,
+                &route_output,
+                "failed-stage",
+                Some(callback),
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        mock.second_window_entered.notified(),
+    )
+    .await
+    .expect("window N+1 VLM did not start before staging failure");
+    tokio::time::timeout(Duration::from_secs(5), mock.page_zero_completed.notified())
+        .await
+        .expect("window N did not stage its first page");
+
+    let error = tokio::time::timeout(Duration::from_secs(10), route)
+        .await
+        .expect("route timed out after staging failure")
+        .unwrap()
+        .expect_err("route must fail");
+    assert!(
+        matches!(
+            error,
+            mineru::VlmError::LimitExceeded {
+                resource: "staged text/JSON bytes",
+                ..
+            }
+        ),
+        "unexpected staging error: {error}"
+    );
+    // Release the in-flight window N+1 handlers so the observation seam drains.
+    let _ = mock.release.send(true);
+    mock.assert_no_lingering_layout("staging failure").await;
+    assert!(!output_root.join("failed-stage/vlm").exists());
+    assert_clean_stem(output.path(), "failed-stage").await;
+    assert_permits_reacquirable(&client, output.path()).await;
+}
+
+/// One page's total staged text allowance: page 0 of the overlap document stages fully, the
+/// next page's preview write then exceeds the allowance and fails the route mid-staging.
+async fn staging_failure_budget() -> usize {
+    // Uses a plain non-holding client: only the route's own staging limits matter here.
+    let client = client().await;
+    // Probe the smallest budget that lets a single page stage completely.
+    let mut low = 0usize;
+    let mut high = 4096usize;
+    let output = tempfile::tempdir().unwrap();
+    while low < high {
+        let probe = (low + high) / 2;
+        let mut options = route_options(1);
+        options.max_staged_text_bytes = probe;
+        let succeeded = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.parse_and_write_official_pdf(
+                PdfInput::Bytes(tiny_pdf(1)),
+                options,
+                output.path(),
+                "probe",
+            ),
+        )
+        .await
+        .expect("probe hung")
+        .is_ok();
+        if succeeded {
+            high = probe;
+        } else {
+            low = probe + 1;
+        }
+    }
+    // low is now the smallest per-page allowance that succeeds. Add one byte: page 0 fits, the
+    // next page's first preview write pushes the cumulative total over.
+    low + 1
+}
+
+#[tokio::test]
+async fn route_overlap_keeps_raw_encoded_budget_high_water() {
+    let mock = OverlapMock::new(7, 12);
+    let client = configured_client(
+        Router::new().route("/v1/chat/completions", overlap_route(mock.clone())),
+        8,
+    )
+    .await;
+
+    // The budget high water is about cumulative charges, not holding: leave the natural overlap
+    // (window N+1 VLM admitted while window N stages) but do not park requests on the server.
+    mock.hold_next_window.store(false, Ordering::SeqCst);
+    let run = |options: OfficialPdfOptions, stem: &str| {
+        let output = tempfile::tempdir().unwrap();
+        let output_root = output.path().to_path_buf();
+        let bytes = tiny_pdf(12);
+        let stem = stem.to_string();
+        let client = client.clone();
+        Box::pin(async move {
+            client
+                .parse_and_write_official_pdf(PdfInput::Bytes(bytes), options, &output_root, &stem)
+                .await
+        })
+    };
+
+    // Probe run with generous budgets measures the document's exact raw/request high water.
+    let manifest = tokio::time::timeout(Duration::from_secs(10), run(route_options(6), "probe"))
+        .await
+        .expect("probe timed out")
+        .expect("probe failed");
+    assert_eq!(
+        published_page_indexes(&manifest, "probe"),
+        (0..12u64).collect::<Vec<_>>()
+    );
+    let raw = mock.raw_response_bytes.load(Ordering::SeqCst);
+    let request_bytes = mock.request_body_bytes.load(Ordering::SeqCst);
+    let peak = mock.peak.load(Ordering::SeqCst);
+    let layout_peak = mock.layout_peak.load(Ordering::SeqCst);
+    assert!(peak <= 8, "HTTP concurrency high water");
+    assert!(layout_peak <= 4, "page/HTTP concurrency high water");
+    assert!(raw > 0 && request_bytes > raw, "measured budgets are sane");
+
+    // The exact raw allowance still succeeds and one byte below it fails: the raw document
+    // budget is enforced unchanged under the overlap.
+    let mut tight = route_options(6);
+    tight.max_raw_output_bytes = raw;
+    tokio::time::timeout(Duration::from_secs(10), run(tight, "tight-raw"))
+        .await
+        .expect("exact raw budget timed out")
+        .expect("exact raw budget must fit");
+    let mut below = route_options(6);
+    below.max_raw_output_bytes = raw - 1;
+    let error = tokio::time::timeout(Duration::from_secs(10), run(below, "below-raw"))
+        .await
+        .expect("below-raw timed out")
+        .expect_err("one byte below the raw allowance must fail");
+    assert!(
+        matches!(
+            error,
+            mineru::VlmError::LimitExceeded {
+                resource: "response",
+                ..
+            }
+        ),
+        "unexpected raw budget error: {error}"
+    );
+
+    // The encoded document budget is charged only from the encoded image payloads embedded in
+    // the request bodies, so the measured request-body total is an upper bound on the encoded
+    // high water: an allowance of exactly that many bytes must still succeed under overlap.
+    let mut encoded = route_options(6);
+    encoded.max_encoded_document_bytes = request_bytes;
+    tokio::time::timeout(Duration::from_secs(10), run(encoded, "tight-encoded"))
+        .await
+        .expect("encoded budget timed out")
+        .expect("encoded budget upper bound must fit");
+}
+
+#[tokio::test]
+async fn route_overlap_preserves_source_order_with_uneven_latencies() {
+    #[derive(Clone)]
+    struct State {
+        layouts: Arc<AtomicUsize>,
+        page_six_entered: Arc<Notify>,
+        release_first_window: Arc<Notify>,
+        release_second_window: Arc<Notify>,
+    }
+    async fn handler(
+        AxumState(state): AxumState<State>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        if request.to_string().contains("Layout Detection") {
+            let layout = state.layouts.fetch_add(1, Ordering::SeqCst) + 1;
+            // Reverse completion within each window: the first page of a window is held until
+            // its siblings have been admitted, forcing out-of-order VLM completion.
+            match layout {
+                1 => state.release_first_window.notified().await,
+                7 => {
+                    state.page_six_entered.notify_one();
+                    state.release_second_window.notified().await;
+                }
+                _ => {}
+            }
+        }
+        empty_completion()
+    }
+
+    let state = State {
+        layouts: Arc::new(AtomicUsize::new(0)),
+        page_six_entered: Arc::new(Notify::new()),
+        release_first_window: Arc::new(Notify::new()),
+        release_second_window: Arc::new(Notify::new()),
+    };
+    let client = configured_client(
+        Router::new()
+            .route("/v1/chat/completions", post(handler))
+            .with_state(state.clone()),
+        8,
+    )
+    .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let callback: ProgressCallback = {
+        let events = Arc::clone(&events);
+        Arc::new(move |event| {
+            if let ProgressEvent::DocumentPageCompleted { page_index, .. } = event {
+                events.lock().unwrap().push(page_index);
+            }
+        })
+    };
+    let output = tempfile::tempdir().unwrap();
+    let output_root = output.path().to_path_buf();
+    let route = tokio::spawn(async move {
+        client
+            .parse_and_write_prepared_pdf_with_events(
+                PreparedPdf {
+                    bytes: tiny_pdf(12),
+                    kind: DocumentKind::Pdf,
+                    original: tiny_pdf(12),
+                },
+                route_options(6),
+                &output_root,
+                "ordered",
+                Some(callback),
+            )
+            .await
+    });
+
+    // Window N's page 0 is held; pages 1-5 are admitted and complete. Then release page 0 so
+    // window N's VLM finishes out of order while staging of window N overlaps window N+1.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.layouts.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("window N did not admit its siblings");
+    assert!(!route.is_finished());
+    state.release_first_window.notify_one();
+
+    // Window N+1's first page (layout 7) is held; its siblings are admitted during the overlap.
+    tokio::time::timeout(Duration::from_secs(5), state.page_six_entered.notified())
+        .await
+        .expect("window N+1 VLM did not start during staging");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.layouts.load(Ordering::SeqCst) < 8 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("window N+1 did not admit its siblings");
+    assert!(!route.is_finished());
+    state.release_second_window.notify_one();
+
+    let manifest = tokio::time::timeout(Duration::from_secs(10), route)
+        .await
+        .expect("route timed out")
+        .unwrap()
+        .expect("ordered route failed");
+
+    assert_eq!(
+        published_page_indexes(&manifest, "ordered"),
+        (0..12u64).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        *events.lock().unwrap(),
+        (0..12).collect::<Vec<_>>(),
+        "staged publication stays source ordered despite reverse VLM completion"
+    );
+}
+
+#[tokio::test]
+async fn route_overlap_deadline_timeout_maps_and_drops_stage() {
+    let mock = OverlapMock::new(7, 12);
+    let client = configured_client(
+        Router::new().route("/v1/chat/completions", overlap_route(mock.clone())),
+        8,
+    )
+    .await;
+    let callback: ProgressCallback = {
+        let mock = mock.clone();
+        Arc::new(move |event| {
+            if let ProgressEvent::DocumentPageCompleted { page_index: 0, .. } = event {
+                mock.page_zero_completed.notify_one();
+            }
+        })
+    };
+
+    let mut options = route_options(6);
+    options.total_deadline = Duration::from_secs(2);
+    let output = tempfile::tempdir().unwrap();
+    let output_root = output.path().to_path_buf();
+    let client_for_route = client.clone();
+    let route_output = output_root.clone();
+    let route = tokio::spawn(async move {
+        client_for_route
+            .parse_and_write_prepared_pdf_with_events(
+                PreparedPdf {
+                    bytes: tiny_pdf(12),
+                    kind: DocumentKind::Pdf,
+                    original: tiny_pdf(12),
+                },
+                options,
+                &route_output,
+                "deadline",
+                Some(callback),
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        mock.second_window_entered.notified(),
+    )
+    .await
+    .expect("window N+1 VLM did not start");
+    tokio::time::timeout(Duration::from_secs(5), mock.page_zero_completed.notified())
+        .await
+        .expect("staging did not start before the deadline");
+
+    let started = Instant::now();
+    let error = tokio::time::timeout(Duration::from_secs(10), route)
+        .await
+        .expect("route did not stop at the deadline")
+        .unwrap()
+        .expect_err("deadline must fail the route");
+    assert!(
+        matches!(
+            error,
+            mineru::VlmError::Timeout {
+                operation: "official PDF"
+            }
+        ),
+        "unexpected deadline error: {error}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "deadline must have elapsed before the timeout maps"
+    );
+
+    // Release the held window N+1 handlers so the observation seam drains.
+    let _ = mock.release.send(true);
+    mock.assert_no_lingering_layout("deadline timeout").await;
+    assert!(!output_root.join("deadline/vlm").exists());
+    assert_clean_stem(output.path(), "deadline").await;
+    assert_permits_reacquirable(&client, output.path()).await;
+}
+
+#[tokio::test]
+async fn route_full_cap_fallback_window_does_not_overlap() {
+    // Page sizes: 1x1pt (27 RGB bytes, fits a 40-byte half slot), 1.5x1.5pt (75 bytes, exceeds
+    // the half slot but fits the 80-byte full cap -> full-cap fallback), then 1x1pt again.
+    let input = sized_pdf(&[(1.0, 1.0), (1.5, 1.5), (1.0, 1.0)]);
+    #[derive(Clone)]
+    struct State {
+        layouts: Arc<AtomicUsize>,
+        fallback_entered: Arc<Notify>,
+        release_fallback: Arc<Notify>,
+        next_window_entered: Arc<Notify>,
+    }
+    async fn handler(
+        AxumState(state): AxumState<State>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        if request.to_string().contains("Layout Detection") {
+            let layout = state.layouts.fetch_add(1, Ordering::SeqCst) + 1;
+            match layout {
+                2 => {
+                    state.fallback_entered.notify_one();
+                    state.release_fallback.notified().await;
+                }
+                3 => state.next_window_entered.notify_one(),
+                _ => {}
+            }
+        }
+        empty_completion()
+    }
+
+    let state = State {
+        layouts: Arc::new(AtomicUsize::new(0)),
+        fallback_entered: Arc::new(Notify::new()),
+        release_fallback: Arc::new(Notify::new()),
+        next_window_entered: Arc::new(Notify::new()),
+    };
+    let client = configured_client(
+        Router::new()
+            .route("/v1/chat/completions", post(handler))
+            .with_state(state.clone()),
+        8,
+    )
+    .await;
+    let mut options = route_options(2);
+    options.max_in_flight_image_bytes = 80;
+    let output = tempfile::tempdir().unwrap();
+    let output_root = output.path().to_path_buf();
+    let route = tokio::spawn(async move {
+        client
+            .parse_and_write_official_pdf(PdfInput::Bytes(input), options, &output_root, "fallback")
+            .await
+    });
+
+    // The full-cap fallback page's layout (layout #2) is held. No next-window VLM (layout #3)
+    // may be admitted while it is in flight: the fallback is a declared memory-bound exception.
+    tokio::time::timeout(Duration::from_secs(5), state.fallback_entered.notified())
+        .await
+        .expect("fallback page VLM did not enter");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            state.next_window_entered.notified()
+        )
+        .await
+        .is_err(),
+        "next-window VLM must not overlap the full-cap fallback page"
+    );
+    assert!(!route.is_finished());
+    state.release_fallback.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), state.next_window_entered.notified())
+        .await
+        .expect("next window VLM did not resume after the fallback");
+
+    let manifest = tokio::time::timeout(Duration::from_secs(10), route)
+        .await
+        .expect("route timed out")
+        .unwrap()
+        .expect("fallback route failed");
+    assert_eq!(state.layouts.load(Ordering::SeqCst), 3);
+    assert_eq!(published_page_indexes(&manifest, "fallback"), vec![0, 1, 2]);
 }

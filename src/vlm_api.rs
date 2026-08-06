@@ -2,7 +2,7 @@
 use crate::{
     MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialOutputManifest, OfficialPdfOptions,
     ProgressCallback, ProgressEvent, VlmHttpConfig,
-    input_prepare::{DocumentKind, RasterWorkers, prepare_with_warning},
+    input_prepare::{DocumentKind, RasterWorkers, prepare_with_warning_and_ooxml},
 };
 use axum::{
     Json, Router,
@@ -41,12 +41,17 @@ use tokio::{
     task::JoinSet,
 };
 
+#[cfg(test)]
 const FILE_CAP: u64 = 512 * 1024 * 1024;
+#[cfg(test)]
 const BODY_CAP: usize = 512 * 1024 * 1024 + 1024 * 1024;
+#[cfg(test)]
 const TEXT_CAP: usize = 64 * 1024;
+#[cfg(test)]
 const TEXT_TOTAL_CAP: usize = 256 * 1024;
-const RECORD_CAP: usize = 32;
+#[cfg(test)]
 const RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+#[cfg(test)]
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
 const REQUEST_DEADLINE_EXPIRED: &str = "request deadline expired";
 
@@ -62,6 +67,7 @@ struct App {
     route: OfficialPdfOptions,
     env_formula: Option<bool>,
     env_table: Option<bool>,
+    env_image_analysis: Option<bool>,
     concurrency: usize,
     official_page_concurrency: usize,
     retention: Duration,
@@ -70,11 +76,41 @@ struct App {
     office_workers: OfficeWorkers,
     raster_workers: RasterWorkers,
     limits: RequestLimits,
+    record_cap: usize,
     server_zip_cap: u64,
     totals: crate::document_limits::OfficialDocumentTotals,
+    ooxml: crate::command::service::OoxmlLimits,
+    vlm_text_before_image: bool,
+    vlm_allow_truncated_content: bool,
+    vlm_allow_remote_images: bool,
+    vlm_allow_private_remote_images: bool,
     events: Option<ProgressCallback>,
+    /// Frozen VLM transport base config, resolved once at startup.
+    http_config: VlmHttpConfig,
     #[cfg(test)]
     test_http: Option<VlmHttpConfig>,
+}
+
+/// Constructs the service's office helper from the frozen startup policy.
+fn office_workers_from(config: &ServiceConfig) -> OfficeWorkers {
+    match config.office_limits {
+        Some(limits) => OfficeWorkers::with_executable_and_policy(
+            std::env::current_exe()
+                .map(|exe| {
+                    exe.with_file_name(if cfg!(windows) {
+                        "mineru-office-convert.exe"
+                    } else {
+                        "mineru-office-convert"
+                    })
+                })
+                .unwrap_or_else(|_| PathBuf::from("mineru-office-convert")),
+            limits,
+            config.ooxml,
+        ),
+        None => OfficeWorkers::new().unwrap_or_else(|_| {
+            OfficeWorkers::with_executable(PathBuf::from("mineru-office-convert"))
+        }),
+    }
 }
 struct WorkerRegistry {
     tasks: JoinSet<()>,
@@ -222,12 +258,21 @@ struct WorkerContext {
     route: OfficialPdfOptions,
     env_formula: Option<bool>,
     env_table: Option<bool>,
+    env_image_analysis: Option<bool>,
     official_page_concurrency: usize,
     office_workers: OfficeWorkers,
     raster_workers: RasterWorkers,
     events: Option<ProgressCallback>,
     server_zip_cap: u64,
     totals: crate::document_limits::OfficialDocumentTotals,
+    ooxml: crate::command::service::OoxmlLimits,
+    vlm_text_before_image: bool,
+    vlm_allow_truncated_content: bool,
+    vlm_allow_remote_images: bool,
+    vlm_allow_private_remote_images: bool,
+    /// Frozen VLM transport base config; the worker clones this instead of re-reading the
+    /// ambient environment per task.
+    http_config: VlmHttpConfig,
     #[cfg(test)]
     test_http: Option<VlmHttpConfig>,
 }
@@ -239,6 +284,7 @@ pub struct ServiceConfig {
     pub route: OfficialPdfOptions,
     pub formula: Option<bool>,
     pub table: Option<bool>,
+    image_analysis: Option<bool>,
     official_page_concurrency: usize,
     public_bind_exposed: bool,
     allow_public_http_client: bool,
@@ -246,7 +292,16 @@ pub struct ServiceConfig {
     cleanup_interval: Duration,
     record_cap: usize,
     limits: RequestLimits,
+    office_limits: Option<crate::command::service::OfficeLimits>,
+    ooxml: crate::command::service::OoxmlLimits,
+    vlm_text_before_image: bool,
+    vlm_allow_truncated_content: bool,
+    vlm_allow_remote_images: bool,
+    vlm_allow_private_remote_images: bool,
     document_limits: Option<crate::DocumentLimitPolicy>,
+    /// Frozen VLM transport base config resolved once at startup; workers must not re-read the
+    /// ambient environment per task.
+    http_config: VlmHttpConfig,
     #[doc(hidden)]
     progress_callback: Option<ProgressCallback>,
     #[cfg(test)]
@@ -267,27 +322,36 @@ impl ServiceConfig {
         if concurrency == 0 || concurrency > Semaphore::MAX_PERMITS {
             Err("MINERU_API_MAX_CONCURRENT_REQUESTS must be positive".into())
         } else {
+            let server = crate::command::service::ServerLimits::default_resolved();
             Ok(Self {
                 concurrency,
                 output_root,
                 route,
                 formula,
                 table,
+                image_analysis: None,
                 official_page_concurrency: 4,
                 public_bind_exposed: false,
                 allow_public_http_client: false,
-                retention: RETENTION,
-                cleanup_interval: CLEANUP_INTERVAL,
-                record_cap: RECORD_CAP,
+                retention: Duration::from_secs(24 * 60 * 60),
+                cleanup_interval: Duration::from_secs(300),
+                record_cap: server.record_cap,
                 limits: RequestLimits {
-                    body: BODY_CAP,
-                    file: FILE_CAP,
-                    text: TEXT_CAP,
-                    text_total: TEXT_TOTAL_CAP,
-                    fields: 32,
+                    body: server.body_bytes,
+                    file: server.file_bytes,
+                    text: server.text_bytes,
+                    text_total: server.text_total_bytes,
+                    fields: server.form_fields,
                 },
+                office_limits: None,
+                ooxml: crate::command::service::OoxmlLimits::default_resolved(),
+                vlm_text_before_image: false,
+                vlm_allow_truncated_content: false,
+                vlm_allow_remote_images: false,
+                vlm_allow_private_remote_images: false,
                 document_limits: None,
                 progress_callback: None,
+                http_config: VlmHttpConfig::default(),
                 #[cfg(test)]
                 test_http: None,
                 #[cfg(test)]
@@ -299,8 +363,11 @@ impl ServiceConfig {
     }
     #[doc(hidden)]
     pub fn official_page_concurrency(mut self, concurrency: usize) -> Result<Self, String> {
-        if !(1..=8).contains(&concurrency) {
-            return Err("MINERU_OFFICIAL_PAGE_CONCURRENCY must be an integer from 1 to 8".into());
+        if concurrency == 0 || concurrency > Semaphore::MAX_PERMITS {
+            return Err(
+                "MINERU_OFFICIAL_PAGE_CONCURRENCY must be positive and at most the tokio semaphore capacity"
+                    .into(),
+            );
         }
         self.official_page_concurrency = concurrency;
         Ok(self)
@@ -314,6 +381,39 @@ impl ServiceConfig {
     #[doc(hidden)]
     pub fn document_limits(mut self, limits: crate::DocumentLimitPolicy) -> Self {
         self.document_limits = Some(limits);
+        self
+    }
+    /// Replaces the default base `VlmHttpConfig` with the operator-frozen snapshot resolved at
+    /// startup. The task worker clones this single config instead of re-reading the environment.
+    #[doc(hidden)]
+    pub fn http_config(mut self, config: VlmHttpConfig) -> Self {
+        self.http_config = config;
+        self
+    }
+    /// Operator pin for image analysis, mirroring the `formula`/`table` pins: when `Some`, the
+    /// value overrides the per-request form field.
+    #[doc(hidden)]
+    pub fn image_analysis(mut self, value: Option<bool>) -> Self {
+        self.image_analysis = value;
+        self
+    }
+    /// Applies the frozen Phase-1B service snapshot resolved by the owning CLI at startup.
+    #[doc(hidden)]
+    pub fn service_policy(mut self, service: crate::command::service::ResolvedService) -> Self {
+        self.record_cap = service.server.record_cap;
+        self.limits = RequestLimits {
+            body: service.server.body_bytes,
+            file: service.server.file_bytes,
+            text: service.server.text_bytes,
+            text_total: service.server.text_total_bytes,
+            fields: service.server.form_fields,
+        };
+        self.office_limits = Some(service.office);
+        self.ooxml = service.ooxml;
+        self.vlm_text_before_image = service.vlm_text_before_image;
+        self.vlm_allow_truncated_content = service.vlm_allow_truncated_content;
+        self.vlm_allow_remote_images = service.vlm_allow_remote_images;
+        self.vlm_allow_private_remote_images = service.vlm_allow_private_remote_images;
         self
     }
     #[doc(hidden)]
@@ -473,24 +573,9 @@ pub async fn serve(
         .unwrap_or_else(|| {
             crate::document_limits::OfficialDocumentTotals::from_options(&config.route)
         });
-    let body = crate::document_limits::usize_with_max(
-        transport_policy.multipart_body_bytes,
-        usize::MAX as u64,
-    )
-    .map_err(std::io::Error::other)?;
-    let policy_limits = RequestLimits {
-        body,
-        file: transport_policy.max_input_bytes,
-        ..config.limits
-    };
-    #[cfg(test)]
-    let limits = if config.limits.body != BODY_CAP || config.limits.file != FILE_CAP {
-        config.limits
-    } else {
-        policy_limits
-    };
-    #[cfg(not(test))]
-    let limits = policy_limits;
+    // The service request caps are the resolved Phase-1B server policy (default -> frozen
+    // environment -> explicit CLI), not a re-derivation from client document limits.
+    let limits = config.limits;
     let addr = listener.local_addr()?;
     let public_listener = !addr.ip().is_loopback();
     if public_listener && !config.public_bind_exposed {
@@ -505,11 +590,10 @@ pub async fn serve(
     #[cfg(test)]
     let office_workers = match config.test_office.clone() {
         Some(workers) => workers,
-        None => OfficeWorkers::new().map_err(|error| std::io::Error::other(error.to_string()))?,
+        None => office_workers_from(&config),
     };
     #[cfg(not(test))]
-    let office_workers =
-        OfficeWorkers::new().map_err(|error| std::io::Error::other(error.to_string()))?;
+    let office_workers = office_workers_from(&config);
     let app = App {
         public_listener,
         allow_public_http_client: config.allow_public_http_client,
@@ -521,6 +605,7 @@ pub async fn serve(
         route: config.route,
         env_formula: config.formula,
         env_table: config.table,
+        env_image_analysis: config.image_analysis,
         official_page_concurrency: config.official_page_concurrency,
         concurrency: config.concurrency,
         retention: config.retention,
@@ -529,9 +614,16 @@ pub async fn serve(
         office_workers,
         raster_workers: RasterWorkers::default(),
         limits,
+        record_cap: config.record_cap,
         server_zip_cap: transport_policy.server_zip_bytes,
         totals,
+        ooxml: config.ooxml,
+        vlm_text_before_image: config.vlm_text_before_image,
+        vlm_allow_truncated_content: config.vlm_allow_truncated_content,
+        vlm_allow_remote_images: config.vlm_allow_remote_images,
+        vlm_allow_private_remote_images: config.vlm_allow_private_remote_images,
         events: config.progress_callback,
+        http_config: config.http_config,
         #[cfg(test)]
         test_http: config.test_http,
     };
@@ -1184,14 +1276,39 @@ fn worker_context(app: &App) -> WorkerContext {
         route: app.route.clone(),
         env_formula: app.env_formula,
         env_table: app.env_table,
+        env_image_analysis: app.env_image_analysis,
         official_page_concurrency: app.official_page_concurrency,
         office_workers: app.office_workers.clone(),
         raster_workers: app.raster_workers.clone(),
         events: app.events.clone(),
         server_zip_cap: app.server_zip_cap,
         totals: app.totals,
+        ooxml: app.ooxml,
+        vlm_text_before_image: app.vlm_text_before_image,
+        vlm_allow_truncated_content: app.vlm_allow_truncated_content,
+        vlm_allow_remote_images: app.vlm_allow_remote_images,
+        vlm_allow_private_remote_images: app.vlm_allow_private_remote_images,
+        http_config: app.http_config.clone(),
         #[cfg(test)]
         test_http: app.test_http.clone(),
+    }
+}
+/// Applies the operator-resolved formula/table/image-analysis pins over the per-request form
+/// fields. A `Some` pin wins; `None` leaves the request field in control.
+fn apply_operator_pins(
+    options: &mut OfficialPdfOptions,
+    formula: Option<bool>,
+    table: Option<bool>,
+    image_analysis: Option<bool>,
+) {
+    if let Some(value) = formula {
+        options.formula_enable = value;
+    }
+    if let Some(value) = table {
+        options.table_enable = value;
+    }
+    if let Some(value) = image_analysis {
+        options.image_analysis = value;
     }
 }
 fn apply_client_side(out: &mut Submit) {
@@ -1492,19 +1609,20 @@ async fn run_task(
     options.formula_enable = input.options.formula;
     options.table_enable = input.options.table;
     options.image_analysis = input.options.image;
-    if let Some(value) = app.env_formula {
-        options.formula_enable = value;
-    }
-    if let Some(value) = app.env_table {
-        options.table_enable = value;
-    }
-    let (prepared, warning) = prepare_with_warning(
+    apply_operator_pins(
+        &mut options,
+        app.env_formula,
+        app.env_table,
+        app.env_image_analysis,
+    );
+    let (prepared, warning) = prepare_with_warning_and_ooxml(
         source_bytes,
         kind,
         &options,
         &app.office_workers,
         &app.raster_workers,
         remaining(deadline)?,
+        app.ooxml,
     )
     .await?;
     if let Some(message) = warning {
@@ -1523,21 +1641,25 @@ async fn run_task(
         },
     );
     remaining(deadline)?;
-    let config = task_vlm_config(
-        {
-            let config = VlmHttpConfig::default();
-            #[cfg(test)]
-            let config = app.test_http.clone().unwrap_or(config);
-            config
-        },
-        input.options.server_url.as_deref(),
-    )
-    .map_err(|_| "task URL config: invalid server URL".to_owned())?;
+    // The base VLM transport config is the frozen startup snapshot; the worker never re-reads
+    // the ambient environment. The transport booleans resolved at startup apply on top.
+    let mut base_config = app.http_config.clone();
+    #[cfg(test)]
+    if let Some(test_http) = app.test_http.clone() {
+        base_config = test_http;
+    }
+    base_config.text_before_image = app.vlm_text_before_image;
+    base_config.allow_truncated_content = app.vlm_allow_truncated_content;
+    base_config.allow_remote_images = app.vlm_allow_remote_images;
+    base_config.allow_private_remote_images = app.vlm_allow_private_remote_images;
+    let config = task_vlm_config(base_config, input.options.server_url.as_deref())
+        .map_err(|_| "task URL config: invalid server URL".to_owned())?;
     let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
         app.official_page_concurrency,
         app.route.processing_window_size,
         config.max_concurrency,
-    );
+    )
+    .map_err(|error| format!("page concurrency: {error}"))?;
     let client = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         MinerUVlmClient::connect_for_task(
@@ -2318,7 +2440,7 @@ fn status_snapshot(app: &App, id: &str, record: &Record) -> serde_json::Value {
             .lock()
             .unwrap()
             .values()
-            .take(RECORD_CAP)
+            .take(app.record_cap)
             .filter(|other| {
                 other.sequence < record.sequence
                     && matches!(state_snapshot(other), TaskState::Pending)
@@ -3113,6 +3235,7 @@ mod tests {
             route: OfficialPdfOptions::default(),
             env_formula: None,
             env_table: None,
+            env_image_analysis: None,
             official_page_concurrency: 4,
             office_workers: OfficeWorkers::new().unwrap(),
             raster_workers: RasterWorkers::default(),
@@ -3121,6 +3244,12 @@ mod tests {
             totals: crate::document_limits::OfficialDocumentTotals::from_options(
                 &OfficialPdfOptions::default(),
             ),
+            ooxml: crate::command::service::OoxmlLimits::default_resolved(),
+            vlm_text_before_image: false,
+            vlm_allow_truncated_content: false,
+            vlm_allow_remote_images: false,
+            vlm_allow_private_remote_images: false,
+            http_config: VlmHttpConfig::default(),
             test_http: None,
         };
         let (sender, receiver) = oneshot::channel();
@@ -3948,6 +4077,7 @@ mod tests {
             route: OfficialPdfOptions::default(),
             env_formula: None,
             env_table: None,
+            env_image_analysis: None,
             official_page_concurrency: 4,
             concurrency: 1,
             retention: RETENTION,
@@ -3967,6 +4097,13 @@ mod tests {
                 text_total: TEXT_TOTAL_CAP,
                 fields: 32,
             },
+            record_cap: 32,
+            ooxml: crate::command::service::OoxmlLimits::default_resolved(),
+            vlm_text_before_image: false,
+            vlm_allow_truncated_content: false,
+            vlm_allow_remote_images: false,
+            vlm_allow_private_remote_images: false,
+            http_config: VlmHttpConfig::default(),
             test_http: None,
         };
         let permit = reserve(&app);
@@ -3975,6 +4112,32 @@ mod tests {
         assert!(app.records.lock().unwrap().is_empty());
         assert!(slots.try_acquire().is_ok());
         drop(held);
+    }
+
+    #[test]
+    fn operator_pins_override_per_request_form_fields() {
+        // A request field that says `true` is overridden by an operator `false` pin for
+        // formula, table, and image analysis alike.
+        let mut options = OfficialPdfOptions::default();
+        options.formula_enable = true;
+        options.table_enable = true;
+        options.image_analysis = true;
+        apply_operator_pins(&mut options, Some(false), Some(false), Some(false));
+        assert!(!options.formula_enable && !options.table_enable && !options.image_analysis);
+
+        // No pin leaves the request field in control.
+        let mut options = OfficialPdfOptions::default();
+        options.formula_enable = false;
+        options.table_enable = false;
+        options.image_analysis = false;
+        apply_operator_pins(&mut options, None, None, None);
+        assert!(!options.formula_enable && !options.table_enable && !options.image_analysis);
+
+        // A true pin forces true even when the request field says false.
+        let mut options = OfficialPdfOptions::default();
+        options.image_analysis = false;
+        apply_operator_pins(&mut options, None, None, Some(true));
+        assert!(options.image_analysis);
     }
 
     #[tokio::test]
@@ -4143,6 +4306,7 @@ mod tests {
                 route: OfficialPdfOptions::default(),
                 env_formula: None,
                 env_table: None,
+                env_image_analysis: None,
                 official_page_concurrency: 4,
                 office_workers: OfficeWorkers::new().unwrap(),
                 raster_workers: RasterWorkers::default(),
@@ -4151,6 +4315,12 @@ mod tests {
                 totals: crate::document_limits::OfficialDocumentTotals::from_options(
                     &OfficialPdfOptions::default(),
                 ),
+                ooxml: crate::command::service::OoxmlLimits::default_resolved(),
+                vlm_text_before_image: false,
+                vlm_allow_truncated_content: false,
+                vlm_allow_remote_images: false,
+                vlm_allow_private_remote_images: false,
+                http_config: VlmHttpConfig::default(),
                 test_http: None,
             },
             gate_record.clone(),
@@ -4387,6 +4557,7 @@ mod tests {
             route: OfficialPdfOptions::default(),
             env_formula: None,
             env_table: None,
+            env_image_analysis: None,
             official_page_concurrency: 4,
             office_workers: OfficeWorkers::new().unwrap(),
             raster_workers: RasterWorkers::default(),
@@ -4395,6 +4566,12 @@ mod tests {
             totals: crate::document_limits::OfficialDocumentTotals::from_options(
                 &OfficialPdfOptions::default(),
             ),
+            ooxml: crate::command::service::OoxmlLimits::default_resolved(),
+            vlm_text_before_image: false,
+            vlm_allow_truncated_content: false,
+            vlm_allow_remote_images: false,
+            vlm_allow_private_remote_images: false,
+            http_config: VlmHttpConfig::default(),
             test_http: None,
         };
         let guard = spawn_sync_worker(&none, context, guard, &None, "input".into()).unwrap_err();
@@ -5045,9 +5222,19 @@ mod tests {
                 .official_page_concurrency,
             4
         );
-        for value in [0, 9] {
+        // Zero and values above the tokio semaphore capacity are rejected; the removed 1..=8
+        // ceiling no longer clamps explicit values.
+        for value in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
             assert!(configured.clone().official_page_concurrency(value).is_err());
         }
+        assert_eq!(
+            configured
+                .clone()
+                .official_page_concurrency(9)
+                .unwrap()
+                .official_page_concurrency,
+            9
+        );
     }
 
     #[test]

@@ -53,7 +53,6 @@ pub enum VlmError {
 }
 
 /// Produces a bounded, safe-to-log representation of VLM transport data.
-#[allow(dead_code)] // Used by VLM transport implementations as they are added.
 pub(crate) fn sanitize_vlm_error_bytes(raw: &[u8], cap: usize) -> String {
     static DATA_URL: OnceLock<Regex> = OnceLock::new();
     static QUOTED_AUTHORIZATION: OnceLock<Regex> = OnceLock::new();
