@@ -169,10 +169,8 @@ fn job_limits(
         JOB_OBJECT_LIMIT_PROCESS_TIME, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     };
     let mut limits_config = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits_config.BasicLimitInformation.PerProcessUserTimeLimit = i64::try_from(
-        limits.process_time_seconds.saturating_mul(10_000_000),
-    )
-    .unwrap_or(i64::MAX);
+    limits_config.BasicLimitInformation.PerProcessUserTimeLimit =
+        i64::try_from(limits.process_time_seconds.saturating_mul(10_000_000)).unwrap_or(i64::MAX);
     limits_config.BasicLimitInformation.PerJobUserTimeLimit =
         i64::try_from(limits.job_time_seconds.saturating_mul(10_000_000)).unwrap_or(i64::MAX);
     limits_config.BasicLimitInformation.ActiveProcessLimit = limits.active_process_limit;
@@ -182,7 +180,8 @@ fn job_limits(
         | JOB_OBJECT_LIMIT_JOB_MEMORY
         | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
         | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    limits_config.ProcessMemoryLimit = usize::try_from(limits.process_memory_bytes).unwrap_or(usize::MAX);
+    limits_config.ProcessMemoryLimit =
+        usize::try_from(limits.process_memory_bytes).unwrap_or(usize::MAX);
     limits_config.JobMemoryLimit = usize::try_from(limits.job_memory_bytes).unwrap_or(usize::MAX);
     limits_config
 }
