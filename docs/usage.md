@@ -21,6 +21,24 @@ cargo build --release
 
 可执行文件为 `target/release/mineru-vlm`。渲染不依赖 PDFium 或其他本地/native PDF 运行时。
 
+## 快速开始
+
+用三个环境变量配置 VLM 服务：
+
+| 变量 | 含义 | 示例 |
+| --- | --- | --- |
+| `MINERU_VL_SERVER` | VLM 服务基础 URL | `https://host/v1` |
+| `MINERU_VL_MODEL_NAME` | 模型 ID | `model-id` |
+| `MINERU_VL_API_KEY` | Bearer 令牌 | `your-key` |
+
+然后解析 PDF：
+
+```sh
+mineru -p input.pdf -o out/
+```
+
+你的 markdown 会出现在 `out/` 中。也可用 `--api-key` 传入 Bearer 令牌，但应优先使用环境变量：命令行中的密钥会出现在进程列表中。这些变量同样列于下文的[环境变量表](#环境变量)。
+
 ## 服务与模型
 
 先向服务查询模型；从返回 JSON 的 `data[].id` 选择一个值作为 `--model`：
@@ -319,6 +337,9 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_VLM_MAX_REDIRECTS` | `3` | 重定向上限。 |
 | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP 响应上限。 |
 | `MINERU_VL_DEBUG_ENABLE` | 关闭 | VLM 请求调试标记（严格 `true`/`false`）。 |
+| `MINERU_VL_SERVER` | 无 | VLM 服务基础 URL（如 `https://host/v1`）；`mineru` 直接模式与 `mineru-api` 必填。 |
+| `MINERU_VL_MODEL_NAME` | 无 | 模型 ID；`mineru` 直接模式与 `mineru-api` 必填。 |
+| `MINERU_VL_API_KEY` | 无 | VLM 服务的 Bearer 令牌。 |
 
 对规范 CLI，每个数值与布尔变量均为严格解析：布尔只接受不区分大小写的 `true`/`false`（`1`、`yes`、`on` 会报错，不再静默视为关闭）；数值的非法、非有限、不应为零却为零、溢出或平台不可表示的值会在任何网络/输出工作前失败，不再回落到默认值。（服务启动路径在服务车道落地前保留旧的回落行为；其并发配置对非正值仍然启动失败。）
 
@@ -428,6 +449,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 需要认证时，在构造 `MinerUClient` 前为可变 `ClientConfig` 的公开 `bearer_token` 设置 `BearerToken::new(...)`。`check_model()` 会请求模型列表并确认配置的模型在其中。
+
+## Python 和 Node.js 绑定
+
+`mineru-rs` Python 软件包和 `@alexsun-top/mineru` Node.js 软件包封装同一个解析器。两者都提供 `parse()`（在内存中返回 markdown）和 `run()`（写入完整输出树）。
+
+### Python
+
+```sh
+uv add mineru-rs   # 或：pip install mineru-rs
+```
+
+```python
+import asyncio
+from pathlib import Path
+
+import mineru_rs
+
+
+async def main() -> None:
+    result = await mineru_rs.parse("input.pdf")
+    Path("out.md").write_text(result.markdown, encoding="utf-8")
+
+
+asyncio.run(main())
+```
+
+`parse()` 在内存中返回 markdown 字符串，由调用方决定如何持久化。`run()` 把完整输出树（markdown、JSON、资产）写入输出目录：
+
+```python
+import asyncio
+
+import mineru_rs
+
+
+async def main() -> None:
+    await mineru_rs.run("input.pdf", "out/")
+
+
+asyncio.run(main())
+```
+
+两者都接受与 CLI 相同的关键字选项：`api_url`、`method`（`auto`/`txt`/`ocr`）、`backend`（`vlm-http-client`）、`effort`（`medium`/`high`）、`lang`（默认 `ch`）、`url`（直接 VLM 服务）、`start`、`end`、`formula`、`table`、`image_analysis` 和 `client_side_output_generation`。
+
+### Node.js
+
+```sh
+pnpm add @alexsun-top/mineru   # 或：npm install @alexsun-top/mineru
+```
+
+```js
+const fs = require('fs')
+const mineru = require('@alexsun-top/mineru')
+
+async function main() {
+  const { markdown } = await mineru.parse({ path: 'input.pdf' })
+  fs.writeFileSync('out.md', markdown)
+}
+
+main()
+```
+
+`parse()` 解析为 `{ markdown, warnings }`；markdown 字符串在内存中返回，由调用方决定如何持久化。`run()` 写入完整输出树并解析为 `{ warnings }`：
+
+```js
+const mineru = require('@alexsun-top/mineru')
+
+mineru.run({ path: 'input.pdf', output: 'out/' }).then(({ warnings }) => {
+  if (warnings.length) console.warn(warnings)
+})
+```
+
+选项以 camelCase 命名镜像 CLI：`apiUrl`、`method`、`backend`、`effort`、`lang`、`url`、`start`、`end`、`formula`、`table`、`imageAnalysis` 和 `clientSideOutputGeneration`。
 
 ## 默认资源限制
 

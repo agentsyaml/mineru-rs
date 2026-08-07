@@ -21,6 +21,27 @@ cargo build --release
 
 The executable is `target/release/mineru-vlm`. Rendering does not depend on PDFium or another local/native PDF runtime.
 
+## Quickstart
+
+Configure the VLM service with three environment variables:
+
+| Variable | Meaning | Example |
+| --- | --- | --- |
+| `MINERU_VL_SERVER` | VLM service base URL | `https://host/v1` |
+| `MINERU_VL_MODEL_NAME` | Model ID | `model-id` |
+| `MINERU_VL_API_KEY` | Bearer token | `your-key` |
+
+Then parse a PDF:
+
+```sh
+mineru -p input.pdf -o out/
+```
+
+Your markdown appears in `out/`. `--api-key` can also pass the Bearer token,
+but prefer the environment variable: a key on the command line is visible in
+the process list. These variables also appear in the [environment table](#environment-variables)
+below.
+
 ## Service and model
 
 Query the service for models first; choose a value from `data[].id` in the returned JSON as `--model`:
@@ -319,6 +340,9 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_VLM_MAX_REDIRECTS` | `3` | Redirect cap. |
 | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP response cap. |
 | `MINERU_VL_DEBUG_ENABLE` | Off | VLM request debug flag (strict `true`/`false`). |
+| `MINERU_VL_SERVER` | None | VLM service base URL (for example, `https://host/v1`); required by `mineru` direct mode and `mineru-api`. |
+| `MINERU_VL_MODEL_NAME` | None | Model ID; required by `mineru` direct mode and `mineru-api`. |
+| `MINERU_VL_API_KEY` | None | Bearer token for the VLM service. |
 
 For the canonical CLI, every numeric and boolean variable is strict: booleans accept only case-insensitive `true`/`false` (`1`, `yes`, `on` now fail instead of silently meaning off); malformed, non-finite, zero-where-invalid, overflowing, or unrepresentable numeric values fail before any network or output work rather than falling back. (The service startup keeps its legacy fallbacks until the service lane lands; its concurrency setting still fails on non-positive values.)
 
@@ -428,6 +452,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 When authentication is required, set `BearerToken::new(...)` on the public `bearer_token` of a mutable `ClientConfig` before constructing `MinerUClient`. `check_model()` requests the model list and confirms that it contains the configured model.
+
+## Python and Node.js bindings
+
+The `mineru-rs` Python package and the `@alexsun-top/mineru` Node.js package
+wrap the same parser. Both expose a `parse()` that returns markdown in memory,
+and a `run()` that writes the full output tree.
+
+### Python
+
+```sh
+uv add mineru-rs   # or: pip install mineru-rs
+```
+
+```python
+import asyncio
+from pathlib import Path
+
+import mineru_rs
+
+
+async def main() -> None:
+    result = await mineru_rs.parse("input.pdf")
+    Path("out.md").write_text(result.markdown, encoding="utf-8")
+
+
+asyncio.run(main())
+```
+
+`parse()` returns the markdown string in memory, so the caller decides how to
+persist it. `run()` writes the full output tree (markdown, JSON, assets) to an
+output directory:
+
+```python
+import asyncio
+
+import mineru_rs
+
+
+async def main() -> None:
+    await mineru_rs.run("input.pdf", "out/")
+
+
+asyncio.run(main())
+```
+
+Both accept the same keyword options as the CLI: `api_url`, `method`
+(`auto`/`txt`/`ocr`), `backend` (`vlm-http-client`), `effort`
+(`medium`/`high`), `lang` (default `ch`), `url` (direct VLM server), `start`,
+`end`, `formula`, `table`, `image_analysis`, and
+`client_side_output_generation`.
+
+### Node.js
+
+```sh
+pnpm add @alexsun-top/mineru   # or: npm install @alexsun-top/mineru
+```
+
+```js
+const fs = require('fs')
+const mineru = require('@alexsun-top/mineru')
+
+async function main() {
+  const { markdown } = await mineru.parse({ path: 'input.pdf' })
+  fs.writeFileSync('out.md', markdown)
+}
+
+main()
+```
+
+`parse()` resolves to `{ markdown, warnings }`; the markdown string is returned
+in memory, so the caller decides how to persist it. `run()` writes the full
+output tree and resolves to `{ warnings }`:
+
+```js
+const mineru = require('@alexsun-top/mineru')
+
+mineru.run({ path: 'input.pdf', output: 'out/' }).then(({ warnings }) => {
+  if (warnings.length) console.warn(warnings)
+})
+```
+
+Options mirror the CLI using camelCase names: `apiUrl`, `method`, `backend`,
+`effort`, `lang`, `url`, `start`, `end`, `formula`, `table`, `imageAnalysis`,
+and `clientSideOutputGeneration`.
 
 ## Default resource limits
 

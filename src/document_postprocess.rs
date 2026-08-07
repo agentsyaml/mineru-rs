@@ -60,6 +60,7 @@ pub(crate) fn build(mut pages: Vec<PageResult>) -> Document {
         content_list: middle_json::content_list(&pages),
         pages,
         assets: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 

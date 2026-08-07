@@ -13,7 +13,7 @@ use crate::{
     OfficeWorkers, ProgressCallback, ProgressEvent, RemoteApiDocument, RemoteApiOptions,
     normalize_remote_language, sanitize_event_text, selected_document_pages,
 };
-use clap::{ArgAction, Parser, error::ErrorKind};
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -173,6 +173,7 @@ pub struct RunOptions {
     pub path: PathBuf,
     pub output: PathBuf,
     pub api_url: Option<String>,
+    pub api_key: Option<String>,
     pub method: String,
     pub backend: String,
     pub effort: String,
@@ -192,6 +193,7 @@ impl RunOptions {
             path: path.into(),
             output: output.into(),
             api_url: None,
+            api_key: None,
             method: "auto".into(),
             backend: "vlm-http-client".into(),
             effort: "medium".into(),
@@ -408,6 +410,10 @@ fn combined_command_events(
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .push(&format!("office warning: {document}"), message),
+                ProgressEvent::VlmWarning { message } => collected
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push("vlm warning", message),
                 ProgressEvent::ApiWarning { label, message } => collected
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -537,7 +543,7 @@ async fn run_core(
                 base_url: options.url,
                 server_option_label: "--url",
                 model: None,
-                api_key: None,
+                api_key: options.api_key.clone(),
                 page_start: Some(options.start),
                 page_end: options.end,
                 // Formula/table/image-analysis resolve through CoreOverrides with strict
@@ -625,6 +631,9 @@ async fn run_api(
         server_url: options
             .url
             .or_else(|| context.environment.string("MINERU_VL_SERVER")),
+        api_key: options
+            .api_key
+            .or_else(|| context.environment.string("MINERU_VL_API_KEY")),
         start,
         end,
         formula: route.formula_enable,
@@ -1024,9 +1033,10 @@ fn has_pdf_input(path: &Path) -> bool {
 #[command(
     about = "Parse PDF, image, and Office documents with the supported external VLM-HTTP subset (vlm-http-client only; no local engines).",
     version,
-    disable_version_flag = true
+    disable_version_flag = true,
+    after_help = "Environment:\n  MINERU_VL_SERVER      MinerU VLM service base URL, e.g. https://host/v1\n  MINERU_VL_MODEL_NAME  model id served by that endpoint\n  MINERU_VL_API_KEY     Bearer token; preferred over --api-key\n\nFull reference: docs/usage.en.md"
 )]
-struct Cli {
+pub struct Cli {
     #[arg(short = 'v', long, action = ArgAction::Version)]
     version: Option<bool>,
     #[arg(short = 'p', long)]
@@ -1035,6 +1045,8 @@ struct Cli {
     output: PathBuf,
     #[arg(long)]
     api_url: Option<String>,
+    #[arg(long)]
+    api_key: Option<String>,
     #[arg(short = 'm', long, value_parser = ["auto", "txt", "ocr"], default_value = "auto")]
     method: String,
     #[arg(short = 'b', long, value_parser = ["vlm-http-client"], default_value = "vlm-http-client")]
@@ -1207,12 +1219,44 @@ struct Cli {
     office_job_time_seconds: Option<String>,
 }
 
+/// uv-style layered help palette: bold bright-green usage line, bold cyan section
+/// headers (Usage/Arguments/Options), bright-green flag names, italic gray
+/// placeholders. Everything else keeps clap's default `Styles::styled()` palette
+/// (e.g. bold red errors), so `error.print()` stays readable too.
+fn cli_styles() -> clap::builder::Styles {
+    use clap::builder::styling::{AnsiColor, Style, Styles};
+    Styles::styled()
+        .usage(
+            Style::new()
+                .bold()
+                .fg_color(Some(AnsiColor::BrightGreen.into())),
+        )
+        .header(
+            Style::new()
+                .bold()
+                .fg_color(Some(AnsiColor::BrightCyan.into())),
+        )
+        .literal(Style::new().fg_color(Some(AnsiColor::BrightGreen.into())))
+        .placeholder(
+            Style::new()
+                .italic()
+                .fg_color(Some(AnsiColor::BrightBlack.into())),
+        )
+}
+
+/// The mineru CLI `clap::Command` with the uv-style help/error palette applied.
+/// `ColorChoice` stays `Auto`: TTYs get color, piped output stays plain.
+pub fn cli_command() -> clap::Command {
+    Cli::command().styles(cli_styles())
+}
+
 impl From<Cli> for RunOptions {
     fn from(cli: Cli) -> Self {
         Self {
             path: cli.path,
             output: cli.output,
             api_url: cli.api_url,
+            api_key: cli.api_key,
             method: cli.method,
             backend: cli.backend,
             effort: cli.effort,
@@ -1309,8 +1353,22 @@ impl CliOutput {
 #[doc(hidden)]
 pub async fn run_cli(argv: Vec<OsString>, context: RunContext) -> i32 {
     let args = std::iter::once(OsString::from("mineru")).chain(argv);
-    let (options, overrides, cli_log_level) = match Cli::try_parse_from(args) {
+    // Same as `Cli::try_parse_from`, but on the styled command so help/version/errors
+    // all render with the uv-style palette (ColorChoice::Auto: TTY-only coloring).
+    let (options, overrides, cli_log_level) = match cli_command()
+        .try_get_matches_from(args)
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+    {
         Ok(cli) => {
+            if cli
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty())
+            {
+                eprintln!(
+                    "warning: --api-key is visible in the process list and shell history; prefer MINERU_VL_API_KEY"
+                );
+            }
             let overrides = RunOverrides {
                 document_limits: crate::DocumentLimitOverrides {
                     max_input_bytes: cli.max_input_bytes.clone(),
@@ -1644,6 +1702,8 @@ mod tests {
             "b",
             "--api-url",
             "http://api",
+            "--api-key",
+            "secret",
             "--method",
             "ocr",
             "--effort",
@@ -1679,6 +1739,7 @@ mod tests {
         assert_eq!(options.path, PathBuf::from("a"));
         assert_eq!(options.output, PathBuf::from("b"));
         assert_eq!(options.api_url.as_deref(), Some("http://api"));
+        assert_eq!(options.api_key.as_deref(), Some("secret"));
         assert_eq!(options.method, "ocr");
         assert_eq!(options.backend, "vlm-http-client");
         assert_eq!(options.effort, "high");

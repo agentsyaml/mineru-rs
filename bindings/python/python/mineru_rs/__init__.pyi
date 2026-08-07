@@ -16,6 +16,12 @@ class RunReport:
     warnings: List[str]
 
 
+@dataclass(frozen=True)
+class ParseResult:
+    markdown: str
+    warnings: List[str]
+
+
 def canonical_stem(value: str) -> str: ...
 
 
@@ -45,3 +51,21 @@ async def run(
     image_analysis: bool = True,
     client_side_output_generation: bool = False,
 ) -> RunReport: ...
+
+
+async def parse(
+    path: Union[str, PathLike[str]],
+    *,
+    api_url: Union[str, None] = None,
+    method: Method = "auto",
+    backend: Backend = "vlm-http-client",
+    effort: Effort = "medium",
+    lang: str = "ch",
+    url: Union[str, None] = None,
+    start: int = 0,
+    end: Union[int, None] = None,
+    formula: bool = True,
+    table: bool = True,
+    image_analysis: bool = True,
+    client_side_output_generation: bool = False,
+) -> ParseResult: ...

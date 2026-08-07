@@ -51,7 +51,7 @@ pub(crate) struct MineruApiClient {
 impl MineruApiClient {
     #[cfg(test)]
     pub(crate) fn new(base_url: &str) -> Result<Self, String> {
-        Self::with_connect_timeout(base_url, Duration::from_secs(10))
+        Self::with_connect_timeout(base_url, Duration::from_secs(10), None)
     }
 
     /// Crate-private construction carrying the frozen Phase-1B transport timing.
@@ -61,8 +61,9 @@ impl MineruApiClient {
         acquisition: Duration,
         send: Duration,
         interval: Duration,
+        api_key: Option<String>,
     ) -> Result<Self, String> {
-        let mut client = Self::with_connect_timeout(base_url, connect_timeout)?;
+        let mut client = Self::with_connect_timeout(base_url, connect_timeout, api_key)?;
         client.timing = Timing {
             acquisition,
             send,
@@ -71,7 +72,11 @@ impl MineruApiClient {
         Ok(client)
     }
 
-    fn with_connect_timeout(base_url: &str, connect_timeout: Duration) -> Result<Self, String> {
+    fn with_connect_timeout(
+        base_url: &str,
+        connect_timeout: Duration,
+        api_key: Option<String>,
+    ) -> Result<Self, String> {
         let base = normalize_api_url(base_url);
         if base.is_empty() {
             return Err("API URL is empty".into());
@@ -90,12 +95,29 @@ impl MineruApiClient {
         }
         let request_port = parsed.port().map(|port| port.to_string());
         let redirect_origin = parsed.clone();
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .redirect(redirect_policy(redirect_origin))
             .connect_timeout(connect_timeout)
             // Ambient system proxies (common on Windows) hijack loopback/127.0.0.1 API traffic
             // and answer 502/504, breaking local MinerU servers. API requests must go direct.
-            .no_proxy()
+            .no_proxy();
+        // Trim before both the emptiness check and the header build (a trailing newline from a
+        // key file must not silently disable auth). An unrepresentable header value fails loud
+        // instead of sending an unauthenticated request, mirroring the direct route's validation.
+        if let Some(key) = api_key
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+        {
+            let value =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
+                    "invalid API key: must be nonempty and contain no control characters"
+                        .to_string()
+                })?;
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+            builder = builder.default_headers(headers);
+        }
+        let client = builder
             .build()
             .map_err(|_| "unable to construct API client".to_string())?;
         Ok(Self {
@@ -1221,6 +1243,47 @@ mod tests {
             },
         );
         assert!(client.submit(&RemoteOptions::default(), &[]).await.is_ok());
+    }
+    #[tokio::test]
+    async fn api_key_is_sent_as_bearer_auth_header_only_when_configured() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+        let record = seen.clone();
+        let base = server(Router::new().route(
+            "/tasks",
+            post(move |headers: HeaderMap| {
+                let record = record.clone();
+                async move {
+                    record.lock().unwrap().push(
+                        headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned),
+                    );
+                    let base = format!("http://{}", headers["host"].to_str().unwrap());
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(json!({"task_id":"id", "status_url":format!("{base}/status"), "result_url":format!("{base}/result")})),
+                    )
+                }
+            }),
+        ))
+        .await;
+        let keyed = MineruApiClient::new_with_transport(
+            &base,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            Some("secret".into()),
+        )
+        .unwrap();
+        assert!(keyed.submit(&RemoteOptions::default(), &[]).await.is_ok());
+        let plain = MineruApiClient::new(&base).unwrap();
+        assert!(plain.submit(&RemoteOptions::default(), &[]).await.is_ok());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some("Bearer secret".into()), None]
+        );
     }
     #[tokio::test]
     async fn whole_operation_timeout_cancels_progressing_operation_at_its_deadline() {

@@ -47,6 +47,9 @@ pub enum ProgressEvent {
         document: String,
         message: String,
     },
+    VlmWarning {
+        message: String,
+    },
     ApiSubmitted {
         label: String,
     },

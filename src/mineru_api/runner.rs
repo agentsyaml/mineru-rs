@@ -137,6 +137,7 @@ async fn run_documents_impl(
         table: options.table,
         image_analysis: options.image_analysis,
         server_url,
+        api_key: options.api_key.clone(),
         start: options.start,
         end: options.end,
         client_side: false,
@@ -236,6 +237,7 @@ async fn run_core(
         service.api_acquisition_timeout,
         service.api_send_timeout,
         service.api_poll_interval,
+        options.api_key.clone(),
     )?);
     let health = client.health().await?;
     let tasks = planning::plan_tasks(options.backend, &documents, health.processing_window_size)?;

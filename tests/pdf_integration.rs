@@ -57,3 +57,25 @@ async fn parses_minimal_fixture_against_local_openai_mock() {
     assert_eq!(requests.0.load(Ordering::Relaxed), 1);
     assert_eq!(requests.1.load(Ordering::Relaxed), 1);
 }
+
+#[tokio::test]
+async fn systemic_service_failure_aborts_instead_of_an_empty_document() {
+    // Bind and drop the listener so the port is closed: every completion is a transport error,
+    // exactly like a dead server or a wrong key. The first-window failure must be a hard
+    // error, never an empty placeholder document.
+    let address = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let client =
+        MinerUClient::new(ClientConfig::new(format!("http://{address}"), "test-model").unwrap())
+            .unwrap();
+    let error = client
+        .parse_pdf(
+            PdfInput::Path("tests/fixtures/pdf/minimal.pdf".into()),
+            ParseOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, mineru::Error::Page { .. }), "{error:?}");
+}

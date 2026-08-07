@@ -15,6 +15,32 @@ Document-limit controls and their CLI/API applicability are summarized in the us
 
 Requires Rust 1.89 or newer.
 
+## Quickstart
+
+Configure the VLM service with three environment variables:
+
+| Variable | Meaning | Example |
+| --- | --- | --- |
+| `MINERU_VL_SERVER` | VLM service base URL | `https://host/v1` |
+| `MINERU_VL_MODEL_NAME` | Model ID | `model-id` |
+| `MINERU_VL_API_KEY` | Bearer token | `your-key` |
+
+Install the `mineru` command with Cargo, pip, or npm:
+
+```sh
+cargo install mineru            # Rust
+pip install mineru-rs           # Python
+npm install @alexsun-top/mineru # Node.js
+```
+
+Then parse a document:
+
+```sh
+mineru -p input.pdf -o out/
+```
+
+Your markdown appears in `out/`.
+
 ## Rust library
 
 ```sh
@@ -38,6 +64,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Python
+
+Wheels support CPython 3.9 and newer. Install with `uv` or pip:
+
+```sh
+uv add mineru-rs
+# or: pip install mineru-rs
+```
+
+`parse()` returns the markdown string in memory; save it yourself:
+
+```python
+import asyncio
+from pathlib import Path
+
+import mineru_rs
+
+
+async def main() -> None:
+    result = await mineru_rs.parse("input.pdf")
+    Path("out.md").write_text(result.markdown, encoding="utf-8")
+
+
+asyncio.run(main())
+```
+
+`run()` writes the full output tree to an output directory instead (see the
+[English usage guide](docs/usage.en.md)). The wheel installs two equivalent
+console commands, `mineru` and `mineru-rs`; prefer `mineru-rs` when the
+upstream Python `mineru` package is also installed, since both provide a
+`mineru` entry point and the one earlier on `PATH` wins. Releases are wheels
+only; there is no sdist or source fallback for unsupported platforms or PyPy.
+
+## Node.js
+
+Requires Node.js 18 or newer. Install with `pnpm` or npm:
+
+```sh
+pnpm add @alexsun-top/mineru
+# or: npm install @alexsun-top/mineru
+```
+
+```js
+const fs = require('fs')
+const mineru = require('@alexsun-top/mineru')
+
+async function main() {
+  const { markdown } = await mineru.parse({ path: 'input.pdf' })
+  fs.writeFileSync('out.md', markdown)
+}
+
+main()
+```
+
+`run({ path, output })` writes the full output tree to `output` instead (see
+the [English usage guide](docs/usage.en.md)). The root package installs two
+equivalent binaries, `mineru` and `mineru-rs`, both pointing at
+`bin/mineru.js`; prefer `mineru-rs` if another `mineru` command is already on
+`PATH`.
+
 ## CLI and API server
 
 ```sh
@@ -53,56 +139,16 @@ conversion helper, build with `--features office`:
 cargo install mineru --features office
 ```
 
+`--api-key` can pass a Bearer token, but prefer `MINERU_VL_API_KEY`: a key on
+the command line is visible in the process list.
+
 See the [Chinese usage guide](docs/usage.md) or [English usage guide](docs/usage.en.md)
 for service configuration and complete options.
 
-## Python
+## Examples
 
-Wheels support CPython 3.9 and newer:
-
-```sh
-pip install mineru-rs
-```
-
-The wheel installs two equivalent console commands, `mineru` and `mineru-rs`,
-both entering `mineru_rs._cli:main`. The `mineru-rs` name makes
-`uvx mineru-rs --help` work without a local checkout. Prefer `mineru-rs` when
-the upstream Python `mineru` package is also installed, since both provide a
-`mineru` entry point and the one earlier on `PATH` wins.
-
-```python
-import mineru_rs
-
-print(mineru_rs.canonical_stem("a bad/pdf"))
-mineru_rs.validate_pdf_options(0, None, True, True, True)
-```
-
-Python currently exposes only canonical stem handling and PDF-option
-validation. It does not expose asynchronous document parsing. Releases are
-wheels only; there is no sdist or source fallback for unsupported platforms or
-PyPy.
-
-## Node.js
-
-```sh
-npm install @alexsun-top/mineru
-```
-
-The root package installs two equivalent binaries, `mineru` and `mineru-rs`,
-both pointing at `bin/mineru.js`, so `node_modules/.bin/mineru-rs` is available
-after install. The six platform packages intentionally ship no binary. Prefer
-`mineru-rs` if another `mineru` command is already on `PATH`.
-
-```js
-const mineru = require('@alexsun-top/mineru')
-
-console.log(mineru.canonicalStem('a bad/pdf'))
-mineru.validatePdfOptions(0, null, true, true, true)
-```
-
-Node.js currently exposes only canonical stem handling and PDF-option
-validation. It does not expose asynchronous document parsing. Node.js 18 or
-newer is required.
+- [examples/python-uv](examples/python-uv) — Python with `uv`
+- [examples/node-pnpm](examples/node-pnpm) — Node.js with `pnpm`
 
 ## License
 

@@ -323,6 +323,7 @@ fn format_event(event: ProgressEvent) -> (Severity, &'static str, String, Option
             Some(clean(message)),
             true,
         ),
+        VlmWarning { message } => (Severity::Warning, "vlm warning", clean(message), None, true),
         ApiSubmitted { label } => (Severity::Info, "api submitted", clean(label), None, false),
         ApiPending {
             label,
@@ -364,7 +365,9 @@ pub(crate) fn event_severity(event: &ProgressEvent) -> Severity {
         | ProgressEvent::RequestFailed { .. }
         | ProgressEvent::DocumentFailed { .. }
         | ProgressEvent::ApiFailed { .. } => Severity::Error,
-        ProgressEvent::OfficeWarning { .. } | ProgressEvent::ApiWarning { .. } => Severity::Warning,
+        ProgressEvent::OfficeWarning { .. }
+        | ProgressEvent::VlmWarning { .. }
+        | ProgressEvent::ApiWarning { .. } => Severity::Warning,
         _ => Severity::Info,
     }
 }

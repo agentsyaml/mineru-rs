@@ -189,6 +189,8 @@ async fn completion_error_object_wins_over_crafted_choices() {
     })
     .await
     .unwrap();
+    // The legacy predict path stays strict: the error object is a protocol error and the
+    // crafted choices payload must not leak through.
     assert!(matches!(
         client.predict(VlmRequest::default()).await,
         Err(VlmError::Protocol { .. })
@@ -384,7 +386,7 @@ async fn body_contract_covers_prompts_images_sampling_and_priority() {
 }
 
 #[tokio::test]
-async fn completion_protocol_finish_policy_and_end_token_are_strict() {
+async fn completion_protocol_finish_policy_and_end_token_are_strict_on_legacy_path() {
     let replies = Arc::new(tokio::sync::Mutex::new(vec![
         json!({"choices":[]}),
         json!({"choices":[{"finish_reason":"stop","message":{"content":7}}]}),
@@ -402,6 +404,8 @@ async fn completion_protocol_finish_policy_and_end_token_are_strict() {
         }),
     );
     let c = client(serve(app).await).await;
+    // The legacy predict path keeps strict protocol errors: missing choices, non-string
+    // content, and a "length" finish without allow_truncated_content all fail loudly.
     for _ in 0..3 {
         assert!(matches!(
             c.predict(VlmRequest::default()).await,
@@ -470,7 +474,7 @@ async fn retries_once_without_sleep_and_caps_response() {
 }
 
 #[tokio::test]
-async fn retries_unexpected_chat_finish_reason_once_then_succeeds() {
+async fn unexpected_finish_reason_is_strict_without_retry() {
     let hits = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
         "/v1/chat/completions",
@@ -498,12 +502,17 @@ async fn retries_unexpected_chat_finish_reason_once_then_succeeds() {
     })
     .await
     .unwrap();
-    assert_eq!(c.predict(VlmRequest::default()).await.unwrap(), "ok");
-    assert_eq!(hits.load(Ordering::Relaxed), 2);
+    // The legacy path is strict: an unexpected finish reason is a protocol error and is no
+    // longer retried (the retry branch was removed), so no second request is sent.
+    assert!(matches!(
+        c.predict(VlmRequest::default()).await,
+        Err(VlmError::Protocol { .. })
+    ));
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
-async fn chat_retry_budget_is_shared_by_transport_and_finish_reason_retries() {
+async fn transport_retry_budget_applies_without_finish_reason_retries() {
     let hits = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
         "/v1/chat/completions",
@@ -536,15 +545,17 @@ async fn chat_retry_budget_is_shared_by_transport_and_finish_reason_retries() {
     })
     .await
     .unwrap();
+    // The single transport retry is consumed by the 429; the strict content_filter reply is a
+    // protocol error (no retry), so the budget is not exhausted on finish-reason retries.
     assert!(matches!(
         c.predict(VlmRequest::default()).await,
-        Err(VlmError::Protocol { operation: "chat", message }) if message == "unexpected finish reason"
+        Err(VlmError::Protocol { .. })
     ));
     assert_eq!(hits.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
-async fn unexpected_chat_finish_reason_retry_is_bounded() {
+async fn unexpected_finish_reason_does_not_retry() {
     let hits = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
         "/v1/chat/completions",
@@ -571,9 +582,9 @@ async fn unexpected_chat_finish_reason_retry_is_bounded() {
     .unwrap();
     assert!(matches!(
         c.predict(VlmRequest::default()).await,
-        Err(VlmError::Protocol { operation: "chat", message }) if message == "unexpected finish reason"
+        Err(VlmError::Protocol { .. })
     ));
-    assert_eq!(hits.load(Ordering::Relaxed), 2);
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
 }
 
 fn sse_response(chunks: Vec<&'static [u8]>) -> Response {

@@ -62,6 +62,10 @@ pub struct Document {
     pub middle_json: Value,
     pub content_list: Value,
     pub assets: Vec<Asset>,
+    /// Recoverable per-page/per-block failures surfaced during direct parsing. Never fatal;
+    /// consumers should display these as warnings, not abort the document.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageResult {
@@ -189,7 +193,7 @@ pub struct OutputManifest {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockKind, NormalizedBbox, PageRange, ParseOptions};
+    use super::{BlockKind, Document, NormalizedBbox, PageRange, ParseOptions};
 
     #[test]
     fn rejects_invalid_ranges_and_boxes() {
@@ -209,5 +213,22 @@ mod tests {
             serde_json::to_string(&BlockKind::new(BlockKind::TEXT)).unwrap(),
             "\"text\""
         );
+    }
+
+    #[test]
+    fn document_round_trips_without_warnings_field() {
+        let value = serde_json::json!({
+            "pages": [],
+            "markdown": "# empty",
+            "middle_json": {},
+            "content_list": [],
+            "assets": []
+        });
+        let document: Document = serde_json::from_value(value).unwrap();
+        assert!(document.warnings.is_empty());
+        let round_tripped: Document =
+            serde_json::from_value(serde_json::to_value(&document).unwrap()).unwrap();
+        assert_eq!(round_tripped.warnings, document.warnings);
+        assert_eq!(round_tripped.markdown, "# empty");
     }
 }

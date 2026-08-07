@@ -247,6 +247,15 @@ fn handle_progress(state: &mut State, scope: CommandScope, event: ProgressEvent,
             }
             update_overview(state);
         }
+        ProgressEvent::VlmWarning { message } => {
+            if !visible {
+                return;
+            }
+            state.warnings = state.warnings.saturating_add(1);
+            print_status(state, "! Warning", "1;33", &clean(&message));
+            update_activity(state, Activity::Warning, &clean(&message));
+            update_overview(state);
+        }
         ProgressEvent::ApiWarning { label, message } => {
             if !visible {
                 return;
@@ -880,6 +889,27 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?}: {text}");
         }
+    }
+
+    #[test]
+    fn vlm_warning_renders_as_warning_and_counts() {
+        let term = TestTerm::with_width(96);
+        let renderer = renderer(term.clone());
+        let scope = CommandScope::Document(DocumentId(1));
+        renderer.handle(CommandEvent::RunPlanned {
+            documents: 1,
+            api_tasks: 0,
+        });
+        renderer.handle(CommandEvent::Progress {
+            scope,
+            event: ProgressEvent::VlmWarning {
+                message: "malformed layout reply".into(),
+            },
+        });
+        renderer.handle(CommandEvent::RunCompleted);
+        let text = term.text();
+        assert!(text.contains("! Warning  malformed layout reply"), "{text}");
+        assert!(text.contains("1 warning"), "{text}");
     }
 
     #[test]

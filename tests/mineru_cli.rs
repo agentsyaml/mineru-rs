@@ -338,6 +338,7 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
             "-p, --path <PATH>",
             "-o, --output <OUTPUT>",
             "--api-url <API_URL>",
+            "--api-key <API_KEY>",
             "-m, --method <METHOD>",
             "-b, --backend <BACKEND>",
             "--effort <EFFORT>",
@@ -442,6 +443,74 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
             && !help.contains("--server-url")
             && !help.contains("--model")
     );
+}
+
+#[test]
+#[ignore = "CLI process contract e2e"]
+fn help_documents_environment_variables() {
+    let output = mineru().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("Environment:"));
+    assert!(help.contains("MINERU_VL_SERVER"));
+    assert!(help.contains("MINERU_VL_MODEL_NAME"));
+    assert!(help.contains("MINERU_VL_API_KEY"));
+    assert!(help.contains("preferred over --api-key"));
+    assert!(help.contains("docs/usage.en.md"));
+}
+
+#[test]
+fn help_styles_render_ansi_only_when_color_is_enabled() {
+    // Forced color (TTY-equivalent): the styled help carries ANSI escapes and the
+    // uv-style layered palette (bold bright-green usage, cyan section headers,
+    // bright-green flag names, italic gray placeholders).
+    let mut colored = mineru::command::cli_command().color(clap::ColorChoice::Always);
+    let ansi = colored.render_long_help().ansi().to_string();
+    assert!(
+        ansi.contains("\x1b["),
+        "colored help must contain ANSI escapes"
+    );
+    assert!(
+        ansi.contains("\x1b[1m\x1b[92m"),
+        "bold bright-green usage style: {ansi:?}"
+    );
+    assert!(
+        ansi.contains("\x1b[1m\x1b[96m"),
+        "bold cyan section-header style: {ansi:?}"
+    );
+    assert!(
+        ansi.contains("\x1b[92m"),
+        "bright-green flag-name style: {ansi:?}"
+    );
+    assert!(
+        ansi.contains("\x1b[3m\x1b[90m"),
+        "italic gray placeholder style: {ansi:?}"
+    );
+    assert!(ansi.contains("--path"), "flag names must survive styling");
+
+    // Plain sink (piped output / ColorChoice::Never): no escape sequences at all.
+    let mut plain = mineru::command::cli_command().color(clap::ColorChoice::Never);
+    let rendered = plain.render_long_help().to_string();
+    assert!(
+        !rendered.contains("\x1b["),
+        "plain help must not contain ANSI escapes: {rendered:?}"
+    );
+    assert!(rendered.contains("-p, --path <PATH>"));
+}
+
+#[tokio::test]
+#[ignore = "CLI process contract e2e"]
+async fn api_key_flag_parses_and_warns_without_network() {
+    // Parse-only: a missing input path is a runtime failure (exit 1), never a clap
+    // parse failure (exit 2), proving `--api-key` is accepted without any network.
+    let mut cmd = mineru();
+    cmd.args(["-p", "x", "-o", "y", "--api-key", "secret"]);
+    let result = command(cmd).await;
+    assert_ne!(result.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains(
+        "warning: --api-key is visible in the process list and shell history; prefer MINERU_VL_API_KEY"
+    ));
 }
 
 #[test]

@@ -136,6 +136,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .await?;
+    for warning in &document.warnings {
+        eprintln!("warning: {warning}");
+    }
     let output = write_outputs(&document, cli.output)?;
     eprintln!(
         "wrote {} and {}",

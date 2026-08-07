@@ -374,12 +374,14 @@ async fn render_route_window(
     Ok(WindowState { plan, rendered })
 }
 
-/// Snapshot output of one window's two-step VLM work, in source page order.
+/// Snapshot output of one window's two-step VLM work, in source page order. The final element
+/// carries LLM-output warnings collected for that page (malformed layout/semantic replies).
 type WindowSnapshots = Vec<(
     Vec<crate::ModelBlock>,
     Vec<crate::VlmLayoutBlock>,
     usize,
     usize,
+    Vec<String>,
 )>;
 
 struct StagedWindow {
@@ -402,9 +404,14 @@ async fn stage_window(
     snapshots: WindowSnapshots,
     mut completed: usize,
 ) -> VlmResult<StagedWindow> {
-    for (page, (snapshot, cleaned, _raw, _encoded)) in current.rendered.into_iter().zip(snapshots) {
+    for (page, (snapshot, cleaned, _raw, _encoded, warnings)) in
+        current.rendered.into_iter().zip(snapshots)
+    {
         if let Err(error) = deadline.check() {
             return Err(dispose_stage(stage, error).await);
+        }
+        for warning in warnings {
+            crate::progress_events::emit(events, ProgressEvent::VlmWarning { message: warning });
         }
 
         let preview_page = PageResult {

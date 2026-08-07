@@ -8,6 +8,32 @@
 
 文档大小限制控制项及其 CLI/API 适用范围见使用指南。需要 Rust 1.89 或更高版本。
 
+## 快速开始
+
+用三个环境变量配置 VLM 服务：
+
+| 变量 | 含义 | 示例 |
+| --- | --- | --- |
+| `MINERU_VL_SERVER` | VLM 服务基础 URL | `https://host/v1` |
+| `MINERU_VL_MODEL_NAME` | 模型 ID | `model-id` |
+| `MINERU_VL_API_KEY` | Bearer 令牌 | `your-key` |
+
+通过 Cargo、pip 或 npm 安装 `mineru` 命令：
+
+```sh
+cargo install mineru            # Rust
+pip install mineru-rs           # Python
+npm install @alexsun-top/mineru # Node.js
+```
+
+然后解析文档：
+
+```sh
+mineru -p input.pdf -o out/
+```
+
+你的 markdown 会出现在 `out/` 中。
+
 ## Rust 库
 
 ```sh
@@ -31,6 +57,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Python
+
+wheel 支持 CPython 3.9 及更高版本。用 `uv` 或 pip 安装：
+
+```sh
+uv add mineru-rs
+# 或：pip install mineru-rs
+```
+
+`parse()` 在内存中返回 markdown 字符串，由你自己保存：
+
+```python
+import asyncio
+from pathlib import Path
+
+import mineru_rs
+
+
+async def main() -> None:
+    result = await mineru_rs.parse("input.pdf")
+    Path("out.md").write_text(result.markdown, encoding="utf-8")
+
+
+asyncio.run(main())
+```
+
+`run()` 则把完整输出树写入输出目录（见[英文使用指南](docs/usage.en.md)）。该 wheel 安装两个等效的控制台命令 `mineru` 和 `mineru-rs`；若同时安装了上游 Python `mineru` 软件包，应优先使用 `mineru-rs`，因为两者都提供 `mineru` 入口点，`PATH` 中靠前的那个会生效。发布物仅为 wheel；对于不受支持的平台或 PyPy，没有 sdist 或源代码回退方案。
+
+## Node.js
+
+需要 Node.js 18 或更高版本。用 `pnpm` 或 npm 安装：
+
+```sh
+pnpm add @alexsun-top/mineru
+# 或：npm install @alexsun-top/mineru
+```
+
+```js
+const fs = require('fs')
+const mineru = require('@alexsun-top/mineru')
+
+async function main() {
+  const { markdown } = await mineru.parse({ path: 'input.pdf' })
+  fs.writeFileSync('out.md', markdown)
+}
+
+main()
+```
+
+`run({ path, output })` 则把完整输出树写入 `output`（见[英文使用指南](docs/usage.en.md)）。根软件包安装两个等效二进制文件 `mineru` 和 `mineru-rs`，两者都指向 `bin/mineru.js`；若 `PATH` 上已有另一个 `mineru` 命令，应优先使用 `mineru-rs`。
+
 ## CLI 和 API 服务端
 
 ```sh
@@ -44,43 +121,14 @@ mineru --help
 cargo install mineru --features office
 ```
 
+`--api-key` 可传入 Bearer 令牌，但应优先使用 `MINERU_VL_API_KEY`：命令行中的密钥会出现在进程列表中。
+
 服务配置和完整选项请参见[中文使用指南](docs/usage.md)或[英文使用指南](docs/usage.en.md)。
 
-## Python
+## 示例
 
-wheel 支持 CPython 3.9 及更高版本：
-
-```sh
-pip install mineru-rs
-```
-
-该 wheel 安装两个等效的控制台命令 `mineru` 和 `mineru-rs`，两者均进入 `mineru_rs._cli:main`。`mineru-rs` 名称使得无需本地检出即可使用 `uvx mineru-rs --help`。若同时安装了上游 Python `mineru` 软件包，应优先使用 `mineru-rs`，因为两者都提供 `mineru` 入口点，`PATH` 中靠前的那个会生效。
-
-```python
-import mineru_rs
-
-print(mineru_rs.canonical_stem("a bad/pdf"))
-mineru_rs.validate_pdf_options(0, None, True, True, True)
-```
-
-Python 当前仅公开规范 stem 处理和 PDF 选项验证，不公开异步文档解析。发布物仅为 wheel；对于不受支持的平台或 PyPy，没有 sdist 或源代码回退方案。
-
-## Node.js
-
-```sh
-npm install @alexsun-top/mineru
-```
-
-根软件包安装两个等效二进制文件 `mineru` 和 `mineru-rs`，两者都指向 `bin/mineru.js`，因此安装后可使用 `node_modules/.bin/mineru-rs`。六个特定平台软件包有意不附带二进制文件。若 `PATH` 上已有另一个 `mineru` 命令，应优先使用 `mineru-rs`。
-
-```js
-const mineru = require('@alexsun-top/mineru')
-
-console.log(mineru.canonicalStem('a bad/pdf'))
-mineru.validatePdfOptions(0, null, true, true, true)
-```
-
-Node.js 当前仅公开规范 stem 处理和 PDF 选项验证，不公开异步文档解析。需要 Node.js 18 或更高版本。
+- [examples/python-uv](examples/python-uv) — 使用 `uv` 的 Python 示例
+- [examples/node-pnpm](examples/node-pnpm) — 使用 `pnpm` 的 Node.js 示例
 
 ## 许可证
 

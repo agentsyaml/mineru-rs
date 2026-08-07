@@ -938,7 +938,13 @@ impl MinerUVlmClient {
         encoded_budget: Arc<ByteBudget>,
         deadline: Instant,
         page_semaphore: Arc<Semaphore>,
-    ) -> VlmResult<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)> {
+    ) -> VlmResult<(
+        Vec<ModelBlock>,
+        Vec<VlmLayoutBlock>,
+        usize,
+        usize,
+        Vec<String>,
+    )> {
         if max_requests_per_batch == 0 {
             return Err(VlmError::InvalidConfig(
                 "semantic requests per batch must be greater than zero".into(),
@@ -957,7 +963,10 @@ impl MinerUVlmClient {
         .map_err(|_| VlmError::Timeout {
             operation: "official PDF",
         })?
-        .map_err(|_| protocol("official PDF", "page semaphore closed"))?;
+        .map_err(|_| VlmError::Transport {
+            operation: "official PDF",
+            message: "page semaphore closed".into(),
+        })?;
         let preprocessor = self.preprocessor.clone();
         let layout_image = Arc::clone(&image);
         let max_pixels = self.http.max_decoded_pixels();
@@ -997,8 +1006,13 @@ impl MinerUVlmClient {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| protocol("official PDF", "semaphore closed"))?;
-        let (layout_text, mut raw_bytes) = self
+            // A closed semaphore is an internal runtime failure, never LLM malformation: it
+            // must not be classifiable as Protocol (which the tolerance arms would degrade).
+            .map_err(|_| VlmError::Transport {
+                operation: "official PDF",
+                message: "layout semaphore closed".into(),
+            })?;
+        let (layout_text, mut raw_bytes, mut warnings) = self
             .http
             .predict_official_budgeted(
                 layout_request,
@@ -1009,11 +1023,24 @@ impl MinerUVlmClient {
             .await?;
         drop(_permit);
         let preprocessor = self.preprocessor.clone();
-        let mut blocks = self
+        let mut blocks = match self
             .official_blocking(deadline, move || {
                 preprocessor.parse_layout_output_capped(&layout_text, max_layout_blocks)
             })
-            .await?;
+            .await
+        {
+            // Only parse-class (Protocol) malformation of the LLM layout text degrades to an
+            // empty layout. Resource bounds (layout blocks, raw/response budget) and service
+            // failures (Http/Transport/Timeout) stay fatal so a broken server is never masked.
+            Err(error @ VlmError::Protocol { .. }) => {
+                warnings.push(format!(
+                    "layout parse failed: {error}; continuing with an empty layout"
+                ));
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+            Ok(blocks) => blocks,
+        };
         let suppress = [
             (!formula_enable).then_some(BlockKind::EQUATION.into()),
             (!table_enable).then_some(BlockKind::TABLE.into()),
@@ -1049,8 +1076,12 @@ impl MinerUVlmClient {
                     > + Send,
             >,
         >;
-        type Request =
-            Pin<Box<dyn Future<Output = VlmResult<(usize, usize, String, usize, usize)>> + Send>>;
+        type Request = Pin<
+            Box<
+                dyn Future<Output = VlmResult<(usize, usize, String, usize, usize, Vec<String>)>>
+                    + Send,
+            >,
+        >;
         let mut blocks = Some(blocks);
         let mut replies = vec![None; candidates.len()];
         let mut encoder: Option<Encoder> = None;
@@ -1135,9 +1166,30 @@ impl MinerUVlmClient {
                     let semaphore = self.layout_semaphore.clone();
                     let raw_budget = raw_budget.clone();
                     requests.push(Box::pin(async move {
-                        let _permit = semaphore.acquire_owned().await.map_err(|_| protocol("official PDF", "semaphore closed"))?;
-                        let (reply, raw_bytes) = http.predict_official_budgeted(request, http.official_response_cap(), Some(raw_budget), tokio::time::Instant::from_std(deadline)).await?;
-                        Ok((order, block_index, reply, raw_bytes, bytes))
+                        let _permit = semaphore.acquire_owned().await.map_err(|_| VlmError::Transport {
+                            operation: "official PDF",
+                            message: "layout semaphore closed".into(),
+                        })?;
+                        match http.predict_official_budgeted(request, http.official_response_cap(), Some(raw_budget), tokio::time::Instant::from_std(deadline)).await {
+                            // Only parse-class (Protocol) malformation of the LLM reply degrades
+                            // to empty content for this block. Resource/configuration failures and
+                            // service failures (Http/Transport/Timeout) stay fatal so a wrong key
+                            // or dead server is never masked as an empty successful document.
+                            Ok((reply, raw_bytes, warnings)) => {
+                                Ok((order, block_index, reply, raw_bytes, bytes, warnings))
+                            }
+                            Err(error @ VlmError::Protocol { .. }) => Ok((
+                                order,
+                                block_index,
+                                String::new(),
+                                0,
+                                bytes,
+                                vec![format!(
+                                    "semantic request failed: {error}; continuing with empty content"
+                                )],
+                            )),
+                            Err(error) => Err(error),
+                        }
                     }));
                     encoder = None;
                     #[cfg(test)]
@@ -1150,7 +1202,9 @@ impl MinerUVlmClient {
                     }
                 }
                 completed = requests.next(), if !requests.is_empty() => {
-                    let (order, block_index, reply, bytes, lease) = completed.expect("nonempty request queue")?;
+                    let (order, block_index, reply, bytes, lease, request_warnings) =
+                        completed.expect("nonempty request queue")?;
+                    warnings.extend(request_warnings);
                     resident_bytes = resident_bytes.checked_sub(lease).expect("request lease held");
                     if order >= replies.len() || block_index >= block_count {
                         return Err(protocol("official PDF", "semantic reply index is invalid"));
@@ -1193,7 +1247,7 @@ impl MinerUVlmClient {
                 Ok((snapshot, preprocessor.post_process(blocks)?))
             })
             .await?;
-        Ok((snapshot, cleaned, raw_bytes, encoded_bytes))
+        Ok((snapshot, cleaned, raw_bytes, encoded_bytes, warnings))
     }
 
     #[cfg(test)]
@@ -1212,7 +1266,15 @@ impl MinerUVlmClient {
         remaining_encoded_document_bytes: usize,
         remaining_raw_reply_bytes: usize,
         deadline: Instant,
-    ) -> VlmResult<Vec<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)>> {
+    ) -> VlmResult<
+        Vec<(
+            Vec<ModelBlock>,
+            Vec<VlmLayoutBlock>,
+            usize,
+            usize,
+            Vec<String>,
+        )>,
+    > {
         self.official_two_step_snapshot_window_with_budgets(
             images,
             image_analysis,
@@ -1246,7 +1308,15 @@ impl MinerUVlmClient {
         encoded_budget: Arc<ByteBudget>,
         raw_budget: Arc<ByteBudget>,
         deadline: Instant,
-    ) -> VlmResult<Vec<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)>> {
+    ) -> VlmResult<
+        Vec<(
+            Vec<ModelBlock>,
+            Vec<VlmLayoutBlock>,
+            usize,
+            usize,
+            Vec<String>,
+        )>,
+    > {
         self.official_two_step_snapshot_window_with_budgets_and_page_semaphore(
             images,
             image_analysis,
@@ -1281,7 +1351,15 @@ impl MinerUVlmClient {
         raw_budget: Arc<ByteBudget>,
         deadline: Instant,
         page_semaphore: Arc<Semaphore>,
-    ) -> VlmResult<Vec<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)>> {
+    ) -> VlmResult<
+        Vec<(
+            Vec<ModelBlock>,
+            Vec<VlmLayoutBlock>,
+            usize,
+            usize,
+            Vec<String>,
+        )>,
+    > {
         try_join_all(images.into_iter().map(|image| {
             self.official_two_step_snapshot_page_core(
                 image,
@@ -2401,7 +2479,9 @@ mod tests {
         }
         state.active.fetch_sub(1, Ordering::SeqCst);
         if state.fail == Some(index) {
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            // Parse-class malformation (invalid JSON in a 200 reply) degrades to a warning on
+            // the official path; a 5xx service failure would stay an error and abort instead.
+            ([("content-type", "application/json")], "not-json-body").into_response()
         } else {
             Json(json!({"choices":[{"finish_reason":"stop","message":{"content":format!("reply-{index}")}}]})).into_response()
         }
@@ -2451,7 +2531,13 @@ mod tests {
         client: MinerUVlmClient,
         count: usize,
         batch_bytes: usize,
-    ) -> VlmResult<(Vec<ModelBlock>, Vec<VlmLayoutBlock>, usize, usize)> {
+    ) -> VlmResult<(
+        Vec<ModelBlock>,
+        Vec<VlmLayoutBlock>,
+        usize,
+        usize,
+        Vec<String>,
+    )> {
         client
             .official_two_step_snapshot_window(
                 vec![Arc::new(RgbImage::new(32, 32))],
@@ -2693,7 +2779,7 @@ mod tests {
             Some(2)
         );
         state.release[0].notify_one();
-        let (snapshot, _, _, _) = timeout(Duration::from_secs(2), task)
+        let (snapshot, _, _, _, _) = timeout(Duration::from_secs(2), task)
             .await
             .unwrap()
             .unwrap()
@@ -2708,7 +2794,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semantic_pipeline_fails_fast_and_drops_queued_work() {
+    async fn semantic_pipeline_recovers_failed_requests_and_continues() {
         let (mut client, state, mut arrivals) = pipeline_client(&[0], Some(0)).await;
         let (started_tx, mut started_rx) = mpsc::unbounded_channel();
         let (release_encoder_tx, release_encoder_rx) = std_mpsc::channel();
@@ -2752,13 +2838,27 @@ mod tests {
                 .unwrap(),
             Some(1)
         );
+        // Unblock the encoder before the failing reply arrives: the failed request must degrade
+        // to a warning with empty content, not abort the pipeline.
+        release_encoder_tx.send(()).unwrap();
         state.release[0].notify_one();
-        let result = timeout(Duration::from_secs(2), task)
+        let (snapshot, _, _, _, warnings) = timeout(Duration::from_secs(2), task)
             .await
             .unwrap()
+            .unwrap()
             .unwrap();
-        release_encoder_tx.send(()).unwrap();
-        assert!(result.is_err(), "{result:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("semantic request failed"))
+        );
+        assert_eq!(
+            snapshot
+                .into_iter()
+                .map(|block| block.content.unwrap())
+                .collect::<Vec<_>>(),
+            ["", "reply-1", "reply-2"]
+        );
         assert_eq!(
             timeout(Duration::from_secs(2), encoded_rx.recv())
                 .await
@@ -2771,10 +2871,6 @@ mod tests {
                 .unwrap(),
             Some(1)
         );
-        assert!(!matches!(
-            timeout(Duration::from_millis(100), started_rx.recv()).await,
-            Ok(Some(_))
-        ));
         assert_eq!(state.active.load(Ordering::SeqCst), 0);
     }
 
@@ -3763,10 +3859,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pages.len(), 1);
-        let (snapshot, _, raw, encoded) = pages.pop().unwrap();
+        let (snapshot, _, raw, encoded, warnings) = pages.pop().unwrap();
         assert_eq!(requests.load(Ordering::SeqCst), 3);
         assert!(snapshot[1].content.is_none());
         assert!(raw > 0 && encoded > 0);
+        assert!(warnings.is_empty());
         assert_eq!(Arc::strong_count(&image), 1);
     }
 

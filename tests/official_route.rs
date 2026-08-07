@@ -2,6 +2,7 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State as AxumState},
     http::StatusCode,
+    response::IntoResponse,
     routing::post,
 };
 use bytes::Bytes;
@@ -2072,4 +2073,153 @@ async fn route_full_cap_fallback_window_does_not_overlap() {
         .expect("fallback route failed");
     assert_eq!(state.layouts.load(Ordering::SeqCst), 3);
     assert_eq!(published_page_indexes(&manifest, "fallback"), vec![0, 1, 2]);
+}
+
+#[tokio::test]
+async fn route_recovers_malformed_layout_with_warning_and_completes() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(request): Json<Value>| async move {
+            let layout = request.to_string().contains("Layout Detection");
+            if layout {
+                Json(json!({"choices":[{"finish_reason":"stop","message":{"content":"this is not a layout marker"}}]})).into_response()
+            } else {
+                Json(json!({"choices":[{"finish_reason":"stop","message":{"content":"recognized"}}]})).into_response()
+            }
+        }),
+    );
+    let client = configured_client(app, 2).await;
+    let output = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let callback: ProgressCallback = {
+        let events = Arc::clone(&events);
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    };
+    let pdf = tiny_pdf(1);
+    client
+        .parse_and_write_prepared_pdf_with_events(
+            PreparedPdf {
+                bytes: pdf.clone(),
+                kind: DocumentKind::Pdf,
+                original: pdf,
+            },
+            route_options(1),
+            output.path(),
+            "layout-recover",
+            Some(callback),
+        )
+        .await
+        .unwrap();
+    assert!(
+        output
+            .path()
+            .join("layout-recover/vlm/layout-recover.md")
+            .is_file()
+    );
+    let messages: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            ProgressEvent::VlmWarning { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("layout parse failed")),
+        "{messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn route_recovers_failed_semantic_replies_with_warning_and_completes() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(request): Json<Value>| async move {
+            let layout = request.to_string().contains("Layout Detection");
+            if layout {
+                Json(json!({"choices":[{"finish_reason":"stop","message":{"content":"<|box_start|>0 0 1000 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>"}}]})).into_response()
+            } else {
+                // A malformed-200 LLM reply (missing choices) degrades to a warning; a 5xx
+                // service failure stays an error and is covered by the abort test below.
+                Json(json!({"choices":[]})).into_response()
+            }
+        }),
+    );
+    let client = configured_client(app, 2).await;
+    let output = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let callback: ProgressCallback = {
+        let events = Arc::clone(&events);
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    };
+    let pdf = tiny_pdf(1);
+    client
+        .parse_and_write_prepared_pdf_with_events(
+            PreparedPdf {
+                bytes: pdf.clone(),
+                kind: DocumentKind::Pdf,
+                original: pdf,
+            },
+            route_options(1),
+            output.path(),
+            "semantic-recover",
+            Some(callback),
+        )
+        .await
+        .unwrap();
+    assert!(
+        output
+            .path()
+            .join("semantic-recover/vlm/semantic-recover.md")
+            .is_file()
+    );
+    let messages: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            ProgressEvent::VlmWarning { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("missing choices")),
+        "{messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn route_aborts_on_semantic_service_failure() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(request): Json<Value>| async move {
+            let layout = request.to_string().contains("Layout Detection");
+            if layout {
+                Json(json!({"choices":[{"finish_reason":"stop","message":{"content":"<|box_start|>0 0 1000 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>"}}]})).into_response()
+            } else {
+                // A 5xx is a service failure, not LLM-output malformation: it must abort the
+                // route rather than degrade every page to empty content and exit 0.
+                (StatusCode::INTERNAL_SERVER_ERROR, "mock semantic failure").into_response()
+            }
+        }),
+    );
+    let client = configured_client(app, 2).await;
+    let output = tempfile::tempdir().unwrap();
+    let pdf = tiny_pdf(1);
+    let error = client
+        .parse_and_write_prepared_pdf(
+            PreparedPdf {
+                bytes: pdf.clone(),
+                kind: DocumentKind::Pdf,
+                original: pdf,
+            },
+            route_options(1),
+            output.path(),
+            "semantic-fail",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, mineru::VlmError::Http { .. }), "{error:?}");
+    assert!(!output.path().join("semantic-fail/vlm").exists());
 }

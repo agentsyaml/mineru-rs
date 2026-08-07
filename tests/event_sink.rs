@@ -67,6 +67,9 @@ fn non_tty_all_events_snapshot() {
             document: "d".into(),
             message: "x".into(),
         },
+        VlmWarning {
+            message: "malformed layout".into(),
+        },
         ApiSubmitted { label: "a".into() },
         ApiPending {
             label: "a".into(),
@@ -96,7 +99,7 @@ fn non_tty_all_events_snapshot() {
     s.finish();
     assert_eq!(
         b.text(),
-        "server started: a\nserver stopped: server\nrequest accepted: r\nrequest rejected: x\nrequest completed: r\nrequest failed: r: x\ndocument started: d\ndocument prepared: d\ndocument page completed: d: page=2 completed=3/4\ndocument completed: d\ndocument failed: d: x\noffice warning: d: x\napi submitted: a\napi pending: a: queued-ahead=2\napi pending: a: queued-ahead=none\napi processing: a\napi downloading: a\napi extracting: a\napi warning: a: x\napi completed: a\napi failed: a: x\nwarning: route-env: x\nfailed: x\n"
+        "server started: a\nserver stopped: server\nrequest accepted: r\nrequest rejected: x\nrequest completed: r\nrequest failed: r: x\ndocument started: d\ndocument prepared: d\ndocument page completed: d: page=2 completed=3/4\ndocument completed: d\ndocument failed: d: x\noffice warning: d: x\nvlm warning: malformed layout\napi submitted: a\napi pending: a: queued-ahead=2\napi pending: a: queued-ahead=none\napi processing: a\napi downloading: a\napi extracting: a\napi warning: a: x\napi completed: a\napi failed: a: x\nwarning: route-env: x\nfailed: x\n"
     );
 }
 

@@ -37,7 +37,7 @@ impl PageExtractor {
         page_size: [f32; 2],
         image: Arc<RgbImage>,
         options: &ParseOptions,
-    ) -> Result<PageResult> {
+    ) -> Result<(PageResult, Vec<String>)> {
         let page = image_pipeline::page_png(&image)?;
         let _request = self
             .request_gate
@@ -45,7 +45,7 @@ impl PageExtractor {
             .acquire_owned()
             .await
             .map_err(|_| Error::WorkerJoin("request semaphore closed".into()))?;
-        let layout_text = self
+        let (layout_text, completion_warnings) = self
             .openai
             .completion(
                 profile::LAYOUT_PROMPT,
@@ -56,7 +56,11 @@ impl PageExtractor {
             )
             .await?;
         drop(_request);
-        let mut blocks = parse_page_blocks(&layout_text, self.max_blocks_per_page)?;
+        let mut warnings: Vec<String> = completion_warnings
+            .into_iter()
+            .map(|warning| format!("page {page_index}: {warning}"))
+            .collect();
+        let mut blocks = parse_page_blocks(&layout_text, self.max_blocks_per_page, &mut warnings);
         let table_images = image_pipeline::build_table_image_map(&mut blocks);
         let max_image_bytes = self.max_image_bytes;
         let mut jobs = JoinSet::new();
@@ -115,10 +119,12 @@ impl PageExtractor {
                 _ => profile::TEXT_PROMPT,
             };
             jobs.spawn(async move {
+                // A failed block degrades to a warning: the page keeps the block with its
+                // content absent and parsing continues with the remaining blocks.
                 let _permit = permit
                     .acquire_owned()
                     .await
-                    .map_err(|_| Error::WorkerJoin("request semaphore closed".into()))?;
+                    .map_err(|_| format!("page {page} block {index}: request semaphore closed"))?;
                 let estimate = (source
                     .as_raw()
                     .len()
@@ -127,7 +133,9 @@ impl PageExtractor {
                 let _bytes = byte_permit
                     .acquire_many_owned(estimate.max(1))
                     .await
-                    .map_err(|_| Error::WorkerJoin("image byte semaphore closed".into()))?;
+                    .map_err(|_| {
+                        format!("page {page} block {index}: image byte semaphore closed")
+                    })?;
                 let content = async {
                     let crop = if table {
                         let (crop, map) = image_pipeline::mask_and_encode_table_image(
@@ -144,40 +152,48 @@ impl PageExtractor {
                     client
                         .completion(prompt, &[data], sampling, max, allow)
                         .await
-                        .map(|text| (text, crop.1))
+                        .map(|(text, warnings)| (text, crop.1, warnings))
                 }
                 .await
-                .map_err(|source| Error::Block {
-                    page,
-                    block: index,
-                    source: Box::new(source),
-                })?;
-                Ok::<_, Error>((index, content.0, content.1))
+                .map_err(|source| format!("page {page} block {index}: {source}"))?;
+                Ok::<_, String>((index, content.0, content.1, content.2))
             });
         }
         while let Some(job) = jobs.join_next().await {
-            let (index, content, token_map) =
-                job.map_err(|e| Error::WorkerJoin(e.to_string()))??;
-            if let Some(map) = token_map {
-                blocks[index].metadata.insert(
-                    "_table_image_token_map".into(),
-                    serde_json::Value::Object(map),
-                );
+            match job.map_err(|e| Error::WorkerJoin(e.to_string()))? {
+                Ok((index, content, token_map, block_warnings)) => {
+                    warnings.extend(
+                        block_warnings
+                            .into_iter()
+                            .map(|warning| format!("page {page_index} block {index}: {warning}")),
+                    );
+                    if let Some(map) = token_map {
+                        blocks[index].metadata.insert(
+                            "_table_image_token_map".into(),
+                            serde_json::Value::Object(map),
+                        );
+                    }
+                    vlm_postprocess::clean_block(&mut blocks[index], content);
+                }
+                Err(warning) => warnings.push(warning),
             }
-            vlm_postprocess::clean_block(&mut blocks[index], content);
         }
         vlm_postprocess::post_process(&mut blocks);
-        Ok(PageResult {
-            page_index,
-            page_size,
-            blocks,
-        })
+        Ok((
+            PageResult {
+                page_index,
+                page_size,
+                blocks,
+            },
+            warnings,
+        ))
     }
     pub(crate) async fn merge_cross_page_tables(
         &self,
         pages: &mut [PageResult],
         _options: &ParseOptions,
-    ) -> Result<()> {
+    ) -> Vec<String> {
+        let mut warnings = Vec::new();
         for (page, last_index, first_index) in table_candidates(pages) {
             let (left, right) = pages.split_at_mut(page + 1);
             let left_table = &mut left[page].blocks[last_index];
@@ -197,11 +213,30 @@ impl PageExtractor {
             }
             let expected_segments = left_shape.last_segments.len();
             let prompt = cell_merge_prompt(a, b, expected_segments);
-            let answer = self
+            let answer = match self
                 .openai
                 .completion(&prompt, &[], profile::RECOGNITION_SAMPLING, None, true)
-                .await?;
+                .await
+            {
+                Ok((answer, completion_warnings)) => {
+                    warnings.extend(
+                        completion_warnings
+                            .into_iter()
+                            .map(|warning| format!("page {page}: {warning}")),
+                    );
+                    answer
+                }
+                Err(error) => {
+                    warnings.push(format!(
+                        "page {page}: cross-page table merge failed: {error}"
+                    ));
+                    continue;
+                }
+            };
             let Some(cells) = parse_cell_merge(&answer, expected_segments) else {
+                warnings.push(format!(
+                    "page {page}: cross-page table merge reply was not parseable; tables kept separate"
+                ));
                 continue;
             };
             left_table
@@ -214,15 +249,16 @@ impl PageExtractor {
                 .metadata
                 .insert("_cell_merge_from_previous".into(), cells);
         }
-        Ok(())
+        warnings
     }
 }
 
 fn parse_page_blocks(
     layout_text: &str,
     max_blocks_per_page: usize,
-) -> Result<Vec<crate::ContentBlock>> {
-    layout::parse_layout(layout_text, max_blocks_per_page)
+    warnings: &mut Vec<String>,
+) -> Vec<crate::ContentBlock> {
+    layout::parse_layout_tolerant(layout_text, max_blocks_per_page, warnings)
 }
 
 #[derive(Debug)]
@@ -455,7 +491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_excess_layout_blocks_before_block_work() {
+    async fn excess_layout_blocks_are_truncated_to_warnings_before_block_work() {
         let layout = "<|box_start|>1 1 2 2<|box_end|><|ref_start|>text<|ref_end|><|box_start|>3 3 4 4<|box_end|><|ref_start|>title<|ref_end|>";
         let app = Router::new().route(
             "/v1/chat/completions",
@@ -472,21 +508,70 @@ mod tests {
             ..Limits::default()
         };
         let extractor = PageExtractor::new(&config).unwrap();
-        assert!(matches!(
-            extractor
-                .extract_page(
-                    7,
-                    [1., 1.],
-                    Arc::new(RgbImage::new(1, 1)),
-                    &ParseOptions::default(),
-                )
-                .await,
-            Err(Error::LimitExceeded {
-                resource: "blocks per page",
-                limit: 1,
-                actual: 2
-            })
-        ));
+        let (result, warnings) = extractor
+            .extract_page(
+                7,
+                [1., 1.],
+                Arc::new(RgbImage::new(1, 1)),
+                &ParseOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.blocks.len(), 1);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("blocks per page limit 1 reached")),
+            "{warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_block_call_keeps_block_and_continues_page() {
+        use axum::{http::StatusCode, response::IntoResponse};
+        use std::sync::atomic::AtomicUsize;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":"<|box_start|>0 0 1000 1000<|box_end|><|ref_start|>text<|ref_end|>"}}]}))
+                                .into_response()
+                        } else {
+                            (StatusCode::INTERNAL_SERVER_ERROR, "block service failure")
+                                .into_response()
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = ClientConfig::new(format!("http://{address}"), "model").unwrap();
+        let extractor = PageExtractor::new(&config).unwrap();
+        let (result, warnings) = extractor
+            .extract_page(
+                3,
+                [1., 1.],
+                Arc::new(RgbImage::new(1, 1)),
+                &ParseOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.blocks.len(), 1);
+        assert!(
+            result.blocks[0].content.is_none(),
+            "block must stay content-less on failure"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("page 3 block 0")),
+            "{warnings:?}"
+        );
     }
 
     #[tokio::test]
@@ -530,6 +615,7 @@ mod tests {
                     )
                     .await
                     .unwrap()
+                    .0
             });
         }
         let mut pages = Vec::new();

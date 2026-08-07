@@ -125,7 +125,14 @@ class BindingTests(unittest.TestCase):
     def test_legacy_helpers_and_public_surface(self):
         self.assertEqual(
             mineru_rs.__all__,
-            ["RunReport", "canonical_stem", "run", "validate_pdf_options"],
+            [
+                "ParseResult",
+                "RunReport",
+                "canonical_stem",
+                "parse",
+                "run",
+                "validate_pdf_options",
+            ],
         )
         self.assertEqual(mineru_rs.canonical_stem("a bad/pdf"), "a bad_pdf")
         self.assertEqual(mineru_rs.canonical_stem("文档《报告》"), "文档《报告》")

@@ -32,6 +32,8 @@ pub(crate) struct RenderedPage {
     pub image: Arc<RgbImage>,
 }
 
+type RenderTaskResult = Result<(usize, RenderedPage), (usize, Error)>;
+
 #[cfg(test)]
 pub(crate) struct PageRenderTestHook {
     before: Arc<dyn Fn(usize) -> Result<()> + Send + Sync>,
@@ -288,8 +290,16 @@ pub(crate) async fn render_window(
     indexes: Vec<usize>,
     limits: Limits,
     workers: usize,
-) -> Result<Vec<RenderedPage>> {
-    render_window_for_task(document, indexes, limits, workers, TaskWorkLease::default()).await
+) -> Result<(Vec<RenderedPage>, Vec<String>)> {
+    render_window_core(
+        document,
+        indexes,
+        limits,
+        workers,
+        TaskWorkLease::default(),
+        true,
+    )
+    .await
 }
 
 pub(crate) async fn render_window_for_task(
@@ -299,14 +309,47 @@ pub(crate) async fn render_window_for_task(
     workers: usize,
     task_work_lease: TaskWorkLease,
 ) -> Result<Vec<RenderedPage>> {
+    let (pages, _warnings) =
+        render_window_core(document, indexes, limits, workers, task_work_lease, false).await?;
+    Ok(pages)
+}
+
+async fn render_window_core(
+    document: Arc<ParsedPdf>,
+    indexes: Vec<usize>,
+    limits: Limits,
+    workers: usize,
+    task_work_lease: TaskWorkLease,
+    tolerant: bool,
+) -> Result<(Vec<RenderedPage>, Vec<String>)> {
+    let mut warnings = Vec::new();
     let mut sizes = Vec::with_capacity(indexes.len());
     for index in indexes {
-        sizes.push((index, page_dimensions(&document, index, &limits)?.2));
+        match page_dimensions(&document, index, &limits) {
+            Ok((_, _, bytes)) => sizes.push((index, bytes)),
+            Err(error) if tolerant => {
+                warnings.push(format!("render page {index} failed: {error}"));
+            }
+            Err(error) => return Err(error),
+        }
     }
     let mut rendered = BTreeMap::new();
     let mut pending = sizes.into_iter().peekable();
     while pending.peek().is_some() {
-        let window = admitted_window(&mut pending, limits.max_in_flight_image_bytes)?;
+        let window = match admitted_window(&mut pending, limits.max_in_flight_image_bytes) {
+            Ok(window) => window,
+            Err(Error::LimitExceeded { actual, .. }) if tolerant => {
+                // A single page larger than the in-flight budget is skipped; the rest continue.
+                let Some((index, _)) = pending.next() else {
+                    break;
+                };
+                warnings.push(format!(
+                    "render page {index} failed: page exceeds the in-flight image byte budget ({actual} bytes)"
+                ));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let concurrency = workers.max(1).min(window.len());
         let mut window_pending = window.into_iter();
         let mut tasks = tokio::task::JoinSet::new();
@@ -320,8 +363,16 @@ pub(crate) async fn render_window_for_task(
             );
         }
         while let Some(result) = tasks.join_next().await {
-            let page = result.map_err(|e| Error::WorkerJoin(e.to_string()))??;
-            rendered.insert(page.index, page);
+            match result {
+                Ok(Ok((index, page))) => {
+                    rendered.insert(index, page);
+                }
+                Ok(Err((index, error))) if tolerant => {
+                    warnings.push(format!("render page {index} failed: {error}"));
+                }
+                Ok(Err((_, error))) => return Err(error),
+                Err(error) => return Err(Error::WorkerJoin(error.to_string())),
+            }
             if let Some(index) = window_pending.next() {
                 spawn_render(
                     &mut tasks,
@@ -333,7 +384,7 @@ pub(crate) async fn render_window_for_task(
             }
         }
     }
-    Ok(rendered.into_values().collect())
+    Ok((rendered.into_values().collect(), warnings))
 }
 
 fn admitted_window(
@@ -361,7 +412,7 @@ fn admitted_window(
 }
 
 fn spawn_render(
-    tasks: &mut tokio::task::JoinSet<Result<RenderedPage>>,
+    tasks: &mut tokio::task::JoinSet<RenderTaskResult>,
     document: Arc<ParsedPdf>,
     index: usize,
     limits: Limits,
@@ -381,9 +432,15 @@ fn spawn_render(
             (hook.after)(index, &result);
         }
         result
+            .map(|page| (index, page))
+            .map_err(|error| (index, error))
     }));
     #[cfg(not(test))]
-    tasks.spawn_blocking(task_work_lease.wrap(move || render_page_safe(&document, index, &limits)));
+    tasks.spawn_blocking(task_work_lease.wrap(move || {
+        render_page_safe(&document, index, &limits)
+            .map(|page| (index, page))
+            .map_err(|error| (index, error))
+    }));
 }
 
 pub(crate) fn render_page_safe(
@@ -515,7 +572,8 @@ mod tests {
     use super::{
         PageRenderTestHook, SCALE, admitted_window, extract_selected_pages_for_preview,
         page_dimensions, page_render_test_hook, parse_document, premultiplied_rgba_over_white,
-        read_input, render_window_for_task, scope_page_render_test_hook, source_bytes,
+        read_input, render_window, render_window_for_task, scope_page_render_test_hook,
+        source_bytes,
     };
     use crate::{Limits, PageResult, PdfInput, TaskWorkLease, preview};
     use bytes::Bytes;
@@ -852,6 +910,33 @@ mod tests {
         .expect("render timed out")
         .expect("render");
         assert_eq!(rendered.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn tolerant_render_window_skips_failed_pages_with_warnings() {
+        let hook = Arc::new(PageRenderTestHook::new(
+            |index| {
+                if index == 1 {
+                    Err(crate::Error::Pdf("render page 1 injected failure".into()))
+                } else {
+                    Ok(())
+                }
+            },
+            |_, _| {},
+        ));
+        let document = parse_document(in_memory_pdf(3, 3), &Limits::default()).expect("fixture");
+        let (rendered, warnings) = scope_page_render_test_hook(
+            hook,
+            render_window(document, (0..3).collect(), Limits::default(), 2),
+        )
+        .await
+        .expect("render");
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered.iter().all(|page| page.index != 1));
+        assert_eq!(
+            warnings,
+            vec!["render page 1 failed: PDF error: render page 1 injected failure".to_owned()]
+        );
     }
 
     #[tokio::test]

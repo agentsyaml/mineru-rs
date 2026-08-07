@@ -167,7 +167,7 @@ impl VlmHttpClient {
         cap: usize,
         budget: Option<Arc<ByteBudget>>,
         deadline: tokio::time::Instant,
-    ) -> VlmResult<(String, usize)> {
+    ) -> VlmResult<(String, usize, Vec<String>)> {
         let config = self.config.clone();
         let model = self.model.clone();
         if tokio::time::Instant::now() >= deadline {
@@ -193,7 +193,7 @@ impl VlmHttpClient {
         let body = json_body(body, Some(deadline), &self.task_work_lease).await?;
         tokio::time::timeout_at(
             deadline,
-            self.complete_limited(body, cap, budget, Some(deadline)),
+            self.complete_limited(body, cap, budget, Some(deadline), true),
         )
         .await
         .map_err(|_| VlmError::Timeout {
@@ -301,8 +301,11 @@ impl VlmHttpClient {
         Ok(models)
     }
     async fn complete(&self, r: VlmRequest, streaming: bool) -> VlmResult<String> {
+        // Legacy transport path has no warning sink and must stay strict: malformed LLM replies
+        // surface as protocol errors instead of silently empty strings. The official route
+        // degrades them via `predict_official_budgeted`.
         let body = json_body(self.body(r, streaming).await?, None, &self.task_work_lease).await?;
-        self.complete_limited(body, self.config.max_response_bytes, None, None)
+        self.complete_limited(body, self.config.max_response_bytes, None, None, false)
             .await
             .map(|x| x.0)
     }
@@ -312,52 +315,48 @@ impl VlmHttpClient {
         cap: usize,
         budget: Option<Arc<ByteBudget>>,
         deadline: Option<tokio::time::Instant>,
-    ) -> VlmResult<(String, usize)> {
+        degrade: bool,
+    ) -> VlmResult<(String, usize, Vec<String>)> {
         let mut retries_used = 0;
-        let mut total_bytes = 0_usize;
-        loop {
-            let (v, bytes) = self
-                .send_json_limited(
-                    "chat",
-                    self.url("chat/completions")?,
-                    Some(body.clone()),
-                    cap,
-                    budget.clone(),
-                    deadline,
-                    &mut retries_used,
-                )
-                .await?;
-            total_bytes = total_bytes
-                .checked_add(bytes)
-                .ok_or_else(|| protocol("chat", "response byte total overflow"))?;
-            let text = if deadline.is_some() {
-                let allow_truncated_content = self.config.allow_truncated_content;
-                let end_token = self.config.end_token.clone();
-                json_worker(deadline, "chat", &self.task_work_lease, move || {
-                    completion_text(v, allow_truncated_content, &end_token)
-                })
-                .await
-            } else {
-                completion_text(
+        let (v, bytes) = self
+            .send_json_limited(
+                "chat",
+                self.url("chat/completions")?,
+                Some(body.clone()),
+                cap,
+                budget.clone(),
+                deadline,
+                &mut retries_used,
+            )
+            .await?;
+        let total_bytes = bytes;
+        let (text, warnings) = if deadline.is_some() {
+            let allow_truncated_content = self.config.allow_truncated_content;
+            let end_token = self.config.end_token.clone();
+            json_worker(deadline, "chat", &self.task_work_lease, move || {
+                let mut warnings = Vec::new();
+                let text = completion_text(
                     v,
-                    self.config.allow_truncated_content,
-                    &self.config.end_token,
-                )
-            };
-            match text {
-                Ok(text) => return Ok((text, total_bytes)),
-                Err(VlmError::Protocol {
-                    operation: "chat",
-                    message,
-                }) if message == "unexpected finish reason"
-                    && retries_used < self.config.max_retries =>
-                {
-                    retry_wait(retries_used, self.config.retry_backoff_factor, None).await;
-                    retries_used += 1;
-                }
-                Err(error) => return Err(error),
-            }
-        }
+                    allow_truncated_content,
+                    &end_token,
+                    &mut warnings,
+                    degrade,
+                )?;
+                Ok((text, warnings))
+            })
+            .await?
+        } else {
+            let mut warnings = Vec::new();
+            let text = completion_text(
+                v,
+                self.config.allow_truncated_content,
+                &self.config.end_token,
+                &mut warnings,
+                degrade,
+            )?;
+            (text, warnings)
+        };
+        Ok((text, total_bytes, warnings))
     }
     fn url(&self, suffix: &str) -> VlmResult<Url> {
         let mut u = self.base.clone();
@@ -766,35 +765,76 @@ fn completion_text(
     mut response: Value,
     allow_truncated_content: bool,
     end_token: &str,
+    warnings: &mut Vec<String>,
+    degrade: bool,
 ) -> VlmResult<String> {
+    // `degrade` is true only on the official budgeted path (which has a warning sink). The
+    // legacy predict/complete path stays strict so a malformed reply surfaces as a protocol
+    // error instead of a silently empty string.
     if response.get("error").is_some()
         || response.get("object").and_then(Value::as_str) == Some("error")
     {
-        return Err(VlmError::Protocol {
-            operation: "chat",
-            message: "error object in successful response".into(),
-        });
+        if degrade {
+            warnings.push("VLM returned an error object in a successful chat response".into());
+            return Ok(String::new());
+        }
+        return Err(protocol("chat", "error object in successful response"));
     }
-    let choice = response
+    let Some(choice) = response
         .get_mut("choices")
         .and_then(Value::as_array_mut)
         .and_then(|choices| choices.first_mut())
-        .ok_or_else(|| protocol("chat", "missing choices"))?;
-    let finish = choice
-        .get("finish_reason")
-        .and_then(Value::as_str)
-        .ok_or_else(|| protocol("chat", "missing finish reason"))?;
-    if finish != "stop" && !(finish == "length" && allow_truncated_content) {
-        return Err(protocol("chat", "unexpected finish reason"));
+    else {
+        if degrade {
+            warnings.push("VLM chat response is missing choices".into());
+            return Ok(String::new());
+        }
+        return Err(protocol("chat", "missing choices"));
+    };
+    match choice.get("finish_reason").and_then(Value::as_str) {
+        Some("stop") => {}
+        Some(finish) if finish == "length" && allow_truncated_content => {}
+        Some(finish) => {
+            if degrade {
+                warnings.push(format!("VLM chat finish reason is unexpected: {finish}"));
+            } else {
+                return Err(protocol("chat", "unexpected finish reason"));
+            }
+        }
+        None => {
+            if degrade {
+                warnings.push("VLM chat response is missing finish_reason".into());
+            } else {
+                return Err(protocol("chat", "missing finish reason"));
+            }
+        }
     }
-    let content = choice
+    let Some(content) = choice
         .get_mut("message")
         .and_then(|message| message.get_mut("content"))
-        .ok_or_else(|| protocol("chat", "missing string content"))?;
+    else {
+        if degrade {
+            warnings.push("VLM chat response has no content".into());
+            return Ok(String::new());
+        }
+        return Err(protocol("chat", "missing string content"));
+    };
     match std::mem::replace(content, Value::Null) {
         Value::String(text) => Ok(strip_end(text, end_token)),
-        Value::Null => Ok(String::new()),
-        _ => Err(protocol("chat", "missing string content")),
+        Value::Null => {
+            if degrade {
+                warnings.push("VLM chat response content is empty".into());
+            }
+            Ok(String::new())
+        }
+        _ => {
+            if degrade {
+                warnings.push("VLM chat response content is not a string".into());
+                Ok(String::new())
+            } else {
+                Err(protocol("chat", "missing string content"))
+            }
+        }
     }
 }
 fn strip_end(mut text: String, token: &str) -> String {
@@ -1292,8 +1332,8 @@ fn sse_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        ByteBudget, VlmHttpClient, build_body, global, json_worker, model_candidates,
-        retry_after_hint, retry_backoff, strip_end,
+        ByteBudget, VlmHttpClient, build_body, completion_text, global, json_worker,
+        model_candidates, retry_after_hint, retry_backoff, strip_end,
     };
     use crate::{
         SamplingParams, TaskWorkLease, VlmError, VlmHttpConfig, VlmImageInput, VlmRequest,
@@ -1383,6 +1423,143 @@ mod tests {
             .charge(4 * 1024 * 1024 * 1024, "encoded document bytes")
             .unwrap();
         assert_eq!(large.remaining(), 4 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn completion_text_degrades_malformed_replies_to_warnings_on_the_official_path() {
+        let text = |value, allow| -> (String, Vec<String>) {
+            let mut warnings = Vec::new();
+            let text = completion_text(value, allow, "", &mut warnings, true).unwrap();
+            (text, warnings)
+        };
+        // Error object: empty content, warning, no leak of crafted choices.
+        let (out, warnings) = text(serde_json::json!({"error": "boom"}), false);
+        assert_eq!(out, "");
+        assert_eq!(warnings.len(), 1);
+        // Missing choices.
+        let (out, warnings) = text(serde_json::json!({"choices": []}), false);
+        assert_eq!(out, "");
+        assert!(warnings[0].contains("missing choices"));
+        // Missing finish_reason keeps available content plus a warning.
+        let (out, warnings) = text(
+            serde_json::json!({"choices": [{"message": {"content": "x"}}]}),
+            false,
+        );
+        assert_eq!(out, "x");
+        assert!(warnings[0].contains("finish_reason"));
+        // Unexpected finish reason keeps the available (truncated) content.
+        let (out, warnings) = text(
+            serde_json::json!({"choices": [{"finish_reason": "content_filter", "message": {"content": "partial"}}]}),
+            false,
+        );
+        assert_eq!(out, "partial");
+        assert!(warnings[0].contains("content_filter"));
+        // length without allow_truncated_content keeps the truncated content with a warning...
+        let (out, warnings) = text(
+            serde_json::json!({"choices": [{"finish_reason": "length", "message": {"content": "cut"}}]}),
+            false,
+        );
+        assert_eq!(out, "cut");
+        assert!(warnings[0].contains("length"));
+        // ...whereas the allowed length+allow_truncated_content case stays warning-free.
+        let mut warnings = Vec::new();
+        assert_eq!(
+            completion_text(
+                serde_json::json!({"choices": [{"finish_reason": "length", "message": {"content": "cut"}}]}),
+                true,
+                "",
+                &mut warnings,
+                true,
+            )
+            .unwrap(),
+            "cut"
+        );
+        assert!(warnings.is_empty());
+        // Non-string content: empty content plus a warning.
+        let (out, warnings) = text(
+            serde_json::json!({"choices": [{"finish_reason": "stop", "message": {"content": 7}}]}),
+            false,
+        );
+        assert_eq!(out, "");
+        assert!(warnings[0].contains("not a string"));
+    }
+
+    #[test]
+    fn completion_text_stays_strict_on_the_legacy_path() {
+        let mut warnings = Vec::new();
+        // Each malformed reply is a protocol error, never a silent empty string.
+        for (value, expected) in [
+            (
+                serde_json::json!({"error": "boom"}),
+                "error object in successful response",
+            ),
+            (serde_json::json!({"choices": []}), "missing choices"),
+            (
+                serde_json::json!({"choices": [{"message": {"content": "x"}}]}),
+                "missing finish reason",
+            ),
+            (
+                serde_json::json!({"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}),
+                "unexpected finish reason",
+            ),
+            (
+                serde_json::json!({"choices": [{"finish_reason": "stop"}]}),
+                "missing string content",
+            ),
+            (
+                serde_json::json!({"choices": [{"finish_reason": "stop", "message": {"content": 7}}]}),
+                "missing string content",
+            ),
+        ] {
+            assert!(matches!(
+                completion_text(value, false, "", &mut warnings, false),
+                Err(VlmError::Protocol { operation: "chat", message }) if message == expected
+            ));
+        }
+        assert!(warnings.is_empty());
+        // Valid and null-content replies still return content as before.
+        assert_eq!(
+            completion_text(
+                serde_json::json!({"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}),
+                false,
+                "",
+                &mut warnings,
+                false,
+            )
+            .unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            completion_text(
+                serde_json::json!({"choices": [{"finish_reason": "stop", "message": {"content": null}}]}),
+                false,
+                "",
+                &mut warnings,
+                false,
+            )
+            .unwrap(),
+            ""
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn official_budgeted_surfaces_collected_warnings() {
+        let body =
+            r#"{"choices":[{"finish_reason":"content_filter","message":{"content":"partial"}}]}"#
+                .to_string();
+        let client = official_test_client(body, 1024).await;
+        let (text, _raw, warnings) = client
+            .predict_official_budgeted(
+                VlmRequest::default(),
+                client.official_response_cap(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(text, "partial");
+        assert!(warnings.iter().any(|w| w.contains("content_filter")));
     }
 
     #[tokio::test]
