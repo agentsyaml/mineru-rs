@@ -101,7 +101,7 @@ async fn client() -> MinerUVlmClient {
             server_url: Some(format!("http://{address}").parse().unwrap()),
             model_name: Some("mock".into()),
             skip_model_name_checking: true,
-            max_retries: 0,
+            max_retries: 3, // production default; retries absorb transient Windows connection resets
             ..Default::default()
         },
         MinerUVlmConfig::default(),
@@ -128,7 +128,7 @@ async fn client_with_reply(reply: String) -> MinerUVlmClient {
             server_url: Some(format!("http://{address}").parse().unwrap()),
             model_name: Some("mock".into()),
             skip_model_name_checking: true,
-            max_retries: 0,
+            max_retries: 3, // production default; retries absorb transient Windows connection resets
             ..Default::default()
         },
         MinerUVlmConfig::default(),
@@ -165,7 +165,7 @@ async fn production_client() -> (
             model_name: Some("mock".into()),
             api_key: None,
             skip_model_name_checking: true,
-            max_retries: 0,
+            max_retries: 3, // production default; retries absorb transient Windows connection resets
             max_concurrency: 8,
             ..Default::default()
         },
@@ -813,7 +813,7 @@ async fn raw_reply_allowance_counts_ignored_json_fields() {
             server_url: Some(format!("http://{address}").parse().unwrap()),
             model_name: Some("mock".into()),
             skip_model_name_checking: true,
-            max_retries: 0,
+            max_retries: 3, // production default; retries absorb transient Windows connection resets
             ..Default::default()
         },
         MinerUVlmConfig::default(),
