@@ -523,7 +523,7 @@ def validate_crate_manifest(files: dict[str, bytes], version: str) -> None:
     if bins != BINS or "mineru-cli" in bins:
         fail(f"normalized Cargo.toml binaries differ: {sorted(bins)}")
     if set(package.get("include", [])) != {
-        "Cargo.toml", "Cargo.lock", "src/**", "README.md", "LICENSE-MIT", "LICENSE-APACHE",
+        "Cargo.toml", "Cargo.lock", "src/**", "/README.md", "LICENSE-MIT", "LICENSE-APACHE",
         "docs/usage.md", "docs/usage.en.md", "docs/compatibility.md", "!tests/fixtures/input/README.md", *CRATE_FIXTURES,
     }:
         fail("normalized Cargo.toml include policy differs")
