@@ -180,28 +180,11 @@ In API mode, the local VLM transport knobs (`--page-concurrency`, `--processing-
 
 ### Container
 
-The stable image supports `amd64` and `arm64`:
-
-```sh
-docker pull ghcr.io/agentsyaml/mineru-rs:latest
-docker volume create mineru-output
-docker run --rm -p 8000:8000 -v mineru-output:/app/output \
-  -e MINERU_VL_SERVER="https://<server>" \
-  -e MINERU_VL_MODEL_NAME="<model-id>" \
-  -e MINERU_VL_API_KEY="<your-key>" \
-  -e MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
-  ghcr.io/agentsyaml/mineru-rs:latest
-```
-
-The default command starts the API, listens on `8000`, and writes task output to `/app/output`; it uses a named volume by default to retain the directory permissions required by the non-root image. When bind-mounting a host directory on native Linux, create the directory and run as the host user with `--user "$(id -u):$(id -g)"`. The image binds the API publicly, but to avoid unauthenticated public parsing, POST parsing must be explicitly enabled by the operator: `-e MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true`. The default command can be replaced to run the CLI:
-
-```sh
-docker run --rm ghcr.io/agentsyaml/mineru-rs:latest mineru --version
-mkdir -p output
-docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/work" -w /work \
-  -e MINERU_VL_SERVER="https://<server>" -e MINERU_VL_MODEL_NAME="<model-id>" \
-  ghcr.io/agentsyaml/mineru-rs:latest mineru -p input.pdf -o output
-```
+The API server has no published container image; run it from a source build
+(see [Build and prerequisites](#build-and-prerequisites) above). The only
+published image, `ghcr.io/agentsyaml/mineru-rs-cuda:latest-sm80`, ships only
+the `mineru-mistralrs` local-inference CLI, exposes no server port, and does
+not contain `mineru-api`.
 
 ### Startup
 

@@ -15,6 +15,8 @@ include = [
     "Cargo.lock",
     "src/**",
     "/README.md",
+    "vendor/mistralrs-core/**",
+    "README.zh-CN.md",
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "docs/usage.md",
@@ -51,9 +53,17 @@ name = "mineru-office-convert"
 path = "src/bin/mineru-office-convert.rs"
 required-features = ["office"]
 
+[[bin]]
+name = "mineru-mistralrs"
+path = "src/bin/mineru-mistralrs.rs"
+required-features = ["mistralrs"]
+
 [features]
 default = []
 office = ["dep:office2pdf"]
+mistralrs = ["dep:mistralrs"]
+mistralrs-cuda = ["mistralrs", "mistralrs/cuda"]
+mistralrs-metal = ["mistralrs", "mistralrs/metal"]
 
 [dependencies]
 base64 = "0.23"
@@ -69,6 +79,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 indicatif = "0.18.6"
 httpdate = "1"
 md5 = "0.7"
+mistralrs = { version = "=0.8.1", optional = true }
 hayro = "=0.5.0"
 hayro-jpeg2000 = { version = "=0.2.0", default-features = false }
 hayro-write = "=0.4.0"
@@ -96,10 +107,24 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Fixed-minimal local patch of mistralrs-core 0.8.1 so generated MinerU layout
+# tokens survive decoding (see vendor/mistralrs-core/PATCH.md). The `include`
+# entry above documents intent, but cargo's nested-package detection excludes
+# any directory containing a Cargo.toml from packaging, so a published crate
+# cannot carry the vendored source; `cargo install --features mistralrs` is
+# therefore not a supported install path (see PATCH.md "Packaging note").
+# Drop the patch and this entry when upstream lands a request-level
+# special-token switch.
+[patch.crates-io]
+mistralrs-core = { path = "vendor/mistralrs-core" }
+
 # ponytail: workspace only hosts isolated native binding subcrates; root package
-# default features/dependencies stay empty and unchanged.
+# default features/dependencies stay empty and unchanged. The vendored
+# mistralrs-core is a patched path dependency, not a workspace member, so its
+# heavy unit tests never join default test runs.
 [workspace]
 members = [".", "bindings/python", "bindings/node"]
+exclude = ["vendor/mistralrs-core"]
 resolver = "3"
 
 [workspace.package]

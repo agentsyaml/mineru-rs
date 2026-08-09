@@ -530,57 +530,6 @@ impl VlmHttpClient {
         }
     }
 
-    pub(crate) async fn decode_local_image(
-        &self,
-        input: VlmImageInput,
-    ) -> VlmResult<Option<image::DynamicImage>> {
-        crate::vlm_image::decode_local_for_task(input, self.config.clone(), &self.task_work_lease)
-            .await
-    }
-    pub(crate) async fn admit_local_image(
-        &self,
-        input: VlmImageInput,
-    ) -> VlmResult<Option<VlmImageInput>> {
-        Ok(crate::vlm_image::admit_local_for_task(
-            input,
-            self.config.clone(),
-            &self.task_work_lease,
-        )
-        .await?
-        .map(|(data, media_type)| VlmImageInput::Bytes {
-            data,
-            media_type: Some(media_type),
-        }))
-    }
-    pub(crate) async fn decode_admitted_image(
-        &self,
-        input: VlmImageInput,
-    ) -> VlmResult<Option<image::DynamicImage>> {
-        match input {
-            VlmImageInput::None => Ok(None),
-            VlmImageInput::Bytes { data, .. } => {
-                tokio::task::spawn_blocking(self.task_work_lease.wrap(move || {
-                    image::load_from_memory(&data)
-                        .map(Some)
-                        .map_err(|_| VlmError::InvalidImageInput("invalid image".into()))
-                }))
-                .await
-                .map_err(|_| VlmError::Transport {
-                    operation: "image",
-                    message: "image worker failed".into(),
-                })?
-            }
-            _ => Err(VlmError::InvalidImageInput(
-                "internal image was not admitted".into(),
-            )),
-        }
-    }
-    pub(crate) fn max_decoded_pixels(&self) -> u64 {
-        self.config.max_decoded_pixels
-    }
-    pub(crate) fn task_work_lease(&self) -> TaskWorkLease {
-        self.task_work_lease.clone()
-    }
     async fn remote(&self, mut url: Url) -> VlmResult<Vec<u8>> {
         if !self.config.allow_remote_images {
             return Err(VlmError::InvalidImageInput(

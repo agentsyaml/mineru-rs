@@ -13,7 +13,7 @@ IMAGE_INDEX_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.list.v2+json",
     "application/vnd.oci.image.index.v1+json",
 }
-EXPECTED_PLATFORMS = {("linux", "amd64"), ("linux", "arm64")}
+DEFAULT_PLATFORMS = {("linux", "amd64"), ("linux", "arm64")}
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 TAG_RE = re.compile(r"v(\d+)\.(\d+)\.(\d+)\Z")
 
@@ -27,7 +27,22 @@ def validate_digest(digest):
         fail(f"invalid manifest digest: {digest!r}")
 
 
-def runtime_platforms(index):
+def parse_platforms(value):
+    platforms = set()
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split("/")
+        if len(parts) != 2 or not all(parts):
+            fail(f"invalid platform: {item!r}")
+        platforms.add((parts[0], parts[1]))
+    if not platforms:
+        fail(f"no platforms specified: {value!r}")
+    return platforms
+
+
+def runtime_platforms(index, expected_platforms):
     if index.get("mediaType") not in IMAGE_INDEX_MEDIA_TYPES:
         fail(f"expected a manifest list or image index, got {index.get('mediaType')!r}")
     manifests = index.get("manifests")
@@ -55,23 +70,28 @@ def runtime_platforms(index):
         if not isinstance(platform, dict):
             fail("runnable descriptor has no platform")
         candidate = (platform.get("os"), platform.get("architecture"))
-        if candidate not in EXPECTED_PLATFORMS:
+        if candidate not in expected_platforms:
             fail(f"unexpected runnable platform: {candidate[0]}/{candidate[1]}")
         if candidate in runtimes:
             fail(f"duplicate runnable platform: {candidate[0]}/{candidate[1]}")
         runtimes.add(candidate)
-    if runtimes != EXPECTED_PLATFORMS:
-        fail(f"runnable platforms are {sorted(runtimes)!r}, expected {sorted(EXPECTED_PLATFORMS)!r}")
+    if runtimes != expected_platforms:
+        fail(f"runnable platforms are {sorted(runtimes)!r}, expected {sorted(expected_platforms)!r}")
     return runtimes, attestations
 
 
-def expected_tags(image, release_tag):
+def expected_tags(image, release_tag, suffix=""):
     match = TAG_RE.fullmatch(release_tag)
     if not match:
         fail(f"release tag is not stable vX.Y.Z: {release_tag!r}")
     assert match is not None
     major, minor, patch = match.groups()
-    return {f"{image}:{major}.{minor}.{patch}", f"{image}:{major}.{minor}", f"{image}:{major}", f"{image}:latest"}
+    return {
+        f"{image}:{major}.{minor}.{patch}{suffix}",
+        f"{image}:{major}.{minor}{suffix}",
+        f"{image}:{major}{suffix}",
+        f"{image}:latest{suffix}",
+    }
 
 
 def inspect_tag(tag):
@@ -88,8 +108,10 @@ def inspect_tag(tag):
 
 def command_manifest(args):
     validate_digest(args.digest)
-    runtimes, attestations = runtime_platforms(json.loads(Path(args.file).read_text()))
+    expected = parse_platforms(args.platforms)
+    runtimes, attestations = runtime_platforms(json.loads(Path(args.file).read_text()), expected)
     print(f"manifest digest: {args.digest}")
+    print("expected platforms: " + ", ".join(f"{os}/{arch}" for os, arch in sorted(expected)))
     print("runnable platforms: " + ", ".join(f"{os}/{arch}" for os, arch in sorted(runtimes)))
     print(f"BuildKit attestation descriptors: {attestations}")
 
@@ -97,7 +119,7 @@ def command_manifest(args):
 def command_tags(args):
     validate_digest(args.digest)
     tags = {line.strip() for line in Path(args.tags_file).read_text().splitlines() if line.strip()}
-    expected = expected_tags(args.image, args.release_tag)
+    expected = expected_tags(args.image, args.release_tag, args.tag_suffix)
     if tags != expected:
         fail(f"emitted tags are {sorted(tags)!r}, expected {sorted(expected)!r}")
     for tag in sorted(tags):
@@ -120,11 +142,16 @@ def self_test():
             },
         ],
     }
-    assert runtime_platforms(index) == (EXPECTED_PLATFORMS, 1)
+    assert runtime_platforms(index, DEFAULT_PLATFORMS) == (DEFAULT_PLATFORMS, 1)
+    amd64_only = {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{"digest": "sha256:" + "4" * 64, "platform": {"os": "linux", "architecture": "amd64"}}],
+    }
+    assert runtime_platforms(amd64_only, {("linux", "amd64")}) == ({("linux", "amd64")}, 0)
     malformed = json.loads(json.dumps(index))
     malformed["manifests"][0]["digest"] = "bad"
     try:
-        runtime_platforms(malformed)
+        runtime_platforms(malformed, DEFAULT_PLATFORMS)
     except ValueError:
         pass
     else:
@@ -135,8 +162,15 @@ def self_test():
         "ghcr.io/agentsyaml/mineru-rs:1",
         "ghcr.io/agentsyaml/mineru-rs:latest",
     }
+    assert expected_tags("ghcr.io/agentsyaml/mineru-rs-cuda", "v1.2.3", "-sm80") == {
+        "ghcr.io/agentsyaml/mineru-rs-cuda:1.2.3-sm80",
+        "ghcr.io/agentsyaml/mineru-rs-cuda:1.2-sm80",
+        "ghcr.io/agentsyaml/mineru-rs-cuda:1-sm80",
+        "ghcr.io/agentsyaml/mineru-rs-cuda:latest-sm80",
+    }
+    assert parse_platforms("linux/amd64") == {("linux", "amd64")}
     try:
-        runtime_platforms({"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": []})
+        runtime_platforms({"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": []}, DEFAULT_PLATFORMS)
     except ValueError:
         return
     raise AssertionError("empty index must fail")
@@ -148,11 +182,17 @@ def main():
     manifest = commands.add_parser("manifest")
     manifest.add_argument("--digest", required=True)
     manifest.add_argument("--file", required=True)
+    manifest.add_argument(
+        "--platforms",
+        default="linux/amd64,linux/arm64",
+        help="comma-separated expected runnable platforms (default: linux/amd64,linux/arm64)",
+    )
     tags = commands.add_parser("tags")
     tags.add_argument("--digest", required=True)
     tags.add_argument("--image", required=True)
     tags.add_argument("--release-tag", required=True)
     tags.add_argument("--tags-file", required=True)
+    tags.add_argument("--tag-suffix", default="", help="stable tag suffix, e.g. -sm80 for CUDA images")
     commands.add_parser("self-test")
     args = parser.parse_args()
     if args.command == "manifest":

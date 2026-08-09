@@ -820,8 +820,57 @@ impl MinerUVlmPreprocessor {
 const OFFICIAL_PAGE_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone)]
+enum VlmBackend {
+    Http(VlmHttpClient),
+    #[cfg(feature = "mistralrs")]
+    MistralRs(crate::mistralrs_client::MistralRsClient),
+}
+
+impl VlmBackend {
+    async fn predict_official_budgeted(
+        &self,
+        request: VlmRequest,
+        cap: usize,
+        budget: Option<Arc<ByteBudget>>,
+        deadline: tokio::time::Instant,
+    ) -> VlmResult<(String, usize, Vec<String>)> {
+        match self {
+            Self::Http(client) => {
+                client
+                    .predict_official_budgeted(request, cap, budget, deadline)
+                    .await
+            }
+            #[cfg(feature = "mistralrs")]
+            Self::MistralRs(client) => {
+                // mistralrs reports no truncation warnings; the raw-reply bytes still flow
+                // through the shared budget.
+                let (text, bytes) = client
+                    .predict_official_budgeted(request, cap, budget, deadline)
+                    .await?;
+                Ok((text, bytes, Vec::new()))
+            }
+        }
+    }
+
+    async fn aio_batch_predict(
+        &self,
+        requests: Vec<VlmRequest>,
+        semaphore: VlmSemaphore,
+    ) -> VlmResult<Vec<String>> {
+        match self {
+            Self::Http(client) => client.aio_batch_predict(requests, semaphore).await,
+            #[cfg(feature = "mistralrs")]
+            Self::MistralRs(client) => client.aio_batch_predict(requests, semaphore).await,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct MinerUVlmClient {
-    http: VlmHttpClient,
+    backend: VlmBackend,
+    image_config: Arc<VlmHttpConfig>,
+    max_decoded_pixels: u64,
+    task_work_lease: TaskWorkLease,
     preprocessor: MinerUVlmPreprocessor,
     layout_semaphore: Arc<Semaphore>,
     official_page_semaphore: Arc<Semaphore>,
@@ -840,6 +889,14 @@ struct SemanticSchedulerHook {
 impl std::fmt::Debug for SemanticSchedulerHook {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("SemanticSchedulerHook")
+    }
+}
+impl std::fmt::Debug for MinerUVlmClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MinerUVlmClient")
+            .field("backend", &self.backend)
+            .field("preprocessor", &self.preprocessor)
+            .finish_non_exhaustive()
     }
 }
 impl MinerUVlmClient {
@@ -982,7 +1039,7 @@ impl MinerUVlmClient {
         })?;
         let preprocessor = self.preprocessor.clone();
         let layout_image = Arc::clone(&image);
-        let max_pixels = self.http.max_decoded_pixels();
+        let max_pixels = self.max_decoded_pixels;
         let prepared_layout = self
             .official_blocking(deadline, move || {
                 preprocessor.prepare_rgb_for_layout_capped(&layout_image, max_pixels)
@@ -1033,10 +1090,10 @@ impl MinerUVlmClient {
                     message: "layout semaphore closed".into(),
                 })?;
             let (layout_text, layout_raw_bytes, layout_warnings) = self
-                .http
+                .backend
                 .predict_official_budgeted(
                     layout_request,
-                    self.http.official_response_cap(),
+                    self.image_config.max_response_bytes,
                     Some(raw_budget.clone()),
                     tokio::time::Instant::from_std(deadline),
                 )
@@ -1134,7 +1191,7 @@ impl MinerUVlmClient {
                 let client = self.clone();
                 let page = page.clone();
                 let blocks_for_encode = blocks.take().expect("encoder owns blocks exclusively");
-                let max_pixels = self.http.max_decoded_pixels();
+                let max_pixels = self.max_decoded_pixels;
                 let preprocessor = client.preprocessor.clone();
                 #[cfg(test)]
                 let scheduler_hook = self.semantic_scheduler_hook.clone();
@@ -1220,7 +1277,8 @@ impl MinerUVlmClient {
                     }
                     resident_bytes = resident_after;
                     let request = self.request(VlmImageInput::Bytes { data: image.data, media_type: Some(image.media_type) }, prompt, sampling, None);
-                    let http = self.http.clone();
+                    let backend = self.backend.clone();
+                    let max_response_bytes = self.image_config.max_response_bytes;
                     let semaphore = self.layout_semaphore.clone();
                     let raw_budget = raw_budget.clone();
                     requests.push(Box::pin(async move {
@@ -1228,7 +1286,7 @@ impl MinerUVlmClient {
                             operation: "official PDF",
                             message: "layout semaphore closed".into(),
                         })?;
-                        match http.predict_official_budgeted(request, http.official_response_cap(), Some(raw_budget), tokio::time::Instant::from_std(deadline)).await {
+                        match backend.predict_official_budgeted(request, max_response_bytes, Some(raw_budget), tokio::time::Instant::from_std(deadline)).await {
                             // Only parse-class (Protocol) malformation of the LLM reply degrades
                             // to empty content for this block. Resource/configuration failures and
                             // service failures (Http/Transport/Timeout) stay fatal so a wrong key
@@ -1444,6 +1502,29 @@ impl MinerUVlmClient {
     pub async fn connect(http: VlmHttpConfig, config: MinerUVlmConfig) -> VlmResult<Self> {
         Self::connect_for_task(http, config, TaskWorkLease::default()).await
     }
+    #[cfg(feature = "mistralrs")]
+    pub async fn connect_mistralrs(
+        model: crate::MistralRsConfig,
+        config: MinerUVlmConfig,
+    ) -> VlmResult<Self> {
+        let image_config = Arc::new(VlmHttpConfig::default());
+        let task_work_lease = TaskWorkLease::default();
+        Ok(Self {
+            backend: VlmBackend::MistralRs(
+                crate::mistralrs_client::MistralRsClient::connect(
+                    model,
+                    image_config.max_response_bytes,
+                )
+                .await?,
+            ),
+            max_decoded_pixels: image_config.max_decoded_pixels,
+            image_config,
+            task_work_lease,
+            preprocessor: MinerUVlmPreprocessor { config },
+            layout_semaphore: Arc::new(Semaphore::new(1)),
+            official_page_semaphore: Arc::new(Semaphore::new(1)),
+        })
+    }
     pub(crate) async fn connect_for_task(
         http: VlmHttpConfig,
         config: MinerUVlmConfig,
@@ -1460,8 +1541,15 @@ impl MinerUVlmClient {
         }
         let official_page_semaphore = Arc::new(Semaphore::new(OFFICIAL_PAGE_CONCURRENCY));
         let layout_semaphore = Arc::new(Semaphore::new(http.max_concurrency));
+        let max_decoded_pixels = http.max_decoded_pixels;
+        let image_config = Arc::new(http.clone());
         Ok(Self {
-            http: VlmHttpClient::connect_for_task(http, task_work_lease).await?,
+            backend: VlmBackend::Http(
+                VlmHttpClient::connect_for_task(http, task_work_lease.clone()).await?,
+            ),
+            image_config,
+            max_decoded_pixels,
+            task_work_lease,
             preprocessor: MinerUVlmPreprocessor { config },
             layout_semaphore,
             official_page_semaphore,
@@ -1474,10 +1562,10 @@ impl MinerUVlmClient {
         self.semantic_scheduler_hook = Some(hook);
     }
     pub(crate) fn task_work_lease(&self) -> TaskWorkLease {
-        self.http.task_work_lease()
+        self.task_work_lease.clone()
     }
     pub(crate) fn official_response_cap(&self) -> usize {
-        self.http.official_response_cap()
+        self.image_config.max_response_bytes
     }
     pub(crate) fn official_page_concurrency(
         &self,
@@ -1514,17 +1602,34 @@ impl MinerUVlmClient {
                 message: "image worker failed".into(),
             })?
     }
+    async fn decode_local_image(&self, image: VlmImageInput) -> VlmResult<Option<DynamicImage>> {
+        crate::vlm_image::decode_local_for_task(
+            image,
+            self.image_config.clone(),
+            &self.task_work_lease,
+        )
+        .await
+    }
+    async fn decode_admitted_image(&self, image: VlmImageInput) -> VlmResult<Option<DynamicImage>> {
+        self.decode_local_image(image).await
+    }
     async fn admit_semantic_image(&self, image: VlmImageInput) -> VlmResult<VlmImageInput> {
         if matches!(image, VlmImageInput::RemoteUrl(_)) {
             return Err(VlmError::InvalidImageInput(
                 "semantic operations require a local image".into(),
             ));
         }
-        Ok(self
-            .http
-            .admit_local_image(image)
-            .await?
-            .unwrap_or(VlmImageInput::None))
+        Ok(crate::vlm_image::admit_local_for_task(
+            image,
+            self.image_config.clone(),
+            &self.task_work_lease,
+        )
+        .await?
+        .map(|(data, media_type)| VlmImageInput::Bytes {
+            data,
+            media_type: Some(media_type),
+        })
+        .unwrap_or(VlmImageInput::None))
     }
     async fn layout_raw(
         &self,
@@ -1542,9 +1647,9 @@ impl MinerUVlmClient {
         semaphore: VlmSemaphore,
     ) -> VlmResult<VlmExtractResult> {
         let semaphore = semaphore.or_else(|| self.default_batch_semaphore());
-        let image = if let Some(image) = self.http.decode_admitted_image(image).await? {
+        let image = if let Some(image) = self.decode_admitted_image(image).await? {
             let preprocessor = self.preprocessor.clone();
-            let max_pixels = self.http.max_decoded_pixels();
+            let max_pixels = self.max_decoded_pixels;
             let prepared = self
                 .image_blocking(move || preprocessor.prepare_for_layout_capped(image, max_pixels))
                 .await?;
@@ -1562,7 +1667,7 @@ impl MinerUVlmClient {
             priority,
         );
         let text = self
-            .http
+            .backend
             .aio_batch_predict(vec![request], semaphore)
             .await?
             .pop()
@@ -1608,10 +1713,10 @@ impl MinerUVlmClient {
         semaphore: VlmSemaphore,
     ) -> VlmResult<VlmExtractResult> {
         let semaphore = semaphore.or_else(|| self.default_batch_semaphore());
-        if let Some(decoded) = self.http.decode_admitted_image(image).await? {
+        if let Some(decoded) = self.decode_admitted_image(image).await? {
             let preprocessor = self.preprocessor.clone();
             let prompts = not_extract_list.to_vec();
-            let max_pixels = self.http.max_decoded_pixels();
+            let max_pixels = self.max_decoded_pixels;
             let (next_blocks, prepared) = self
                 .image_blocking(move || {
                     let prepared = preprocessor.prepare_for_extract_limited(
@@ -1643,7 +1748,7 @@ impl MinerUVlmClient {
                     )
                 })
                 .collect();
-            let responses = self.http.aio_batch_predict(requests, semaphore).await?;
+            let responses = self.backend.aio_batch_predict(requests, semaphore).await?;
             for (index, response) in prepared.block_indices.into_iter().zip(responses) {
                 let mut native = from_vlm(blocks[index].clone());
                 vlm_postprocess::clean_block(&mut native, response);
@@ -1717,7 +1822,7 @@ impl MinerUVlmClient {
                 "semantic operations require a local image".into(),
             ));
         }
-        let image = self.http.decode_local_image(i).await?.ok_or_else(|| {
+        let image = self.decode_local_image(i).await?.ok_or_else(|| {
             VlmError::InvalidImageInput("semantic operations require an image".into())
         })?;
         let mut blocks = vec![VlmLayoutBlock {
@@ -1729,7 +1834,7 @@ impl MinerUVlmClient {
             metadata: Map::new(),
         }];
         let preprocessor = self.preprocessor.clone();
-        let max_pixels = self.http.max_decoded_pixels();
+        let max_pixels = self.max_decoded_pixels;
         let (next_blocks, prepared) = self
             .image_blocking(move || {
                 let prepared = preprocessor.prepare_for_extract_limited(
@@ -1765,7 +1870,7 @@ impl MinerUVlmClient {
             p,
         );
         let text = self
-            .http
+            .backend
             .aio_batch_predict(vec![request], semaphore)
             .await?
             .pop()
@@ -2043,17 +2148,13 @@ impl MinerUVlmClient {
             } else {
                 self.admit_semantic_image(image).await?
             };
-            let image = self
-                .http
-                .decode_admitted_image(image)
-                .await?
-                .ok_or_else(|| {
-                    VlmError::InvalidImageInput("semantic operations require an image".into())
-                })?;
+            let image = self.decode_admitted_image(image).await?.ok_or_else(|| {
+                VlmError::InvalidImageInput("semantic operations require an image".into())
+            })?;
             let preprocessor = self.preprocessor.clone();
             let page_blocks = std::mem::take(blocks);
             let prompts = prompts.to_vec();
-            let max_pixels = self.http.max_decoded_pixels();
+            let max_pixels = self.max_decoded_pixels;
             let (next_blocks, prepared) = self
                 .image_blocking(move || {
                     let mut blocks = page_blocks;
@@ -2088,7 +2189,7 @@ impl MinerUVlmClient {
                 locations.push((page_index, block_index));
             }
         }
-        let responses = self.http.aio_batch_predict(requests, semaphore).await?;
+        let responses = self.backend.aio_batch_predict(requests, semaphore).await?;
         if responses.len() != locations.len() {
             return Err(protocol("extract", "response/request length mismatch"));
         }
@@ -3624,10 +3725,10 @@ mod tests {
                 )
             })
             .collect();
-        let http = client.http.clone();
+        let backend = client.backend.clone();
         let semaphore = client.layout_semaphore.clone();
         let task =
-            tokio::spawn(async move { http.aio_batch_predict(requests, Some(semaphore)).await });
+            tokio::spawn(async move { backend.aio_batch_predict(requests, Some(semaphore)).await });
         timeout(Duration::from_secs(2), async {
             while state.layouts.load(Ordering::SeqCst) != 1 {
                 sleep(Duration::from_millis(1)).await;

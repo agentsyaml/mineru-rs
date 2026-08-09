@@ -35,6 +35,8 @@ jobs:
           python3 .github/scripts/stage_binding_artifacts.py self-test
           python3 .github/scripts/attach_release_assets.py self-test
           python3 .github/scripts/check_cargo_audit.py self-test
+          python3 .github/scripts/verify_container_release.py self-test
+          python3 .github/scripts/container_smoke.py --self-check
 
   rust-msrv:
     name: Rust 1.89.0
@@ -78,8 +80,8 @@ jobs:
       - name: Run hermetic API process end-to-end tests
         run: |
           cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --ignored --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --all-features --test mineru_api_server -- --exact canonical_client_consumes_real_api_server_zip_and_publishes_layout --ignored --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --all-features --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --features office --test mineru_api_server -- --exact canonical_client_consumes_real_api_server_zip_and_publishes_layout --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --features office --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
       - name: Check root package without default features
         run: cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features
       - name: Build documentation
@@ -114,6 +116,7 @@ jobs:
           assert {target["name"] for target in root["targets"] if "bin" in target["kind"]} == {
               "mineru",
               "mineru-api",
+              "mineru-mistralrs",
               "mineru-office-convert",
               "mineru-vlm-api",
           }
@@ -133,6 +136,7 @@ jobs:
               "LICENSE-APACHE",
               "LICENSE-MIT",
               "README.md",
+              "README.zh-CN.md",
               "docs/compatibility.md",
               "docs/usage.md",
               "docs/usage.en.md",
@@ -187,6 +191,7 @@ jobs:
               "LICENSE-APACHE",
               "LICENSE-MIT",
               "README.md",
+              "README.zh-CN.md",
               "docs/compatibility.md",
               "docs/usage.md",
               "docs/usage.en.md",
@@ -233,15 +238,17 @@ jobs:
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=4
       - name: Test Windows Office helper containment and conversion
         run: |
-          cargo +1.89.0 test --locked -p mineru --all-features --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=4
-          cargo +1.89.0 test --locked -p mineru --all-features --target x86_64-pc-windows-msvc --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=4
+          cargo +1.89.0 test --locked -p mineru --features office --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --features office --target x86_64-pc-windows-msvc --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
       - name: Check ARM64 Windows tests
         run: |
           cargo +1.89.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
           cargo +1.89.0 check --locked -p mineru --features office --bin mineru-office-convert --target aarch64-pc-windows-msvc
 
-  rust-all-features:
-    name: Rust stable, all features
+  rust-office-mistralrs:
+    # CPU-only maximum feature set; CUDA (`mistralrs-cuda`) is built only by
+    # the Dockerfile.cuda publish job, never on a plain runner.
+    name: Rust 1.89, office + mistralrs (CPU)
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -249,12 +256,53 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install stable Rust
-        run: rustup toolchain install stable --profile minimal --component clippy
-      - name: Test all features (lib)
-        run: cargo +stable test --locked -p mineru --lib --all-features -- --test-threads=4
+      - name: Install Rust 1.89.0
+        run: rustup toolchain install 1.89.0 --profile minimal --component clippy
+      - name: Test office + mistralrs
+        run: cargo +1.89.0 test --locked -p mineru --all-targets --features office,mistralrs -- --test-threads=1
       - name: Clippy
-        run: cargo +stable clippy --locked -p mineru --all-targets --all-features
+        run: cargo +1.89.0 clippy --locked -p mineru --all-targets --features office,mistralrs
+      - name: Vendor patch regression tests
+        # PATCH.md documents the exact test filters; keep them pinned in CI so
+        # a vendor sync cannot silently drop any of the three patches.
+        run: |
+          cargo +1.89.0 test --locked --manifest-path vendor/mistralrs-core/Cargo.toml --lib utils::memory_usage
+          cargo +1.89.0 test --locked --manifest-path vendor/mistralrs-core/Cargo.toml --lib vision_models::qwen2vl
+          cargo +1.89.0 test --locked --manifest-path vendor/mistralrs-core/Cargo.toml --lib pipeline::sampling
+
+  rust-mistralrs-windows-check:
+    # Compile gate only: the first release matrix has no Windows binaries, but
+    # this proves mistralrs (CPU) builds on Windows before a future matrix adds
+    # it. `windows-2025` is already used by windows-path-safety-msrv.
+    name: Rust 1.89, mistralrs (CPU) check on Windows
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.89.0
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Check mistralrs (CPU) binary compiles
+        run: cargo check --locked -p mineru --features mistralrs --bin mineru-mistralrs
+
+  rust-mistralrs-metal-check:
+    # Compile gate for the Metal publish variant (macos-15 runners ship Xcode,
+    # so .metal shader compilation is available). Kept separate from the CPU
+    # job so failures are isolated and both run in parallel.
+    name: Rust 1.89, office + mistralrs (Metal) check
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.89.0
+        run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Check office + mistralrs (Metal) binary compiles
+        run: cargo +1.89.0 check --locked -p mineru --features office,mistralrs-metal --bin mineru-mistralrs
 
   python-binding:
     name: Python 3.9 binding
@@ -409,5 +457,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=ci-container
       - name: Smoke canonical CLI
         run: docker run --rm mineru:ci mineru --version
+      - name: Smoke standalone mistralrs CLI help
+        run: docker run --rm mineru:ci mineru-mistralrs --help
       - name: Smoke API task lifecycle
         run: python3 .github/scripts/container_smoke.py --image mineru:ci --pdf tests/fixtures/pdf/minimal.pdf

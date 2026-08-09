@@ -1,7 +1,8 @@
 # Releasing
 
 Releases are coordinated across crates.io `mineru`, PyPI `mineru-rs`, npm
-`@alexsun-top/mineru`, and GHCR `ghcr.io/agentsyaml/mineru-rs`. Registry
+`@alexsun-top/mineru`, the standalone `mineru-mistralrs` binary tarballs, and
+the CUDA GHCR image `ghcr.io/agentsyaml/mineru-rs-cuda`. Registry
 credentials must be short-lived environment variables or trusted-publisher OIDC
 credentials. Never store a registry token in the repository, GitHub secrets,
 `.npmrc`, or Cargo configuration.
@@ -24,7 +25,7 @@ restrict these environments to release tags.
 - npm: control the `@alexsun-top` scope. After bootstrap creates all seven
   records, configure a trusted publisher on every record for repository
   `agentsyaml/mineru-rs`, workflow `release.yml`, environment `npm`.
-- GHCR: `publish-container` uses the workflow `GITHUB_TOKEN` with only
+- GHCR: `publish-container-cuda` uses the workflow `GITHUB_TOKEN` with only
   `contents: read` and `packages: write` permissions.
 
 No long-lived registry token belongs in GitHub Actions. The crates.io, PyPI,
@@ -168,6 +169,7 @@ cargo build --release --bin mineru-office-convert --features office
 
 python3 .github/scripts/verify_release.py self-test
 python3 .github/scripts/attach_release_assets.py self-test
+python3 .github/scripts/verify_container_release.py self-test
 
 /tmp/mineru-release-venv/bin/mineru --help
 /tmp/mineru-release-venv/bin/mineru-rs --help
@@ -181,9 +183,10 @@ platform packages install none.
 
 Inspect Cargo metadata to confirm the three packages are `mineru`,
 `mineru-python`, and `mineru-node`, the root library target is `mineru`, exactly
-the five documented binaries exist, and no package or target is named
-`mineru-cli`. Confirm Python wheels are `cp39-abi3` and no raw `linux_*` wheel
-is released. Do not build or publish a Python sdist.
+the five documented binaries exist (`mineru`, `mineru-api`, `mineru-vlm-api`,
+`mineru-office-convert`, and the feature-gated `mineru-mistralrs`), and no
+package or target is named `mineru-cli`. Confirm Python wheels are `cp39-abi3`
+and no raw `linux_*` wheel is released. Do not build or publish a Python sdist.
 
 ## Trigger and publication sequence
 
@@ -202,10 +205,59 @@ is released. Do not build or publish a Python sdist.
    exactly that `head_sha` and `main` branch before any registry publication.
    It also rejects an existing `vX.Y.Z` tag or release.
 
-The workflow keeps crates.io, PyPI, npm (six native packages plus root), and
-GHCR build, validation, and publication. It builds the GHCR image for
-`linux/amd64` and `linux/arm64` and publishes the exact release version,
-`major.minor`, `major`, and `latest` tags.
+The workflow keeps crates.io, PyPI, npm (six native packages plus root), GHCR,
+and standalone `mineru-mistralrs` binary build, validation, and publication:
+separate protected jobs publish crates.io, PyPI wheels, the six npm native
+packages and npm root package, the standalone `mineru-mistralrs` binary
+tarballs, and the CUDA GHCR image. There is no CPU container image; the CPU
+backend ships only as a standalone binary.
+
+`publish-container-cuda` builds `Dockerfile.cuda` for `linux/amd64` only and
+publishes `ghcr.io/agentsyaml/mineru-rs-cuda` with explicitly compute-capability
+scoped tags (`latest-sm80`, `<version>-sm80`, `<major.minor>-sm80`,
+`<major>-sm80`), using `CUDA_COMPUTE_CAP=80` and a separate GHA cache scope.
+The `sm80` suffix is deliberate: this image targets sm_80-compatible Ampere
+and Ada GPUs, not Hopper (sm_90), and must
+not masquerade as a universal-GPU image. It contains only the standalone
+`mineru-mistralrs` CLI and never exposes a server port. The NVIDIA driver is
+never baked in: `libcuda.so.1` is supplied by the host's GPU driver at runtime
+via `--gpus all`. The release runner has no GPU and no injected driver, so the
+binary cannot start there (even `--help` fails at `dlopen(libcuda.so.1)`).
+Smoke coverage is therefore limited to non-root execution, binary presence, and
+a dynamic-linking check (`ldd`) that fails on any unresolved library other than
+the expected host-supplied `libcuda.so.1`; models are never loaded in CI. Users
+who build the image themselves can pass another capability, e.g.
+`--build-arg CUDA_COMPUTE_CAP=89` (Ada) or `CUDA_COMPUTE_CAP=90` (Hopper), and
+must run it on a host whose driver provides `libcuda.so.1`.
+
+### Standalone binaries
+
+The five standalone `mineru-mistralrs` tarballs are attached to the GitHub
+Release as assets. Naming is `mineru-mistralrs-{variant}-{rust-target}.tar.gz`
+with a single top-level executable (no directory prefix) inside:
+
+| Variant | Rust target | Runner | Backend feature |
+| --- | --- | --- | --- |
+| `cpu` | `x86_64-unknown-linux-gnu` | ubuntu-24.04 | `mistralrs` |
+| `cpu` | `aarch64-unknown-linux-gnu` | ubuntu-24.04-arm | `mistralrs` |
+| `cpu` | `aarch64-apple-darwin` | macos-15 | `mistralrs` |
+| `metal` | `aarch64-apple-darwin` | macos-15 | `mistralrs-metal` |
+| `cuda` | `x86_64-unknown-linux-gnu` | ubuntu-24.04 | Dockerfile.cuda builder (sm_80) |
+
+`binary-build` is the four-entry CPU/Metal matrix; each entry runs
+`cargo build --locked --release --features <feature> --bin mineru-mistralrs
+--target <target>` and packages the tarball, then smokes it by extracting the
+binary and running `--help`. `binary-cuda` builds the amd64 CUDA binary from
+the `Dockerfile.cuda` builder stage with `CUDA_COMPUTE_CAP=80` so it matches
+the CUDA image exactly, packages
+`mineru-mistralrs-cuda-x86_64-unknown-linux-gnu.tar.gz`, and smokes it with a
+dynamic-linking check (`ldd`) run inside the pinned CUDA 12.8.1 runtime image
+(the runner itself has no CUDA runtime libraries), asserting the only
+unresolved library is the host-supplied `libcuda.so.1`; the runner has no GPU,
+so the binary cannot start there and models are never loaded in CI.
+
+`verify_release.py binary` re-verifies the exact five tarballs before
+attachment; see [GitHub Release assets](#github-release-assets).
 
 The GitHub Release is not published until all four registry/container publishers
 and the binary asset verification succeed. Linux standalone binaries are built
@@ -214,8 +266,9 @@ natively (no QEMU) in
 
 ## GitHub Release assets
 
-The GitHub Release has exactly seven uploaded assets (replace `X.Y.Z` with the
-release version):
+The GitHub Release has exactly twelve uploaded assets (replace `X.Y.Z` with the
+release version): the six main-library platform archives, the five
+`mineru-mistralrs` standalone tarballs, and `SHA256SUMS`:
 
 1. `mineru-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
 2. `mineru-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz`
@@ -223,10 +276,16 @@ release version):
 4. `mineru-vX.Y.Z-aarch64-apple-darwin.tar.gz`
 5. `mineru-vX.Y.Z-x86_64-pc-windows-msvc.zip`
 6. `mineru-vX.Y.Z-aarch64-pc-windows-msvc.zip`
-7. `SHA256SUMS`
+7. `mineru-mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz`
+8. `mineru-mistralrs-cpu-aarch64-unknown-linux-gnu.tar.gz`
+9. `mineru-mistralrs-cpu-aarch64-apple-darwin.tar.gz`
+10. `mineru-mistralrs-metal-aarch64-apple-darwin.tar.gz`
+11. `mineru-mistralrs-cuda-x86_64-unknown-linux-gnu.tar.gz`
+12. `SHA256SUMS`
 
-Each archive has one root directory and exactly `mineru` plus
-`mineru-office-convert` (`.exe` on Windows). Verify the downloaded files with
+Each main-library archive has one root directory and exactly `mineru` plus
+`mineru-office-convert` (`.exe` on Windows). Each `mineru-mistralrs` tarball
+contains the single standalone executable. Verify the downloaded files with
 `sha256sum -c SHA256SUMS` (or the platform equivalent). Crates, wheels, and npm
 tarballs remain registry artifacts and are never attached to the GitHub Release.
 
@@ -237,6 +296,13 @@ reruns fail rather than delete, recreate, or replace them. GitHub may show
 automatic `Source code (zip)` and `Source code (tar.gz)` links; those are GitHub
 generated source links, not uploaded release assets and not Rust `.crate`
 packages.
+
+Re-running a release is idempotent: an asset whose name and SHA-256 already
+match is skipped, and a same-name asset with a different digest fails the job
+instead of being replaced. Nothing uses `--clobber`, and the job never modifies
+`latest`, any dist-tag, or the release body and metadata. `SHA256SUMS` is
+generated in a separate staging directory so the crate, wheel, npm, and binary
+directories continue to match their exact expected payloads.
 
 This document specifies commands; it does not assert that bootstrap, preflight,
 trusted-publisher setup, or publication has been performed.

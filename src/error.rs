@@ -84,9 +84,11 @@ pub(crate) fn sanitize_vlm_error_bytes(raw: &[u8], cap: usize) -> String {
         .get_or_init(|| Regex::new(r"(?i)\bbearer\s+[^\s,;]+").unwrap())
         .replace_all(&text, "Bearer [REDACTED]")
         .into_owned();
+    // Shared by every backend (not just the mistralrs path): any
+    // `prefix+secret-key-name` pair is redacted. Over-redaction by design.
     text = SECRET_VALUE
-        .get_or_init(|| Regex::new(r#"(?i)(?:\"|'|\b)(authorization|cookie|x-api-key|api[-_]?key|access_token|refresh_token|client_secret|token|secret|password|credential)(?:\"|')?(\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}&]+)"#).unwrap())
-        .replace_all(&text, "$1$2[REDACTED]")
+        .get_or_init(|| Regex::new(r#"(?i)((?:\"|')?(?:[a-z0-9_-]*)(authorization|cookie|x-api-key|api[-_]?key|access_token|refresh_token|client_secret|token|secret|password|credential)(?:\"|')?)(\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}&]+)"#).unwrap())
+        .replace_all(&text, "$1$3[REDACTED]")
         .into_owned();
     text = HTTP_URL
         .get_or_init(|| Regex::new(r#"(?i)\bhttps?://[^\s"'<>]+"#).unwrap())
@@ -195,6 +197,17 @@ mod tests {
         for secret in ["json-secret", "also-secret", "k1", "k2", "k3", "k4"] {
             assert!(!sanitized.contains(secret), "leaked {secret}: {sanitized}");
         }
+    }
+
+    #[test]
+    fn sanitizer_redacts_suffixed_secret_keys_like_hf_token() {
+        let secret = "hf_suffixed_secret_555";
+        let sanitized = sanitize_vlm_error_bytes(
+            format!("HF_TOKEN={secret} GITHUB_TOKEN={secret} API_TOKEN={secret} Bearer {secret}")
+                .as_bytes(),
+            1024,
+        );
+        assert!(!sanitized.contains(secret), "leaked {secret}: {sanitized}");
     }
 
     #[test]

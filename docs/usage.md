@@ -177,28 +177,7 @@ API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--processing-wind
 
 ### 容器
 
-稳定版镜像支持 `amd64` 和 `arm64`：
-
-```sh
-docker pull ghcr.io/agentsyaml/mineru-rs:latest
-docker volume create mineru-output
-docker run --rm -p 8000:8000 -v mineru-output:/app/output \
-  -e MINERU_VL_SERVER="https://<server>" \
-  -e MINERU_VL_MODEL_NAME="<model-id>" \
-  -e MINERU_VL_API_KEY="<your-key>" \
-  -e MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
-  ghcr.io/agentsyaml/mineru-rs:latest
-```
-
-默认命令启动 API，监听 `8000`，并将任务输出写入 `/app/output`；默认使用 named volume，以保留非 root 镜像所需的目录权限。若在原生 Linux 上绑定宿主目录，需创建目录并通过 `--user "$(id -u):$(id -g)"` 以宿主用户身份运行。镜像公开绑定 API，但为避免未认证的公开解析，POST 解析必须由操作者显式启用：`-e MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true`。可替换默认命令运行 CLI：
-
-```sh
-docker run --rm ghcr.io/agentsyaml/mineru-rs:latest mineru --version
-mkdir -p output
-docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/work" -w /work \
-  -e MINERU_VL_SERVER="https://<server>" -e MINERU_VL_MODEL_NAME="<model-id>" \
-  ghcr.io/agentsyaml/mineru-rs:latest mineru -p input.pdf -o output
-```
+API 服务没有已发布的容器镜像；请从源码构建运行（见上文[构建与前置条件](#构建与前置条件)）。唯一发布的镜像 `ghcr.io/agentsyaml/mineru-rs-cuda:latest-sm80` 仅内置 `mineru-mistralrs` 本地推理 CLI，不提供服务端口，也不包含 `mineru-api`。
 
 ### 启动
 
