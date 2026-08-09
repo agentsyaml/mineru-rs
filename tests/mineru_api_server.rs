@@ -25,20 +25,6 @@ use tokio::sync::{Mutex as TokioMutex, oneshot};
 static SERIAL: OnceLock<TokioMutex<()>> = OnceLock::new();
 const DIAGNOSTIC_CAP: usize = 16 * 1024;
 
-#[derive(Clone, Copy)]
-enum ApiBinary {
-    Primary,
-    Alias,
-}
-impl ApiBinary {
-    fn path(self) -> &'static str {
-        match self {
-            Self::Primary => env!("CARGO_BIN_EXE_mineru-api"),
-            Self::Alias => env!("CARGO_BIN_EXE_mineru-vlm-api"),
-        }
-    }
-}
-
 struct Server {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -124,7 +110,7 @@ fn scrub(command: &mut Command) {
         command.env_remove(key);
     }
 }
-fn run_help(binary: ApiBinary) -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
+fn run_help() -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
     struct HelpOwner {
         child: Child,
         stdout: Option<thread::JoinHandle<Vec<u8>>>,
@@ -149,7 +135,7 @@ fn run_help(binary: ApiBinary) -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
             }
         }
     }
-    let mut command = Command::new(binary.path());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mineru-api"));
     scrub(&mut command);
     let mut owner = HelpOwner {
         child: command
@@ -255,16 +241,16 @@ async fn health(server: &mut Server, port: u16) {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
-fn spawn(binary: ApiBinary, host: &str, envs: &[(&str, &str)]) -> (Server, u16) {
+fn spawn(host: &str, envs: &[(&str, &str)]) -> (Server, u16) {
     let port = reserve_port();
     // Reserve immediately before spawn; the listener is dropped before the child binds.
-    let server = Server::start_at(binary, host, port, envs);
+    let server = Server::start_at(host, port, envs);
     (server, port)
 }
 impl Server {
-    fn start_at(binary: ApiBinary, host: &str, port: u16, envs: &[(&str, &str)]) -> Self {
+    fn start_at(host: &str, port: u16, envs: &[(&str, &str)]) -> Self {
         let cwd = tempfile::tempdir().unwrap();
-        let mut command = Command::new(binary.path());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mineru-api"));
         scrub(&mut command);
         command
             .args(["--host", host, "--port", &port.to_string()])
@@ -304,68 +290,56 @@ impl Server {
 
 #[tokio::test]
 #[ignore = "process-level API server e2e"]
-async fn aliases_help_health_cwd_and_eof() {
+async fn help_health_cwd_and_eof() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
-    let mut help = Vec::new();
-    for binary in [ApiBinary::Primary, ApiBinary::Alias] {
-        let (status, stdout, stderr) = run_help(binary);
-        assert!(status.success(), "{}", String::from_utf8_lossy(&stderr));
-        let text = String::from_utf8(stdout).unwrap();
-        assert!(text.contains("--host") && text.contains("--port"));
-        help.push(
-            text.replace("mineru-api", "API")
-                .replace("mineru-vlm-api", "API"),
-        );
-        let (mut server, port) = spawn(
-            binary,
-            "127.0.0.1",
-            &[
-                ("MINERU_API_SHUTDOWN_ON_STDIN_EOF", "1"),
-                ("MINERU_LOG_LEVEL", "iNfO"),
-            ],
-        );
-        health(&mut server, port).await;
-        let output = server.cwd.path().join("output");
-        assert!(output.is_dir() && std::fs::read_dir(&output).unwrap().next().is_none());
-        server.close_stdin();
-        assert!(server.exit(Duration::from_secs(10)).await.success());
-        assert_eq!(
-            server.diagnostics().lines().collect::<Vec<_>>(),
-            vec![
-                format!(
-                    "server started: http://127.0.0.1:{port}: health=http://127.0.0.1:{port}/health"
-                ),
-                "server stopped: server".into(),
-            ]
-        );
-    }
-    assert_eq!(help[0], help[1]);
+    let (status, stdout, stderr) = run_help();
+    assert!(status.success(), "{}", String::from_utf8_lossy(&stderr));
+    let text = String::from_utf8(stdout).unwrap();
+    assert!(text.contains("--host") && text.contains("--port"));
+    let (mut server, port) = spawn(
+        "127.0.0.1",
+        &[
+            ("MINERU_API_SHUTDOWN_ON_STDIN_EOF", "1"),
+            ("MINERU_LOG_LEVEL", "iNfO"),
+        ],
+    );
+    health(&mut server, port).await;
+    let output = server.cwd.path().join("output");
+    assert!(output.is_dir() && std::fs::read_dir(&output).unwrap().next().is_none());
+    server.close_stdin();
+    assert!(server.exit(Duration::from_secs(10)).await.success());
+    assert_eq!(
+        server.diagnostics().lines().collect::<Vec<_>>(),
+        vec![
+            format!(
+                "server started: http://127.0.0.1:{port}: health=http://127.0.0.1:{port}/health"
+            ),
+            "server stopped: server".into(),
+        ]
+    );
 }
 
 #[tokio::test]
 #[ignore = "process-level API server e2e"]
 async fn invalid_log_level_exits_before_bind_or_output() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
-    for binary in [ApiBinary::Primary, ApiBinary::Alias] {
-        let port = reserve_port();
-        let mut server = Server::start_at(
-            binary,
-            "127.0.0.1",
-            port,
-            &[("MINERU_LOG_LEVEL", "raw-secret-invalid")],
-        );
-        assert!(!server.exit(Duration::from_secs(10)).await.success());
-        assert_eq!(server.diagnostics(), "invalid MINERU_LOG_LEVEL\n");
-        assert!(!server.cwd.path().join("output").exists());
-        TcpListener::bind(("127.0.0.1", port)).unwrap();
-    }
+    let port = reserve_port();
+    let mut server = Server::start_at(
+        "127.0.0.1",
+        port,
+        &[("MINERU_LOG_LEVEL", "raw-secret-invalid")],
+    );
+    assert!(!server.exit(Duration::from_secs(10)).await.success());
+    assert_eq!(server.diagnostics(), "invalid MINERU_LOG_LEVEL\n");
+    assert!(!server.cwd.path().join("output").exists());
+    TcpListener::bind(("127.0.0.1", port)).unwrap();
 }
 
 #[tokio::test]
 #[ignore = "process-level API server e2e"]
 async fn public_bind_matrix() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
-    let mut bad = Server::start_at(ApiBinary::Primary, "0.0.0.0", reserve_port(), &[]);
+    let mut bad = Server::start_at("0.0.0.0", reserve_port(), &[]);
     assert!(!bad.exit(Duration::from_secs(10)).await.success());
     assert!(
         bad.diagnostics()
@@ -391,7 +365,7 @@ async fn public_bind_matrix() {
         if allow {
             envs.push(("MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT", "1"));
         }
-        let (mut server, port) = spawn(ApiBinary::Primary, "0.0.0.0", &envs);
+        let (mut server, port) = spawn("0.0.0.0", &envs);
         health(&mut server, port).await;
         if allow {
             let response = tokio::time::timeout(
@@ -434,12 +408,10 @@ fn signal(pid: u32, value: i32) {
 #[ignore = "process-level API server e2e"]
 async fn sigint_exits_while_stdin_watcher_is_blocked() {
     let _lock = SERIAL.get_or_init(|| TokioMutex::new(())).lock().await;
-    let (mut server, port) = spawn(
-        ApiBinary::Primary,
-        "127.0.0.1",
-        &[("MINERU_API_SHUTDOWN_ON_STDIN_EOF", "1")],
-    );
+    let (mut server, port) = spawn("127.0.0.1", &[("MINERU_API_SHUTDOWN_ON_STDIN_EOF", "1")]);
     health(&mut server, port).await;
+
+    #[cfg(unix)]
     signal(server.child.id(), SIGINT);
     assert!(server.exit(Duration::from_secs(10)).await.success());
 }
@@ -498,11 +470,7 @@ async fn active_worker_drains_before_exit() {
         .await
         .unwrap();
     });
-    let (mut server, port) = spawn(
-        ApiBinary::Primary,
-        "127.0.0.1",
-        &[("MINERU_API_SHUTDOWN_ON_STDIN_EOF", "1")],
-    );
+    let (mut server, port) = spawn("127.0.0.1", &[("MINERU_API_SHUTDOWN_ON_STDIN_EOF", "1")]);
     health(&mut server, port).await;
     let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pdf/minimal.pdf");
     let form = reqwest::multipart::Form::new()
@@ -624,7 +592,6 @@ async fn canonical_client_consumes_real_api_server_zip_and_publishes_layout() {
     });
     let port = reserve_port();
     let mut server = Server::start_at(
-        ApiBinary::Primary,
         "127.0.0.1",
         port,
         &[

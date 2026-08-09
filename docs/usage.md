@@ -173,7 +173,7 @@ API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--processing-wind
 
 ## API 服务端
 
-`mineru-api` 与 `mineru-vlm-api` 是同一个服务的两个可执行名，行为完全一致。服务本身不做本地推理，它接收文档、调用外部 VLM 服务，再把结果归档返回。
+`mineru-api` 是 HTTP API 服务。服务本身不做本地推理，它接收文档、调用外部 VLM 服务，再把结果归档返回。
 
 ### 容器
 
@@ -469,7 +469,7 @@ mineru.run({ path: 'input.pdf', output: 'out/' }).then(({ warnings }) => {
 
 `--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`、`--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES` 和 `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` 接受无符号十进制字节数（允许空白和 `_`）。优先级为 CLI、环境变量、编译默认值：输入 4_293_918_719 字节、编码文档 8 GiB、输出 8 GiB。显式的非法、零、溢出或平台不可表示值会失败；不再存在任意硬上限——配置值本身作为策略使用，而不会被夹紧到另一个常数。
 
-这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过常驻上限（`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`，默认 512 MiB）的源 PDF，单个 VLM 响应仍限制为 10 MiB（`--http-max-response-bytes`）。编码策略应在 `mineru-vlm-api` 配置；规范远程模式会拒绝编码覆盖项。
+这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过常驻上限（`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`，默认 512 MiB）的源 PDF，单个 VLM 响应仍限制为 10 MiB（`--http-max-response-bytes`）。编码策略应在 `mineru-api` 配置；规范远程模式会拒绝编码覆盖项。
 
 | 项目 | 默认值 |
 | --- | ---: |

@@ -35,7 +35,7 @@ except ModuleNotFoundError:  # Python 3.9 wheel lanes never parse TOML.
 
 REPOSITORY = "https://github.com/agentsyaml/mineru-rs"
 LICENSE = "MIT OR Apache-2.0"
-BINS = {"mineru", "mineru-api", "mineru-vlm-api", "mineru-office-convert", "mineru-mistralrs"}
+BINS = {"mineru", "mineru-api", "mineru-office-convert", "mineru-mistralrs"}
 NPM_ROOT = "@alexsun-top/mineru"
 PLATFORMS = {
     "darwin-x64": ("darwin", "x64", None, "macosx_10_12_x86_64"),

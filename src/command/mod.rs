@@ -922,7 +922,7 @@ pub(super) fn remote_only_service_error(
     })
 }
 
-/// Task-service request caps are owned by the `mineru-vlm-api` CLI. Explicit values reaching
+/// Task-service request caps are owned by the `mineru-api` CLI. Explicit values reaching
 /// this client could never act, so they are rejected before work.
 pub(super) fn server_owned_error(
     service: &service::ServiceOverrides,

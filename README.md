@@ -159,17 +159,16 @@ cargo install mineru
 mineru --help
 ```
 
-The package installs the `mineru`, `mineru-api`, and `mineru-vlm-api`
-binaries. To also install the `mineru-office-convert` Office conversion
-helper, build with `--features office`:
+The package installs the `mineru` and `mineru-api` binaries. To also install
+the `mineru-office-convert` Office conversion helper, build with `--features
+office`:
 
 ```sh
 cargo install mineru --features office
 ```
 
-`mineru-api` and `mineru-vlm-api` are two names for the same HTTP service:
-it accepts documents, calls the configured VLM, and returns result archives.
-It performs no local inference.
+`mineru-api` is the HTTP API server: it accepts documents, calls the
+configured VLM, and returns result archives. It performs no local inference.
 
 ```sh
 export MINERU_VL_SERVER="https://<server>"
@@ -288,10 +287,10 @@ mineru-mistralrs input.pdf --page-start 0 --page-end 2 \
 
 ### API server
 
-`mineru-api` and `mineru-vlm-api` are two names for the same HTTP service: it
-accepts documents, calls the configured VLM, and returns result archives. It
-performs no local inference. See [CLI and API server](#cli-and-api-server) for
-the API-mode submission flow.
+`mineru-api` is the HTTP API server: it accepts documents, calls the
+configured VLM, and returns result archives. It performs no local inference.
+See [CLI and API server](#cli-and-api-server) for the API-mode submission
+flow.
 
 ## Local model and Hugging Face settings
 
@@ -321,13 +320,12 @@ Hugging Face settings that also apply to downloads:
 | `HF_TOKEN` | Hugging Face access token, for gated or private repositories. |
 | `HF_HUB_OFFLINE=1` | Force fully offline operation from the local cache. |
 
-## The five binaries
+## The four binaries
 
 | Binary | Purpose |
 | --- | --- |
 | `mineru` | Canonical CLI: PDF, image, and Office documents, either directly against a VLM or through a `mineru-api` server. |
 | `mineru-api` | HTTP API server (see above). |
-| `mineru-vlm-api` | The same server under a second name. |
 | `mineru-office-convert` | Office (.docx/.pptx/.xlsx) → PDF conversion helper used by `mineru`; built with `--features office`. |
 | `mineru-mistralrs` | Local PDF parsing with the Qwen2-VL MinerU model; built from source with `--features mistralrs`, or shipped in the CUDA image and standalone binaries. |
 

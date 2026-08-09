@@ -38,12 +38,7 @@ include = [
 name = "mineru"
 path = "src/bin/mineru.rs"
 
-[[bin]]
-name = "mineru-vlm-api"
-path = "src/bin/mineru-vlm-api.rs"
-
-# Primary API server binary; `mineru-api.rs` is a thin `include!` alias of
-# `mineru-vlm-api.rs` so the same server source ships under both names.
+# The HTTP API server binary; the only API server.
 [[bin]]
 name = "mineru-api"
 path = "src/bin/mineru-api.rs"

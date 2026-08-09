@@ -146,7 +146,7 @@ pub struct ServiceOverrides {
     pub office_job_memory_bytes: Option<u64>,
     pub office_process_time_seconds: Option<u64>,
     pub office_job_time_seconds: Option<u64>,
-    // Task-service lifecycle and request caps (owned by the `mineru-vlm-api` CLI).
+    // Task-service lifecycle and request caps (owned by the `mineru-api` CLI).
     pub task_retention: Option<Duration>,
     pub task_cleanup_interval: Option<Duration>,
     pub server_record_cap: Option<usize>,
@@ -491,7 +491,7 @@ impl OfficeLimits {
     }
 }
 
-/// Task-service request caps, owned by the `mineru-vlm-api` CLI.
+/// Task-service request caps, owned by the `mineru-api` CLI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServerLimits {
     pub record_cap: usize,

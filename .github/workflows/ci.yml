@@ -121,7 +121,6 @@ jobs:
               "mineru-api",
               "mineru-mistralrs",
               "mineru-office-convert",
-              "mineru-vlm-api",
           }
           PY
       - name: List and inspect package files

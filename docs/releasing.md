@@ -183,7 +183,7 @@ platform packages install none.
 
 Inspect Cargo metadata to confirm the three packages are `mineru`,
 `mineru-python`, and `mineru-node`, the root library target is `mineru`, exactly
-the five documented binaries exist (`mineru`, `mineru-api`, `mineru-vlm-api`,
+the four documented binaries exist (`mineru`, `mineru-api`,
 `mineru-office-convert`, and the feature-gated `mineru-mistralrs`), and no
 package or target is named `mineru-cli`. Confirm Python wheels are `cp39-abi3`
 and no raw `linux_*` wheel is released. Do not build or publish a Python sdist.

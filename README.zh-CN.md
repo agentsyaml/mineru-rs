@@ -127,13 +127,13 @@ cargo install mineru
 mineru --help
 ```
 
-该软件包安装 `mineru`、`mineru-api` 和 `mineru-vlm-api` 二进制文件。若还要安装 `mineru-office-convert` Office 转换辅助程序，请使用 `--features office` 构建：
+该软件包安装 `mineru` 和 `mineru-api` 二进制文件。若还要安装 `mineru-office-convert` Office 转换辅助程序，请使用 `--features office` 构建：
 
 ```sh
 cargo install mineru --features office
 ```
 
-`mineru-api` 与 `mineru-vlm-api` 是同一个 HTTP 服务的两个名称：它接收文档、调用所配置的 VLM，并返回结果归档。该服务本身不进行本地推理。
+`mineru-api` 是 HTTP API 服务：它接收文档、调用所配置的 VLM，并返回结果归档。该服务本身不进行本地推理。
 
 ```sh
 export MINERU_VL_SERVER="https://<server>"
@@ -239,7 +239,7 @@ mineru-mistralrs input.pdf --page-start 0 --page-end 2 \
 
 ### API 服务
 
-`mineru-api` 与 `mineru-vlm-api` 是同一个 HTTP 服务的两个名称：它接收文档、调用所配置的 VLM，并返回结果归档。该服务本身不进行本地推理。API 模式的提交流程见 [CLI 和 API 服务端](#cli-和-api-服务端)。
+`mineru-api` 是 HTTP API 服务：它接收文档、调用所配置的 VLM，并返回结果归档。该服务本身不进行本地推理。API 模式的提交流程见 [CLI 和 API 服务端](#cli-和-api-服务端)。
 
 ## 本地模型与 Hugging Face 设置
 
@@ -262,13 +262,12 @@ mineru-mistralrs input.pdf --page-start 0 --page-end 2 \
 | `HF_TOKEN` | Hugging Face 访问令牌，用于受限或私有仓库。 |
 | `HF_HUB_OFFLINE=1` | 强制完全离线，仅使用本地缓存。 |
 
-## 五个二进制文件
+## 四个二进制文件
 
 | 二进制 | 用途 |
 | --- | --- |
 | `mineru` | 主命令行工具：支持 PDF、图像和 Office 文档，可直接对接 VLM，也可通过 `mineru-api` 服务。 |
 | `mineru-api` | HTTP API 服务（见上文）。 |
-| `mineru-vlm-api` | 同一服务的另一名称。 |
 | `mineru-office-convert` | Office（.docx/.pptx/.xlsx）→ PDF 转换辅助程序，供 `mineru` 使用；需以 `--features office` 构建。 |
 | `mineru-mistralrs` | 本地 PDF 解析，使用 Qwen2-VL MinerU 模型；从源码以 `--features mistralrs` 构建，或随 CUDA 镜像与独立二进制提供。 |
 

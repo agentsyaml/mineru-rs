@@ -176,7 +176,7 @@ In API mode, the local VLM transport knobs (`--page-concurrency`, `--processing-
 
 ## API server
 
-`mineru-api` and `mineru-vlm-api` are two executable names for the same service and behave identically. The service itself performs no local inference: it accepts documents, calls an external VLM service, then returns archived results.
+`mineru-api` is the HTTP API server. The service itself performs no local inference: it accepts documents, calls an external VLM service, then returns archived results.
 
 ### Container
 
@@ -491,7 +491,7 @@ and `clientSideOutputGeneration`.
 
 `--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`, `--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES`, and `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` accept unsigned decimal bytes (whitespace and `_` are allowed). CLI overrides environment, then the compiled default: 4_293_918_719 input bytes, 8 GiB encoded document bytes, and 8 GiB output bytes. Explicit invalid, zero, overflowing, or platform-unrepresentable values fail; there are no arbitrary hard ceilings — a configured value is used as policy rather than clamped to another constant.
 
-These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above the resident cap (`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`, default 512 MiB) before `lopdf` loads them, and one VLM response remains capped at 10 MiB (`--http-max-response-bytes`). Configure encoded policy on `mineru-vlm-api`; canonical remote mode rejects its encoded override.
+These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above the resident cap (`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`, default 512 MiB) before `lopdf` loads them, and one VLM response remains capped at 10 MiB (`--http-max-response-bytes`). Configure encoded policy on `mineru-api`; canonical remote mode rejects its encoded override.
 
 | Item | Default |
 | --- | ---: |
