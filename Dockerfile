@@ -15,7 +15,6 @@ RUN apt-get update \
     && chown mineru:mineru /app/output
 
 COPY --from=builder /app/target/release/mineru /usr/local/bin/mineru
-COPY --from=builder /app/target/release/mineru-vlm /usr/local/bin/mineru-vlm
 COPY --from=builder /app/target/release/mineru-api /usr/local/bin/mineru-api
 COPY --from=builder /app/target/release/mineru-vlm-api /usr/local/bin/mineru-vlm-api
 COPY --from=builder /app/target/release/mineru-office-convert /usr/local/bin/mineru-office-convert

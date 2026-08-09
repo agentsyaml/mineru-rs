@@ -33,10 +33,6 @@ include = [
 ]
 
 [[bin]]
-name = "mineru-vlm"
-path = "src/bin/mineru-vlm.rs"
-
-[[bin]]
 name = "mineru"
 path = "src/bin/mineru.rs"
 

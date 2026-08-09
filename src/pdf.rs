@@ -27,8 +27,11 @@ const LOPDF_ENCRYPTED_WITHOUT_PASSWORD: &str = "PDF is encrypted and requires a 
 
 pub(crate) struct RenderedPage {
     pub index: usize,
-    /// PDF points, not the dimensions of the 200 DPI raster below.
+    /// PDF points, not the dimensions of the rendered raster below.
     pub size: [f32; 2],
+    /// The effective scale this page was rasterized at (200 DPI for ordinary pages, lower for
+    /// oversized pages that would otherwise blow the pixel/byte budgets).
+    pub scale: f32,
     pub image: Arc<RgbImage>,
 }
 
@@ -107,15 +110,6 @@ fn read_file_capped(path: std::path::PathBuf, cap: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(crate) async fn parse(
-    bytes: impl Into<Bytes> + Send + 'static,
-    limits: Limits,
-) -> Result<Arc<ParsedPdf>> {
-    tokio::task::spawn_blocking(move || parse_document(bytes, &limits))
-        .await
-        .map_err(|e| Error::WorkerJoin(e.to_string()))?
-}
-
 pub(crate) fn parse_document(bytes: impl Into<Bytes>, limits: &Limits) -> Result<Arc<ParsedPdf>> {
     let bytes = Arc::new(bytes.into());
     let metadata = LoPdf::load_metadata_mem(bytes.as_ref().as_ref()).map_err(|e| match e {
@@ -152,10 +146,6 @@ pub(crate) fn parse_document(bytes: impl Into<Bytes>, limits: &Limits) -> Result
 
 pub(crate) fn page_count(document: &ParsedPdf) -> usize {
     document.source_pages
-}
-
-pub(crate) fn source_bytes(document: &ParsedPdf) -> Arc<Bytes> {
-    Arc::clone(&document._bytes)
 }
 
 fn inherited_user_unit(page: &hayro::hayro_syntax::page::Page<'_>) -> Result<Option<f32>> {
@@ -285,33 +275,26 @@ pub(crate) fn page_stream_for_preview_test(document: &ParsedPdf, index: usize) -
     Ok(page.page_stream().unwrap_or(b""))
 }
 
-pub(crate) async fn render_window(
+/// Tolerant window render for the official route: pages that fail degrade to warnings instead of
+/// aborting, but a window whose every page failed still errors (dead service / broken PDF must
+/// not masquerade as a placeholder document).
+pub(crate) async fn render_window_for_task_tolerant(
     document: Arc<ParsedPdf>,
     indexes: Vec<usize>,
     limits: Limits,
     workers: usize,
+    task_work_lease: TaskWorkLease,
 ) -> Result<(Vec<RenderedPage>, Vec<String>)> {
     render_window_core(
         document,
         indexes,
         limits,
         workers,
-        TaskWorkLease::default(),
+        task_work_lease,
+        true,
         true,
     )
     .await
-}
-
-pub(crate) async fn render_window_for_task(
-    document: Arc<ParsedPdf>,
-    indexes: Vec<usize>,
-    limits: Limits,
-    workers: usize,
-    task_work_lease: TaskWorkLease,
-) -> Result<Vec<RenderedPage>> {
-    let (pages, _warnings) =
-        render_window_core(document, indexes, limits, workers, task_work_lease, false).await?;
-    Ok(pages)
 }
 
 async fn render_window_core(
@@ -321,14 +304,20 @@ async fn render_window_core(
     workers: usize,
     task_work_lease: TaskWorkLease,
     tolerant: bool,
+    fail_on_empty: bool,
 ) -> Result<(Vec<RenderedPage>, Vec<String>)> {
+    let requested = indexes.len();
     let mut warnings = Vec::new();
-    let mut sizes = Vec::with_capacity(indexes.len());
+    let mut first_error = None;
+    let mut sizes = Vec::with_capacity(requested);
     for index in indexes {
         match page_dimensions(&document, index, &limits) {
             Ok((_, _, bytes)) => sizes.push((index, bytes)),
             Err(error) if tolerant => {
                 warnings.push(format!("render page {index} failed: {error}"));
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
             Err(error) => return Err(error),
         }
@@ -343,9 +332,17 @@ async fn render_window_core(
                 let Some((index, _)) = pending.next() else {
                     break;
                 };
+                let error = Error::LimitExceeded {
+                    resource: "in-flight image bytes",
+                    limit: limits.max_in_flight_image_bytes as u64,
+                    actual,
+                };
                 warnings.push(format!(
                     "render page {index} failed: page exceeds the in-flight image byte budget ({actual} bytes)"
                 ));
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
                 continue;
             }
             Err(error) => return Err(error),
@@ -369,6 +366,9 @@ async fn render_window_core(
                 }
                 Ok(Err((index, error))) if tolerant => {
                     warnings.push(format!("render page {index} failed: {error}"));
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
                 }
                 Ok(Err((_, error))) => return Err(error),
                 Err(error) => return Err(Error::WorkerJoin(error.to_string())),
@@ -383,6 +383,11 @@ async fn render_window_core(
                 );
             }
         }
+    }
+    if tolerant && fail_on_empty && requested > 0 && rendered.is_empty() {
+        // An entirely failed window is a hard failure (dead service / broken PDF), never a
+        // placeholder document.
+        return Err(first_error.unwrap_or_else(|| Error::Pdf("renderer returned no page".into())));
     }
     Ok((rendered.into_values().collect(), warnings))
 }
@@ -473,8 +478,9 @@ fn page_dimensions(
     {
         return Err(Error::Pdf(format!("page {index} has invalid dimensions")));
     }
-    let width = (width_points * SCALE).ceil();
-    let height = (height_points * SCALE).ceil();
+    let scale = render_scale(width_points, height_points, limits);
+    let width = (width_points * scale).ceil();
+    let height = (height_points * scale).ceil();
     if !width.is_finite()
         || !height.is_finite()
         || width <= 0.0
@@ -487,14 +493,23 @@ fn page_dimensions(
         )));
     }
     let pixels = (width as u64).saturating_mul(height as u64);
-    check_limit("page pixels", limits.max_page_pixels, pixels)?;
     let rgb_bytes = pixels.saturating_mul(3);
-    check_limit(
-        "rendered image bytes",
-        limits.max_rendered_image_bytes as u64,
-        rgb_bytes,
-    )?;
+    // ponytail: the adaptive scale above already bounds the raster to max_page_pixels /
+    // max_rendered_image_bytes, so the old check_limit calls are subsumed (ceil rounding can
+    // overshoot the exact cap by a few thousand pixels, which the old checks would have
+    // misclassified as an error). Validity and the u16 viewport check are the real skip criteria.
     Ok((width_points, height_points, rgb_bytes as usize))
+}
+
+/// Effective render scale for a page: 200 DPI for ordinary pages, but capped so the rasterized
+/// size stays within `max_page_pixels` and `max_rendered_image_bytes`. Oversized pages render at
+/// a lower effective DPI instead of failing. Callers validate `width_points`/`height_points`
+/// (finite, positive) before calling.
+fn render_scale(width_points: f32, height_points: f32, limits: &Limits) -> f32 {
+    let area = width_points * height_points;
+    let pixel_cap = (limits.max_page_pixels as f32 / area).sqrt();
+    let byte_cap = (limits.max_rendered_image_bytes as f32 / 3.0 / area).sqrt();
+    SCALE.min(pixel_cap).min(byte_cap)
 }
 
 pub(crate) fn page_image_bytes(
@@ -511,8 +526,10 @@ pub(crate) fn render_page(
     limits: &Limits,
 ) -> Result<RenderedPage> {
     let (width_points, height_points, _) = page_dimensions(document, index, limits)?;
-    let width = (width_points * SCALE).ceil() as u16;
-    let height = (height_points * SCALE).ceil() as u16;
+    // The same adaptive scale as page_dimensions, so the planned raster matches the render.
+    let scale = render_scale(width_points, height_points, limits);
+    let width = (width_points * scale).ceil() as u16;
+    let height = (height_points * scale).ceil() as u16;
     let page = document
         .pdf
         .pages()
@@ -522,8 +539,8 @@ pub(crate) fn render_page(
         page,
         &InterpreterSettings::default(),
         &RenderSettings {
-            x_scale: SCALE,
-            y_scale: SCALE,
+            x_scale: scale,
+            y_scale: scale,
             width: Some(width),
             height: Some(height),
             bg_color: WHITE,
@@ -533,6 +550,7 @@ pub(crate) fn render_page(
     Ok(RenderedPage {
         index,
         size: [width_points, height_points],
+        scale,
         image: Arc::new(image),
     })
 }
@@ -572,8 +590,8 @@ mod tests {
     use super::{
         PageRenderTestHook, SCALE, admitted_window, extract_selected_pages_for_preview,
         page_dimensions, page_render_test_hook, parse_document, premultiplied_rgba_over_white,
-        read_input, render_window, render_window_for_task, scope_page_render_test_hook,
-        source_bytes,
+        read_input, render_page, render_scale, render_window_for_task_tolerant,
+        scope_page_render_test_hook,
     };
     use crate::{Limits, PageResult, PdfInput, TaskWorkLease, preview};
     use bytes::Bytes;
@@ -582,6 +600,15 @@ mod tests {
     use std::time::Duration;
 
     fn in_memory_pdf(actual_pages: usize, declared_pages: i64) -> Vec<u8> {
+        in_memory_pdf_with_size(200.0, 300.0, actual_pages, declared_pages)
+    }
+
+    fn in_memory_pdf_with_size(
+        width: f32,
+        height: f32,
+        actual_pages: usize,
+        declared_pages: i64,
+    ) -> Vec<u8> {
         let mut document = Document::with_version("1.5");
         let pages = document.new_object_id();
         let mut kids = Vec::with_capacity(actual_pages);
@@ -593,7 +620,7 @@ mod tests {
                 Object::Dictionary(dictionary! {
                     "Type" => "Page",
                     "Parent" => pages,
-                    "MediaBox" => vec![0.into(), 0.into(), 200.into(), 300.into()],
+                    "MediaBox" => vec![0.into(), 0.into(), width.into(), height.into()],
                     "Resources" => Dictionary::new(),
                     "Contents" => contents,
                 }),
@@ -752,6 +779,50 @@ mod tests {
     }
 
     #[test]
+    fn oversized_page_adaptively_scales_within_pixel_and_byte_budgets() {
+        // A 5000x5000 pt page would be ~13900x13900 px (~580 MB RGB) at fixed 200 DPI. With a
+        // 1M-pixel cap the adaptive scale must shrink it into budget instead of failing.
+        let limits = Limits {
+            max_page_pixels: 1_000_000,
+            ..Limits::default()
+        };
+        let document = parse_document(in_memory_pdf_with_size(5000.0, 5000.0, 1, 1), &limits)
+            .expect("fixture");
+        let (points_w, points_h, bytes) = page_dimensions(&document, 0, &limits).unwrap();
+        assert_eq!(points_w, 5000.0);
+        assert_eq!(points_h, 5000.0);
+        let scale = render_scale(points_w, points_h, &limits);
+        assert!(scale < SCALE, "oversized page must drop below 200 DPI");
+        let width = (points_w * scale).ceil();
+        let height = (points_h * scale).ceil();
+        let pixels = (width as u64).saturating_mul(height as u64);
+        assert!(pixels <= limits.max_page_pixels);
+        assert!(bytes <= limits.max_rendered_image_bytes);
+        assert_eq!(bytes, pixels.saturating_mul(3) as usize);
+    }
+
+    #[test]
+    fn oversized_page_renders_at_the_adaptive_scale_matching_page_dimensions() {
+        let limits = Limits {
+            max_page_pixels: 1_000_000,
+            ..Limits::default()
+        };
+        let document = parse_document(in_memory_pdf_with_size(5000.0, 5000.0, 1, 1), &limits)
+            .expect("fixture");
+        let (points_w, points_h, _) = page_dimensions(&document, 0, &limits).unwrap();
+        let scale = render_scale(points_w, points_h, &limits);
+        let page = render_page(&document, 0, &limits).unwrap();
+        assert_eq!(page.size, [points_w, points_h], "size stays in PDF points");
+        assert_eq!(page.scale, scale);
+        assert_eq!(page.image.width(), (points_w * scale).ceil() as u32);
+        assert_eq!(page.image.height(), (points_h * scale).ceil() as u32);
+        assert_eq!(
+            page.image.as_raw().len(),
+            (points_w * scale).ceil() as usize * (points_h * scale).ceil() as usize * 3
+        );
+    }
+
+    #[test]
     fn bytes_input_keeps_its_backing_through_parsing_and_preview() {
         let input = Bytes::copy_from_slice(include_bytes!("../tests/fixtures/pdf/minimal.pdf"));
         let pointer = input.as_ptr();
@@ -759,10 +830,8 @@ mod tests {
         assert_eq!(bytes.as_ptr(), pointer);
 
         let document = parse_document(bytes, &Limits::default()).unwrap();
-        let source = source_bytes(&document);
-        assert_eq!(source.as_ptr(), pointer);
-        let preview = preview::generate(
-            source.as_ref(),
+        let preview = preview::generate_until(
+            document._bytes.as_ref(),
             &[PageResult {
                 page_index: 0,
                 page_size: [612.0, 792.0],
@@ -771,10 +840,11 @@ mod tests {
             "minimal",
             &Limits::default(),
             1 << 20,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
         )
         .unwrap();
         assert!(!preview.data.is_empty());
-        assert_eq!(source.as_ptr(), pointer);
+        assert_eq!(document._bytes.as_ptr(), pointer);
     }
 
     #[test]
@@ -838,7 +908,7 @@ mod tests {
 
         let rendered = scope_page_render_test_hook(
             hook,
-            render_window_for_task(
+            render_window_for_task_tolerant(
                 document,
                 vec![0],
                 Limits::default(),
@@ -847,7 +917,8 @@ mod tests {
             ),
         )
         .await
-        .expect("render");
+        .expect("render")
+        .0;
 
         assert_eq!(rendered.len(), 1);
         assert_eq!(
@@ -897,7 +968,7 @@ mod tests {
             Duration::from_secs(30),
             scope_page_render_test_hook(
                 hook,
-                render_window_for_task(
+                render_window_for_task_tolerant(
                     document,
                     (0..6).collect(),
                     Limits::default(),
@@ -908,7 +979,8 @@ mod tests {
         )
         .await
         .expect("render timed out")
-        .expect("render");
+        .expect("render")
+        .0;
         assert_eq!(rendered.len(), 6);
     }
 
@@ -927,7 +999,13 @@ mod tests {
         let document = parse_document(in_memory_pdf(3, 3), &Limits::default()).expect("fixture");
         let (rendered, warnings) = scope_page_render_test_hook(
             hook,
-            render_window(document, (0..3).collect(), Limits::default(), 2),
+            render_window_for_task_tolerant(
+                document,
+                (0..3).collect(),
+                Limits::default(),
+                2,
+                TaskWorkLease::default(),
+            ),
         )
         .await
         .expect("render");
@@ -962,7 +1040,7 @@ mod tests {
 
         let result = scope_page_render_test_hook(
             hook,
-            render_window_for_task(
+            render_window_for_task_tolerant(
                 document,
                 vec![0],
                 Limits::default(),

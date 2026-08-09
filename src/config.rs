@@ -14,9 +14,6 @@ impl BearerToken {
         }
         Ok(Self(token))
     }
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
-    }
 }
 impl fmt::Debug for BearerToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

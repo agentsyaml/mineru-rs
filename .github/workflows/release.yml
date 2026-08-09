@@ -475,11 +475,11 @@ jobs:
               setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo test --locked --release -p mineru --features office --target "$TARGET" --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
               chmod -R a+rX "/workspace/target/$TARGET/release"
               cd "/workspace/target/$TARGET/release"
-              for binary in mineru mineru-api mineru-vlm mineru-vlm-api mineru-office-convert; do
+              for binary in mineru mineru-api mineru-vlm-api mineru-office-convert; do
                 test -f "$binary" && test -x "$binary" && test ! -L "$binary"
               done
-              test "$(find . -maxdepth 1 -type f -perm -u+x | wc -l)" -eq 5
-              tar -czf "/workspace/container-binaries-$TARGET.tar.gz" mineru mineru-api mineru-vlm mineru-vlm-api mineru-office-convert
+              test "$(find . -maxdepth 1 -type f -perm -u+x | wc -l)" -eq 4
+              tar -czf "/workspace/container-binaries-$TARGET.tar.gz" mineru mineru-api mineru-vlm-api mineru-office-convert
               chown "$HOST_UID:$HOST_GID" "/workspace/container-binaries-$TARGET.tar.gz"
               chmod 644 "/workspace/container-binaries-$TARGET.tar.gz"
             '
@@ -505,16 +505,15 @@ jobs:
             cargo test --locked --release -p mineru --features office --target ${{ matrix.target }} --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
           fi
           if [ "${{ runner.os }}" == Linux ]; then
-            for binary in mineru mineru-api mineru-vlm mineru-vlm-api mineru-office-convert; do
+            for binary in mineru mineru-api mineru-vlm-api mineru-office-convert; do
               test -f "$bin/$binary" && test -x "$bin/$binary" && test ! -L "$bin/$binary"
             done
             test "$("$bin/mineru" --version)" = "mineru $VERSION"
             "$bin/mineru" --help >/dev/null
             "$bin/mineru-api" --help >/dev/null
-            "$bin/mineru-vlm" --help >/dev/null
             "$bin/mineru-vlm-api" --help >/dev/null
             # mineru-office-convert has no --help; the container E2E and executable checks cover it.
-            test "$(find "$bin" -maxdepth 1 -type f -perm -u+x | wc -l)" -eq 5
+            test "$(find "$bin" -maxdepth 1 -type f -perm -u+x | wc -l)" -eq 4
           fi
           mkdir binary-archive
           python .github/scripts/verify_release.py binary-archive --target ${{ matrix.target }} --version "$VERSION" \
@@ -897,7 +896,7 @@ jobs:
           import sys
           import tarfile
 
-          expected = {"mineru", "mineru-api", "mineru-vlm", "mineru-vlm-api", "mineru-office-convert"}
+          expected = {"mineru", "mineru-api", "mineru-vlm-api", "mineru-office-convert"}
           root = pathlib.Path.cwd()
           run_temp = pathlib.Path(sys.argv[1])
           for slot, target in (("amd64", "x86_64-unknown-linux-gnu"), ("arm64", "aarch64-unknown-linux-gnu")):
@@ -989,7 +988,7 @@ jobs:
             docker pull --platform "$platform" "$IMAGE@$child_digest"
             docker run --rm --platform "$platform" --entrypoint /bin/sh "$IMAGE@$child_digest" -ec '
               test "$(id -u)" -ne 0
-              for binary in mineru mineru-api mineru-vlm mineru-vlm-api mineru-office-convert; do
+              for binary in mineru mineru-api mineru-vlm-api mineru-office-convert; do
                 test -x "/usr/local/bin/$binary"
               done
               mineru --version

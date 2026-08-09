@@ -20,16 +20,22 @@ struct SemanticCandidate {
     absorbed: Vec<ContentBlock>,
 }
 
-fn official_snapshot_block(block: VlmLayoutBlock) -> VlmResult<ModelBlock> {
+fn official_snapshot_block(block: VlmLayoutBlock) -> VlmResult<(ModelBlock, Option<String>)> {
     if block.block_type.is_empty() {
         return Err(protocol(
             "official model snapshot",
             "layout block type is required",
         ));
     }
-    let angle = block
-        .angle
-        .ok_or_else(|| protocol("official model snapshot", "layout block angle is required"))?;
+    // A missing angle is one block's quirk, not a page-killing defect: treat it as unrotated
+    // and warn. This mirrors the direct pipeline, where angle=None is a rotate no-op.
+    let (angle, warning) = match block.angle {
+        Some(angle) => (angle, None),
+        None => (
+            Rotation::Deg0,
+            Some("layout block angle is missing; assuming rotation 0".into()),
+        ),
+    };
     let mut extra = block.metadata;
     let sub_type = extra
         .remove("sub_type")
@@ -47,16 +53,19 @@ fn official_snapshot_block(block: VlmLayoutBlock) -> VlmResult<ModelBlock> {
     ] {
         extra.remove(key);
     }
-    Ok(ModelBlock {
-        block_type: block.block_type.clone(),
-        bbox: Some(block.bbox),
-        angle: Some(angle),
-        content: block.content,
-        merge_prev: (block.block_type == BlockKind::TEXT)
-            .then_some(block.merge_prev.unwrap_or(false)),
-        sub_type,
-        extra,
-    })
+    Ok((
+        ModelBlock {
+            block_type: block.block_type.clone(),
+            bbox: Some(block.bbox),
+            angle: Some(angle),
+            content: block.content,
+            merge_prev: (block.block_type == BlockKind::TEXT)
+                .then_some(block.merge_prev.unwrap_or(false)),
+            sub_type,
+            extra,
+        },
+        warning,
+    ))
 }
 
 fn protocol(operation: &'static str, message: impl Into<String>) -> VlmError {
@@ -402,6 +411,32 @@ impl MinerUVlmPreprocessor {
         image_analysis: Option<bool>,
         max_semantic_requests: usize,
     ) -> VlmResult<Vec<SemanticCandidate>> {
+        let (candidates, truncated) = self.semantic_candidates_truncated(
+            blocks,
+            prompts,
+            image_analysis,
+            max_semantic_requests,
+        );
+        if truncated {
+            // The extract pipelines have no warnings channel, so keep the hard error there; the
+            // official snapshot page calls the truncated variant and warns instead.
+            return Err(VlmError::LimitExceeded {
+                resource: "semantic requests per page",
+                limit: max_semantic_requests as u64,
+                actual: max_semantic_requests.saturating_add(1) as u64,
+            });
+        }
+        Ok(candidates)
+    }
+    /// Truncating variant: never fails on the cap; returns the candidates that fit plus whether
+    /// the cap was hit (so callers with a warnings channel can degrade instead of aborting).
+    fn semantic_candidates_truncated(
+        &self,
+        blocks: &mut [VlmLayoutBlock],
+        prompts: &[String],
+        image_analysis: Option<bool>,
+        max_semantic_requests: usize,
+    ) -> (Vec<SemanticCandidate>, bool) {
         let mut native: Vec<_> = blocks.iter().cloned().map(from_vlm).enumerate().collect();
         let suppressed = |kind: &str| prompts.iter().any(|p| p == kind) && is_known_kind(kind);
         let covered_captions: Vec<_> = native
@@ -452,6 +487,7 @@ impl MinerUVlmPreprocessor {
         }
         let analyze = image_analysis.unwrap_or(self.config.image_analysis);
         let mut candidates = Vec::new();
+        let mut truncated = false;
         for (index, (original_index, block)) in native.iter().enumerate() {
             let kind = block.kind.as_str();
             if block
@@ -479,11 +515,8 @@ impl MinerUVlmPreprocessor {
                 continue;
             }
             if candidates.len() >= max_semantic_requests {
-                return Err(VlmError::LimitExceeded {
-                    resource: "semantic requests per page",
-                    limit: max_semantic_requests as u64,
-                    actual: candidates.len().saturating_add(1) as u64,
-                });
+                truncated = true;
+                break;
             }
             let absorbed = if kind == BlockKind::TABLE {
                 table_images
@@ -500,7 +533,7 @@ impl MinerUVlmPreprocessor {
                 absorbed,
             });
         }
-        Ok(candidates)
+        (candidates, truncated)
     }
     fn check_table_candidate_allocations(
         &self,
@@ -819,26 +852,6 @@ impl MinerUVlmClient {
     ) -> VlmResult<OfficialOutputManifest> {
         crate::official_route::parse_and_write(self, input, options, output_root, stem).await
     }
-    pub(crate) async fn parse_and_write_official_pdf_with_totals_and_page_concurrency(
-        &self,
-        input: PdfInput,
-        options: OfficialPdfOptions,
-        output_root: &std::path::Path,
-        stem: &str,
-        totals: crate::document_limits::OfficialDocumentTotals,
-        page_concurrency: crate::official_route::OfficialPageConcurrency,
-    ) -> VlmResult<OfficialOutputManifest> {
-        crate::official_route::parse_and_write_with_totals_and_page_concurrency(
-            self,
-            input,
-            options,
-            output_root,
-            stem,
-            totals,
-            page_concurrency,
-        )
-        .await
-    }
     pub async fn parse_and_write_official_office_pdf(
         &self,
         input: PdfInput,
@@ -975,72 +988,83 @@ impl MinerUVlmClient {
                 preprocessor.prepare_rgb_for_layout_capped(&layout_image, max_pixels)
             })
             .await?;
+        let mut warnings = Vec::new();
         let layout_bytes = prepared_layout.image.data.len();
+        // A layout image alone at or over a per-request/batch cap is one page's problem, not the
+        // document's: skip the layout request and degrade to an empty layout instead of failing
+        // the whole document. The document-level encoded budget charge below stays a hard error.
+        let mut skip_layout_request = false;
         if layout_bytes > max_encoded_request_bytes {
-            return Err(VlmError::LimitExceeded {
-                resource: "encoded request bytes",
-                limit: max_encoded_request_bytes as u64,
-                actual: layout_bytes as u64,
-            });
-        }
-        if layout_bytes > max_encoded_batch_bytes {
-            return Err(VlmError::LimitExceeded {
-                resource: "encoded batch bytes",
-                limit: max_encoded_batch_bytes as u64,
-                actual: layout_bytes as u64,
-            });
+            warnings.push(format!(
+                "encoded layout request bytes ({layout_bytes}) exceed the per-request cap {max_encoded_request_bytes}; continuing with an empty layout"
+            ));
+            skip_layout_request = true;
+        } else if layout_bytes > max_encoded_batch_bytes {
+            warnings.push(format!(
+                "encoded layout request bytes ({layout_bytes}) exceed the batch cap {max_encoded_batch_bytes}; continuing with an empty layout"
+            ));
+            skip_layout_request = true;
         }
         encoded_budget.charge(layout_bytes as u64, "encoded document bytes")?;
         let mut encoded_bytes = layout_bytes;
-        let layout_request = self.request(
-            VlmImageInput::Bytes {
-                data: prepared_layout.image.data,
-                media_type: Some(prepared_layout.image.media_type),
-            },
-            self.preprocessor.prompt_for("[layout]"),
-            self.preprocessor.sampling_for("[layout]"),
-            None,
-        );
-        let _permit = self
-            .layout_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            // A closed semaphore is an internal runtime failure, never LLM malformation: it
-            // must not be classifiable as Protocol (which the tolerance arms would degrade).
-            .map_err(|_| VlmError::Transport {
-                operation: "official PDF",
-                message: "layout semaphore closed".into(),
-            })?;
-        let (layout_text, mut raw_bytes, mut warnings) = self
-            .http
-            .predict_official_budgeted(
-                layout_request,
-                self.http.official_response_cap(),
-                Some(raw_budget.clone()),
-                tokio::time::Instant::from_std(deadline),
-            )
-            .await?;
-        drop(_permit);
-        let preprocessor = self.preprocessor.clone();
-        let mut blocks = match self
-            .official_blocking(deadline, move || {
-                preprocessor.parse_layout_output_capped(&layout_text, max_layout_blocks)
-            })
-            .await
-        {
-            // Only parse-class (Protocol) malformation of the LLM layout text degrades to an
-            // empty layout. Resource bounds (layout blocks, raw/response budget) and service
-            // failures (Http/Transport/Timeout) stay fatal so a broken server is never masked.
-            Err(error @ VlmError::Protocol { .. }) => {
-                warnings.push(format!(
-                    "layout parse failed: {error}; continuing with an empty layout"
-                ));
-                Vec::new()
-            }
-            Err(error) => return Err(error),
-            Ok(blocks) => blocks,
-        };
+        let mut raw_bytes = 0;
+        let mut blocks;
+        if skip_layout_request {
+            blocks = Vec::new();
+        } else {
+            let layout_request = self.request(
+                VlmImageInput::Bytes {
+                    data: prepared_layout.image.data,
+                    media_type: Some(prepared_layout.image.media_type),
+                },
+                self.preprocessor.prompt_for("[layout]"),
+                self.preprocessor.sampling_for("[layout]"),
+                None,
+            );
+            let _permit = self
+                .layout_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                // A closed semaphore is an internal runtime failure, never LLM malformation: it
+                // must not be classifiable as Protocol (which the tolerance arms would degrade).
+                .map_err(|_| VlmError::Transport {
+                    operation: "official PDF",
+                    message: "layout semaphore closed".into(),
+                })?;
+            let (layout_text, layout_raw_bytes, layout_warnings) = self
+                .http
+                .predict_official_budgeted(
+                    layout_request,
+                    self.http.official_response_cap(),
+                    Some(raw_budget.clone()),
+                    tokio::time::Instant::from_std(deadline),
+                )
+                .await?;
+            drop(_permit);
+            raw_bytes = layout_raw_bytes;
+            warnings.extend(layout_warnings);
+            let preprocessor = self.preprocessor.clone();
+            blocks = match self
+                .official_blocking(deadline, move || {
+                    preprocessor.parse_layout_output_capped(&layout_text, max_layout_blocks)
+                })
+                .await
+            {
+                // Parse-class (Protocol) malformation of the LLM layout text and the per-page
+                // layout block cap degrade to an empty layout. Service failures
+                // (Http/Transport/Timeout) and document-level budget errors stay fatal so a
+                // broken server is never masked.
+                Err(error @ (VlmError::Protocol { .. } | VlmError::LimitExceeded { .. })) => {
+                    warnings.push(format!(
+                        "layout parse failed: {error}; continuing with an empty layout"
+                    ));
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+                Ok(blocks) => blocks,
+            };
+        }
         let suppress = [
             (!formula_enable).then_some(BlockKind::EQUATION.into()),
             (!table_enable).then_some(BlockKind::TABLE.into()),
@@ -1049,17 +1073,24 @@ impl MinerUVlmClient {
         .flatten()
         .collect::<Vec<_>>();
         let preprocessor = self.preprocessor.clone();
-        let (blocks, candidates) = self
+        let (blocks, candidates, truncated) = self
             .official_blocking(deadline, move || {
-                let candidates = preprocessor.semantic_candidates(
+                let (candidates, truncated) = preprocessor.semantic_candidates_truncated(
                     &mut blocks,
                     &suppress,
                     Some(image_analysis),
                     max_semantic_requests,
-                )?;
-                Ok((blocks, candidates))
+                );
+                Ok((blocks, candidates, truncated))
             })
             .await?;
+        // A page with more semantic candidates than allowed degrades to the first ones, never
+        // fails the whole document; the blocks themselves are still emitted.
+        if truncated {
+            warnings.push(format!(
+                "semantic requests exceed the per-page cap of {max_semantic_requests}; continuing with the first {max_semantic_requests} candidates"
+            ));
+        }
         let block_count = blocks.len();
         let page = image;
         type Encoder = Pin<
@@ -1152,15 +1183,42 @@ impl MinerUVlmClient {
                     resident_bytes = resident_bytes.checked_sub(encoder_reservation).expect("encoder reservation held");
                     encoder_reservation = 0;
                     let bytes = image.data.len();
-                    if bytes > max_encoded_request_bytes {
-                        return Err(VlmError::LimitExceeded { resource: "encoded request bytes", limit: max_encoded_request_bytes as u64, actual: bytes as u64 });
-                    }
-                    resident_bytes = resident_bytes.checked_add(bytes).ok_or(VlmError::LimitExceeded { resource: "encoded batch bytes", limit: max_encoded_batch_bytes as u64, actual: u64::MAX })?;
-                    if resident_bytes > max_encoded_batch_bytes {
-                        return Err(VlmError::LimitExceeded { resource: "encoded batch bytes", limit: max_encoded_batch_bytes as u64, actual: resident_bytes as u64 });
-                    }
+                    // The document-level encoded budget stays a hard error: the bytes were encoded
+                    // even when this block's request is skipped below.
                     encoded_budget.charge(bytes as u64, "encoded document bytes")?;
                     encoded_bytes = encoded_bytes.saturating_add(bytes);
+                    if order >= replies.len() || block_index >= block_count {
+                        return Err(protocol("official PDF", "semantic reply index is invalid"));
+                    }
+                    if bytes > max_encoded_request_bytes {
+                        // A single block that encodes over the per-request cap degrades to empty
+                        // content for this block only; sibling blocks and the page continue
+                        // (mirrors the Protocol arm below).
+                        warnings.push(format!(
+                            "encoded semantic request bytes ({bytes}) exceed the per-request cap {max_encoded_request_bytes}; continuing with empty content"
+                        ));
+                        replies[order] = Some((block_index, String::new()));
+                        encoder = None;
+                        continue;
+                    }
+                    // Overflow in the resident-bytes ledger is an internal invariant break, never
+                    // degrade: keep it fatal (the tolerance arms only ever see LLM malformation).
+                    let resident_after = resident_bytes.checked_add(bytes).ok_or(
+                        VlmError::LimitExceeded {
+                            resource: "encoded batch bytes",
+                            limit: max_encoded_batch_bytes as u64,
+                            actual: u64::MAX,
+                        },
+                    )?;
+                    if resident_after > max_encoded_batch_bytes {
+                        warnings.push(format!(
+                            "encoded semantic request bytes ({bytes}) exceed the batch cap {max_encoded_batch_bytes}; continuing with empty content"
+                        ));
+                        replies[order] = Some((block_index, String::new()));
+                        encoder = None;
+                        continue;
+                    }
+                    resident_bytes = resident_after;
                     let request = self.request(VlmImageInput::Bytes { data: image.data, media_type: Some(image.media_type) }, prompt, sampling, None);
                     let http = self.http.clone();
                     let semaphore = self.layout_semaphore.clone();
@@ -1230,13 +1288,15 @@ impl MinerUVlmClient {
             blocks[index].content = Some(reply);
         }
         let preprocessor = self.preprocessor.clone();
-        let (snapshot, cleaned) = self
+        let (snapshot, cleaned, snapshot_warnings) = self
             .official_blocking(deadline, move || {
-                let snapshot = blocks
-                    .clone()
-                    .into_iter()
-                    .map(official_snapshot_block)
-                    .collect::<VlmResult<Vec<_>>>()?;
+                let mut snapshot = Vec::with_capacity(blocks.len());
+                let mut snapshot_warnings = Vec::new();
+                for block in &blocks {
+                    let (snapshot_block, warning) = official_snapshot_block(block.clone())?;
+                    snapshot_warnings.extend(warning);
+                    snapshot.push(snapshot_block);
+                }
                 for block in &mut blocks {
                     if let Some(content) = block.content.clone() {
                         let mut native = from_vlm(block.clone());
@@ -1244,9 +1304,10 @@ impl MinerUVlmClient {
                         *block = to_vlm(native);
                     }
                 }
-                Ok((snapshot, preprocessor.post_process(blocks)?))
+                Ok((snapshot, preprocessor.post_process(blocks)?, snapshot_warnings))
             })
             .await?;
+        warnings.extend(snapshot_warnings);
         Ok((snapshot, cleaned, raw_bytes, encoded_bytes, warnings))
     }
 
@@ -2938,7 +2999,7 @@ mod tests {
             ("_absorbed_by_table".into(), json!(0)),
             (COVERED_IMAGE_CAPTION.into(), json!(true)),
         ]));
-        let snapshot = official_snapshot_block(raw.clone()).unwrap();
+        let (snapshot, _) = official_snapshot_block(raw.clone()).unwrap();
         assert_eq!(snapshot.content.as_deref(), Some("  raw text  "));
         assert_eq!(snapshot.merge_prev, Some(false));
         assert_eq!(snapshot.sub_type.as_deref(), Some("paragraph"));
@@ -2955,15 +3016,14 @@ mod tests {
 
         let mut nontext = block(BlockKind::TABLE);
         nontext.angle = Some(Rotation::Deg0);
-        assert_eq!(official_snapshot_block(nontext).unwrap().merge_prev, None);
+        assert_eq!(official_snapshot_block(nontext).unwrap().0.merge_prev, None);
     }
 
     #[test]
-    fn official_snapshot_requires_angle() {
-        assert!(matches!(
-            official_snapshot_block(block(BlockKind::TEXT)),
-            Err(VlmError::Protocol { .. })
-        ));
+    fn official_snapshot_missing_angle_defaults_to_unrotated() {
+        let (snapshot, warning) = official_snapshot_block(block(BlockKind::TEXT)).unwrap();
+        assert_eq!(snapshot.angle, Some(Rotation::Deg0));
+        assert!(warning.is_some());
     }
 
     #[test]
@@ -4094,6 +4154,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_window_degrades_layout_bytes_over_encoded_request_cap() {
+        let state = window_state();
+        state.layouts.store(2, Ordering::SeqCst); // no admission hold in this degrade test
+        let client = window_client_with_layout(state.clone(), (256, 256)).await;
+        let image = Arc::new(RgbImage::new(256, 256));
+        let layout_bytes = client
+            .preprocessor
+            .prepare_rgb_for_layout_capped(&image, u64::MAX)
+            .unwrap()
+            .image
+            .data
+            .len();
+        let pages = client
+            .official_two_step_snapshot_window(
+                vec![image],
+                false,
+                true,
+                true,
+                4,
+                2,
+                2,
+                layout_bytes - 1, // layout request alone exceeds the cap
+                layout_bytes - 1,
+                1 << 20,
+                1 << 20,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let (snapshot, _, _, _, warnings) = &pages[0];
+        assert!(snapshot.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("continuing with an empty layout")),
+            "{warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_window_degrades_layout_block_cap_overflow() {
+        let state = window_state();
+        state.layouts.store(2, Ordering::SeqCst);
+        let client = window_client(state.clone()).await;
+        let image = Arc::new(RgbImage::new(8, 8));
+        let pages = client
+            .official_two_step_snapshot_window(
+                vec![image],
+                false,
+                true,
+                true,
+                0, // below the single block the mock layout returns
+                2,
+                2,
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let (snapshot, _, _, _, warnings) = &pages[0];
+        assert!(snapshot.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("continuing with an empty layout")),
+            "{warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_window_truncates_semantic_requests_over_cap() {
+        let state = window_state();
+        state.layouts.store(2, Ordering::SeqCst);
+        let client = window_client(state.clone()).await;
+        let image = Arc::new(RgbImage::new(8, 8));
+        let pages = client
+            .official_two_step_snapshot_window(
+                vec![image],
+                false,
+                true,
+                true,
+                4,
+                0, // drop all semantic candidates
+                2,
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let (snapshot, _, _, _, warnings) = &pages[0];
+        assert_eq!(snapshot.len(), 1); // the layout block survives
+        assert!(snapshot[0].content.is_none());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("semantic requests exceed the per-page cap")),
+            "{warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_window_skips_semantic_request_encoded_over_cap() {
+        let state = window_state();
+        state.layouts.store(2, Ordering::SeqCst);
+        // A tiny layout image keeps the layout bytes small while the semantic crop (taken from
+        // the original, larger page image) encodes well above that size.
+        let client = window_client_with_layout(state.clone(), (11, 10)).await;
+        // Low-amplitude noise keeps the downscaled layout image (and thus the mock's bbox
+        // anchor pixel) near black, while the full-size page crops encode much larger.
+        let image = Arc::new(RgbImage::from_fn(600, 600, |x, y| {
+            image::Rgb([
+                ((x * 31 + y * 17) % 4) as u8,
+                ((x * 17 + y * 31) % 4) as u8,
+                ((x + y) % 4) as u8,
+            ])
+        }));
+        let tiny_layout = client
+            .preprocessor
+            .prepare_rgb_for_layout_capped(&image, u64::MAX)
+            .unwrap()
+            .image
+            .data
+            .len();
+        let pages = client
+            .official_two_step_snapshot_window(
+                vec![image],
+                false,
+                true,
+                true,
+                4,
+                2,
+                2,
+                tiny_layout, // layout passes exactly; the semantic crop overflows it
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        let (snapshot, _, _, _, warnings) = &pages[0];
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].content.as_deref(), Some(""));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("exceed the per-request cap")),
+            "{warnings:?}"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "full VLM snapshot-window resource integration e2e"]
     async fn snapshot_window_shares_encoded_budget_and_keeps_exact_local_caps() {
         let state = window_state();
@@ -4108,43 +4326,54 @@ mod tests {
             .data
             .len();
         let pages = vec![Arc::clone(&image), Arc::clone(&image)];
-        // 1. A page whose layout image alone exceeds the encoded-request cap is rejected.
-        assert!(matches!(
-            client
-                .official_two_step_snapshot_window(
-                    pages.iter().map(Arc::clone).collect(),
-                    false,
-                    true,
-                    true,
-                    4,
-                    2,
-                    2,
-                    layout_bytes - 1,
-                    1 << 20,
-                    1 << 20,
-                    1 << 20,
-                    Instant::now() + Duration::from_secs(2)
-                )
-                .await,
-            Err(VlmError::LimitExceeded {
-                resource: "encoded request bytes",
-                ..
-            })
-        ));
-        // 2. An encoded semantic candidate exceeding the per-request cap is rejected too. A tiny
-        //    layout image keeps the layout bytes below the candidate's encoded bytes, so this page
-        //    reaches the semantic request check and fails on the candidate, not the layout.
+        // 1. A page whose layout image alone exceeds the encoded-request cap degrades to an empty
+        //    layout with a warning, never failing the document.
+        let degraded = client
+            .official_two_step_snapshot_window(
+                pages.iter().map(Arc::clone).collect(),
+                false,
+                true,
+                true,
+                4,
+                2,
+                2,
+                layout_bytes - 1,
+                layout_bytes - 1,
+                1 << 20,
+                1 << 20,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let (snapshot, _, _, _, warnings) = &degraded[0];
+        assert!(snapshot.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("continuing with an empty layout")),
+            "{warnings:?}"
+        );
+        // 2. An encoded semantic candidate exceeding the per-request cap degrades to empty content
+        //    for that block with a warning. Low-amplitude noise keeps the layout bytes small while
+        //    the full-size page crops encode above the per-request cap.
         let tiny = window_client_with_layout(state.clone(), (11, 10)).await;
+        let noisy = Arc::new(RgbImage::from_fn(600, 600, |x, y| {
+            image::Rgb([
+                ((x * 31 + y * 17) % 4) as u8,
+                ((x * 17 + y * 31) % 4) as u8,
+                ((x + y) % 4) as u8,
+            ])
+        }));
         let tiny_layout = tiny
             .preprocessor
-            .prepare_rgb_for_layout_capped(&image, u64::MAX)
+            .prepare_rgb_for_layout_capped(&noisy, u64::MAX)
             .unwrap()
             .image
             .data
             .len();
-        assert!(matches!(
-            tiny.official_two_step_snapshot_window(
-                pages.iter().map(Arc::clone).collect(),
+        let degraded = tiny
+            .official_two_step_snapshot_window(
+                vec![noisy],
                 false,
                 true,
                 true,
@@ -4155,14 +4384,19 @@ mod tests {
                 1 << 20,
                 1 << 20,
                 1 << 20,
-                Instant::now() + Duration::from_secs(2)
+                Instant::now() + Duration::from_secs(2),
             )
-            .await,
-            Err(VlmError::LimitExceeded {
-                resource: "encoded request bytes",
-                ..
-            })
-        ));
+            .await
+            .unwrap();
+        let (snapshot, _, _, _, warnings) = &degraded[0];
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].content.as_deref(), Some(""));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("exceed the per-request cap")),
+            "{warnings:?}"
+        );
         // 3. A batch cap below the request cap is a configuration error (guard), never silently
         //    accepted: admission is gated on `batch - request` and candidate bytes never exceed
         //    the request cap, so the guard is the batch policy's only reachable rejection.

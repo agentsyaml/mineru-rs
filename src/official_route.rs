@@ -94,16 +94,22 @@ struct PlannedWindow {
     indexes: Vec<usize>,
     bytes: usize,
     mode: WindowPlanMode,
+    /// Number of source page positions this window consumed, including pages skipped during
+    /// planning (unrenderable or over the in-flight budget). `retain_window` advances the cursor
+    /// past them so a skipped page is never re-planned by the next window.
+    consumed: usize,
 }
 
 struct WindowState {
     plan: PlannedWindow,
     rendered: Vec<pdf::RenderedPage>,
+    /// Render degradations for this window, surfaced as VlmWarning events during staging.
+    warnings: Vec<String>,
 }
 
 enum PrefetchState {
     Rendered(WindowState),
-    PendingFallback(PlannedWindow),
+    PendingFallback((PlannedWindow, Vec<String>)),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,7 +190,7 @@ fn in_flight_image_limit(full_cap: usize, actual: usize) -> VlmError {
 
 fn retain_window(cursor: &mut usize, window: &PlannedWindow) -> VlmResult<()> {
     *cursor = cursor
-        .checked_add(window.indexes.len())
+        .checked_add(window.consumed)
         .ok_or_else(|| in_flight_image_limit(usize::MAX, usize::MAX))?;
     Ok(())
 }
@@ -196,7 +202,7 @@ fn plan_window(
     slot_cap: usize,
     full_cap: usize,
     mut page_bytes: impl FnMut(usize) -> VlmResult<usize>,
-) -> VlmResult<PlannedWindow> {
+) -> VlmResult<(PlannedWindow, Vec<String>)> {
     if processing_window_size == 0 || slot_cap == 0 || full_cap == 0 || slot_cap > full_cap {
         return Err(VlmError::InvalidConfig(
             "invalid official PDF options".into(),
@@ -210,23 +216,47 @@ fn plan_window(
 
     let mut planned = Vec::new();
     let mut total = 0usize;
-    while planned.len() < processing_window_size {
-        let position = cursor
-            .checked_add(planned.len())
-            .ok_or_else(|| in_flight_image_limit(full_cap, usize::MAX))?;
-        let Some(&index) = indexes.get(position) else {
+    let mut warnings = Vec::new();
+    let mut first_error = None;
+    let mut consumed = 0usize;
+    for &index in indexes.iter().skip(cursor) {
+        if planned.len() >= processing_window_size {
             break;
+        }
+        // A page whose byte estimate fails (invalid dimensions, viewport beyond u16) is skipped
+        // with a warning instead of aborting the window; only an entirely skipped window errors.
+        let bytes = match page_bytes(index) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                consumed += 1;
+                warnings.push(format!("page {index} skipped: {error}"));
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
         };
-        let bytes = page_bytes(index)?;
         if bytes > full_cap {
-            return Err(in_flight_image_limit(full_cap, bytes));
+            consumed += 1;
+            warnings.push(format!(
+                "page {index} skipped: page exceeds the in-flight image byte budget ({bytes} bytes)"
+            ));
+            if first_error.is_none() {
+                first_error = Some(in_flight_image_limit(full_cap, bytes));
+            }
+            continue;
         }
         if planned.is_empty() && bytes > slot_cap {
-            return Ok(PlannedWindow {
-                indexes: vec![index],
-                bytes,
-                mode: WindowPlanMode::FullCapFallback,
-            });
+            consumed += 1;
+            return Ok((
+                PlannedWindow {
+                    indexes: vec![index],
+                    bytes,
+                    mode: WindowPlanMode::FullCapFallback,
+                    consumed,
+                },
+                warnings,
+            ));
         }
         let next_total = total
             .checked_add(bytes)
@@ -234,18 +264,25 @@ fn plan_window(
         if next_total > slot_cap {
             break;
         }
+        consumed += 1;
         total = next_total;
         planned.push(index);
     }
 
     if planned.is_empty() {
-        return Err(in_flight_image_limit(full_cap, usize::MAX));
+        // Every page in this window was skipped: a hard error, never an empty placeholder
+        // document masquerading as output.
+        return Err(first_error.unwrap_or_else(|| in_flight_image_limit(full_cap, usize::MAX)));
     }
-    Ok(PlannedWindow {
-        indexes: planned,
-        bytes: total,
-        mode: WindowPlanMode::Slot,
-    })
+    Ok((
+        PlannedWindow {
+            indexes: planned,
+            bytes: total,
+            mode: WindowPlanMode::Slot,
+            consumed,
+        },
+        warnings,
+    ))
 }
 
 fn plan_route_window(
@@ -254,7 +291,7 @@ fn plan_route_window(
     cursor: usize,
     options: &OfficialPdfOptions,
     render_limits: &Limits,
-) -> VlmResult<PlannedWindow> {
+) -> VlmResult<(PlannedWindow, Vec<String>)> {
     plan_window(
         indexes,
         cursor,
@@ -272,7 +309,7 @@ fn plan_route_window_in_slot(
     options: &OfficialPdfOptions,
     render_limits: &Limits,
     slot_cap: usize,
-) -> VlmResult<PlannedWindow> {
+) -> VlmResult<(PlannedWindow, Vec<String>)> {
     plan_window(
         indexes,
         cursor,
@@ -329,6 +366,7 @@ async fn render_route_window(
     render_timeout: Duration,
     parsed: Arc<pdf::ParsedPdf>,
     plan: PlannedWindow,
+    plan_warnings: Vec<String>,
     render_limits: Limits,
     render_workers: usize,
     task_work_lease: TaskWorkLease,
@@ -344,7 +382,7 @@ async fn render_route_window(
         planned_bytes: plan.bytes,
     };
     let render = render_with_timeout(deadline, render_timeout, async {
-        pdf::render_window_for_task(
+        pdf::render_window_for_task_tolerant(
             parsed,
             plan.indexes.clone(),
             render_limits,
@@ -355,7 +393,7 @@ async fn render_route_window(
         .map_err(map)
     });
     #[cfg(test)]
-    let rendered = observe_route_render(hook, info, render, |pages| {
+    let (rendered, render_warnings) = observe_route_render(hook, info, render, |(pages, _)| {
         pages.iter().try_fold(0usize, |total, page| {
             total
                 .checked_add(page.image.as_raw().len())
@@ -364,14 +402,19 @@ async fn render_route_window(
     })
     .await?;
     #[cfg(not(test))]
-    let rendered = render.await?;
+    let (rendered, render_warnings) = render.await?;
 
-    if rendered.len() != plan.indexes.len() {
-        return Err(VlmError::Pdf(
-            "PDF renderer returned an unexpected page count".into(),
-        ));
-    }
-    Ok(WindowState { plan, rendered })
+    // Tolerant within a window: failed pages degrade to placeholders (with a warning) rather
+    // than failing the document. Only an entirely failed window hard-errors, which the tolerant
+    // renderer already reports as an Err. `stage_window` re-derives which pages are placeholders
+    // from `plan.indexes` vs `rendered`, and surfaces `warnings` as VlmWarning events.
+    let mut warnings = plan_warnings;
+    warnings.extend(render_warnings);
+    Ok(WindowState {
+        plan,
+        rendered,
+        warnings,
+    })
 }
 
 /// Snapshot output of one window's two-step VLM work, in source page order. The final element
@@ -404,12 +447,37 @@ async fn stage_window(
     snapshots: WindowSnapshots,
     mut completed: usize,
 ) -> VlmResult<StagedWindow> {
-    for (page, (snapshot, cleaned, _raw, _encoded, warnings)) in
-        current.rendered.into_iter().zip(snapshots)
-    {
+    for warning in &current.warnings {
+        crate::progress_events::emit(
+            events,
+            ProgressEvent::VlmWarning { message: warning.clone() },
+        );
+    }
+    let mut rendered = current.rendered.into_iter().peekable();
+    let mut snapshots = snapshots.into_iter();
+    for &index in &current.plan.indexes {
         if let Err(error) = deadline.check() {
             return Err(dispose_stage(stage, error).await);
         }
+        // A page missing from the rendered window (tolerant render failure) degrades to an
+        // empty placeholder so the output keeps every source page index.
+        if !rendered.peek().is_some_and(|page| page.index == index) {
+            stage = write_placeholder_page(stage, deadline, task_work_lease, index).await?;
+            completed += 1;
+            crate::progress_events::emit(
+                events,
+                ProgressEvent::DocumentPageCompleted {
+                    document: stem.to_string(),
+                    page_index: index,
+                    completed,
+                    total,
+                },
+            );
+            continue;
+        }
+        let page = rendered.next().expect("peeked rendered page");
+        let (snapshot, cleaned, _raw, _encoded, warnings) =
+            snapshots.next().expect("snapshots match rendered pages");
         for warning in warnings {
             crate::progress_events::emit(events, ProgressEvent::VlmWarning { message: warning });
         }
@@ -463,7 +531,9 @@ async fn stage_window(
                     OfficialBuildPage {
                         slice_page_idx: page.index,
                         page_size_points: page.size,
-                        render_scale: 200.0 / 72.0,
+                        // The page's actual adaptive scale, so bbox mapping and the RGB-size
+                        // validation match the downscaled raster of oversized pages.
+                        render_scale: page.scale,
                         rgb: image,
                         snapshot,
                     },
@@ -506,6 +576,77 @@ async fn stage_window(
         );
     }
     Ok(StagedWindow { stage, completed })
+}
+
+/// Stages one page whose render failed: an empty preview page plus a minimal blank prepared
+/// page, so `pages == preview_pages` holds and every source index stays in the manifest.
+async fn write_placeholder_page(
+    mut stage: OfficialOutputStage,
+    deadline: RouteDeadline,
+    task_work_lease: &TaskWorkLease,
+    index: usize,
+) -> VlmResult<OfficialOutputStage> {
+    let preview_page = PageResult {
+        page_index: index,
+        page_size: [1.0, 1.0],
+        blocks: Vec::new(),
+    };
+    let (returned_stage, result) = deadline
+        .blocking(task_work_lease, move || {
+            let result = (|| {
+                deadline.check()?;
+                stage.write_preview_page(&preview_page)
+            })();
+            (stage, result)
+        })
+        .await?;
+    let mut stage = returned_stage;
+    if let Err(error) = result {
+        return Err(dispose_stage(stage, error).await);
+    }
+    let remaining_assets = stage.remaining_asset_buffer_bytes();
+    let remaining_text = stage.remaining_text_buffer_bytes();
+    // ponytail: a failed page is staged as a minimal 1x1 pt blank page (empty blocks, no
+    // assets). Its true size is unknowable when dimensions extraction itself failed; a fixed
+    // valid size keeps `prepare_official_page_until` happy. Pass real sizes if that matters.
+    let built = match deadline
+        .blocking(task_work_lease, move || {
+            prepare_official_page_until(
+                OfficialBuildPage {
+                    slice_page_idx: index,
+                    page_size_points: [1.0, 1.0],
+                    render_scale: 200.0 / 72.0,
+                    rgb: image::RgbImage::new(3, 3),
+                    snapshot: Vec::new(),
+                },
+                remaining_assets,
+                remaining_text,
+                Some(deadline.instant()),
+            )
+        })
+        .await
+    {
+        Ok(Ok(built)) => built,
+        Ok(Err(error)) => return Err(dispose_stage(stage, error).await),
+        Err(error) => return Err(dispose_stage(stage, error).await),
+    };
+    if let Err(error) = deadline.check() {
+        return Err(dispose_stage(stage, error).await);
+    }
+    let (returned_stage, result) = deadline
+        .blocking(task_work_lease, move || {
+            let result = (|| {
+                deadline.check()?;
+                stage.write_prepared_page(index, built.page, &built.assets)
+            })();
+            (stage, result)
+        })
+        .await?;
+    let stage = returned_stage;
+    if let Err(error) = result {
+        return Err(dispose_stage(stage, error).await);
+    }
+    Ok(stage)
 }
 
 pub(crate) fn route_limits(options: &OfficialPdfOptions, response_cap: usize) -> Limits {
@@ -627,31 +768,6 @@ pub(crate) async fn parse_and_write(
         None,
         totals,
         client.official_page_concurrency(),
-    )
-    .await
-}
-
-pub(crate) async fn parse_and_write_with_totals_and_page_concurrency(
-    client: &MinerUVlmClient,
-    input: PdfInput,
-    options: OfficialPdfOptions,
-    root: &Path,
-    stem: &str,
-    totals: crate::document_limits::OfficialDocumentTotals,
-    page_concurrency: OfficialPageConcurrency,
-) -> VlmResult<OfficialOutputManifest> {
-    parse_and_write_to(
-        client,
-        input,
-        options,
-        root,
-        stem,
-        OfficialOutputTarget::Vlm,
-        None,
-        None,
-        None,
-        totals,
-        page_concurrency,
     )
     .await
 }
@@ -888,13 +1004,14 @@ async fn parse_and_write_to(
                         .expect("a rendered prefetch always carries its phase-B snapshots"),
                 ),
             ),
-            Some(PrefetchState::PendingFallback(plan)) => {
+            Some(PrefetchState::PendingFallback((plan, plan_warnings))) => {
                 match render_route_window(
                     RenderRole::Fallback,
                     deadline,
                     options.render_timeout,
                     parsed.clone(),
                     plan,
+                    plan_warnings,
                     render_limits.clone(),
                     render_workers,
                     task_work_lease.clone(),
@@ -906,7 +1023,7 @@ async fn parse_and_write_to(
                 }
             }
             None => {
-                let plan = match if overlap_enabled {
+                let (plan, plan_warnings) = match if overlap_enabled {
                     plan_route_window_in_slot(
                         &parsed,
                         &indexes,
@@ -930,6 +1047,7 @@ async fn parse_and_write_to(
                     options.render_timeout,
                     parsed.clone(),
                     plan,
+                    plan_warnings,
                     render_limits.clone(),
                     render_workers,
                     task_work_lease.clone(),
@@ -984,19 +1102,19 @@ async fn parse_and_write_to(
                 &render_limits,
                 slot_caps[1 - next_slot],
             ) {
-                Ok(next) if next.mode == WindowPlanMode::Slot => {
+                Ok((next, next_warnings)) if next.mode == WindowPlanMode::Slot => {
                     if let Err(error) = retain_window(&mut cursor, &next) {
                         return Err(dispose_stage(stage, error).await);
                     }
-                    Some(next)
+                    Some((next, next_warnings))
                 }
-                Ok(fallback) => {
+                Ok((fallback, fallback_warnings)) => {
                     if let Err(error) = retain_window(&mut cursor, &fallback) {
                         return Err(dispose_stage(stage, error).await);
                     }
                     // The full-cap fallback consumes both half slots, so resume at A.
                     next_slot = 0;
-                    pending_fallback = Some(fallback);
+                    pending_fallback = Some((fallback, fallback_warnings));
                     None
                 }
                 Err(error) => return Err(dispose_stage(stage, error).await),
@@ -1007,7 +1125,7 @@ async fn parse_and_write_to(
 
         // Phase A: remaining VLM(current) || render(next). A prefetched current already has its
         // snapshots from the previous phase-B overlap, so only the next render remains here.
-        let snapshots = if let Some(next) = next {
+        let snapshots = if let Some((next, next_warnings)) = next {
             if current
                 .plan
                 .bytes
@@ -1026,6 +1144,7 @@ async fn parse_and_write_to(
                 options.render_timeout,
                 parsed.clone(),
                 next,
+                next_warnings,
                 render_limits.clone(),
                 render_workers,
                 task_work_lease.clone(),
@@ -1289,18 +1408,22 @@ mod tests {
     use tokio::sync::{Notify, Semaphore};
 
     fn route_pdf(pages: usize) -> Bytes {
+        route_pdf_sized(&vec![(1.0, 1.0); pages])
+    }
+
+    fn route_pdf_sized(sizes: &[(f32, f32)]) -> Bytes {
         let mut pdf = Document::with_version("1.5");
         let tree = pdf.new_object_id();
-        let ids: Vec<_> = (0..pages).map(|_| pdf.new_object_id()).collect();
-        for id in &ids {
+        let ids: Vec<_> = (0..sizes.len()).map(|_| pdf.new_object_id()).collect();
+        for (id, (width, height)) in ids.iter().zip(sizes) {
             let contents = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
             pdf.objects.insert(*id, Object::Dictionary(dictionary! {
                 "Type" => "Page", "Parent" => tree,
-                "MediaBox" => vec![0.into(), 0.into(), 1.into(), 1.into()], "Contents" => contents,
+                "MediaBox" => vec![0.into(), 0.into(), (*width).into(), (*height).into()], "Contents" => contents,
             }));
         }
         pdf.objects.insert(tree, Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => ids.into_iter().map(Object::Reference).collect::<Vec<_>>(), "Count" => pages as i64,
+            "Type" => "Pages", "Kids" => ids.into_iter().map(Object::Reference).collect::<Vec<_>>(), "Count" => sizes.len() as i64,
         }));
         let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => tree });
         pdf.trailer.set("Root", catalog);
@@ -1841,6 +1964,237 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_partial_render_failure_degrades_to_placeholder_and_continues() {
+        async fn handler(Json(_): Json<Value>) -> Json<Value> {
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
+        }
+        let client =
+            route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let callback: crate::ProgressCallback = {
+            let events = Arc::clone(&events);
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        };
+        let worker_hook = Arc::new(crate::pdf::PageRenderTestHook::new(
+            |index| {
+                if index == 1 {
+                    Err(crate::Error::Pdf("injected page render failure".into()))
+                } else {
+                    Ok(())
+                }
+            },
+            |_, _| {},
+        ));
+        let mut options = route_options();
+        options.processing_window_size = 3;
+        let pdf = route_pdf(3);
+        let output = tempfile::tempdir().unwrap();
+        let output_root = output.path().to_path_buf();
+        let manifest = tokio::time::timeout(
+            Duration::from_secs(30),
+            scope_window_render_test_hook(
+                render_test_hook(|_| Box::pin(async { Ok(()) }), |_, _| {}, |_| {}),
+                crate::pdf::scope_page_render_test_hook(worker_hook, async move {
+                    client
+                        .parse_and_write_prepared_pdf_with_events(
+                            crate::input_prepare::PreparedPdf {
+                                bytes: pdf.clone(),
+                                kind: crate::input_prepare::DocumentKind::Pdf,
+                                original: pdf,
+                            },
+                            options,
+                            &output_root,
+                            "partial",
+                            Some(callback),
+                        )
+                        .await
+                }),
+            ),
+        )
+        .await
+        .expect("route timed out")
+        .expect("route");
+
+        // Every source page index stays in the manifest; the failed page is an empty placeholder.
+        let middle: Value = serde_json::from_slice(
+            &std::fs::read(manifest.vlm_dir.join("partial_middle.json")).expect("middle"),
+        )
+        .expect("middle JSON");
+        let pages = middle["pdf_info"].as_array().expect("pdf_info");
+        assert_eq!(
+            pages
+                .iter()
+                .map(|page| page["page_idx"].as_u64().expect("page index"))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+        );
+        let messages: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                crate::ProgressEvent::VlmWarning { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            messages.iter().any(|message| message.contains("page 1 failed")),
+            "{messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_unrenderable_page_is_skipped_with_warning_and_others_continue() {
+        async fn handler(Json(_): Json<Value>) -> Json<Value> {
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
+        }
+        let client =
+            route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let callback: crate::ProgressCallback = {
+            let events = Arc::clone(&events);
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        };
+        // Page 1 is 1,000,000 x 1 pt: even at 200 DPI its viewport exceeds Hayro's u16 limit,
+        // so it is unrenderable and must be skipped with a warning rather than failing the
+        // document; pages 0 and 2 still render.
+        let pdf = route_pdf_sized(&[(1.0, 1.0), (1_000_000.0, 1.0), (1.0, 1.0)]);
+        let mut options = route_options();
+        options.processing_window_size = 3;
+        let output = tempfile::tempdir().unwrap();
+        let output_root = output.path().to_path_buf();
+        let manifest = tokio::time::timeout(
+            Duration::from_secs(30),
+            scope_window_render_test_hook(
+                render_test_hook(|_| Box::pin(async { Ok(()) }), |_, _| {}, |_| {}),
+                async move {
+                    client
+                        .parse_and_write_prepared_pdf_with_events(
+                            crate::input_prepare::PreparedPdf {
+                                bytes: pdf.clone(),
+                                kind: crate::input_prepare::DocumentKind::Pdf,
+                                original: pdf,
+                            },
+                            options,
+                            &output_root,
+                            "skipped",
+                            Some(callback),
+                        )
+                        .await
+                },
+            ),
+        )
+        .await
+        .expect("route timed out")
+        .expect("route");
+
+        let middle: Value = serde_json::from_slice(
+            &std::fs::read(manifest.vlm_dir.join("skipped_middle.json")).expect("middle"),
+        )
+        .expect("middle JSON");
+        let pages = middle["pdf_info"].as_array().expect("pdf_info");
+        assert_eq!(
+            pages
+                .iter()
+                .map(|page| page["page_idx"].as_u64().expect("page index"))
+                .collect::<Vec<_>>(),
+            vec![0, 2],
+            "the unrenderable page is dropped, the rest continue",
+        );
+        let messages: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                crate::ProgressEvent::VlmWarning { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            messages.iter().any(|message| message.contains("page 1 skipped")),
+            "{messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_entire_window_unrenderable_is_a_hard_error() {
+        async fn handler(Json(_): Json<Value>) -> Json<Value> {
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
+        }
+        let client =
+            route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        // Every page is unrenderable (viewport beyond Hayro's u16 limit): the window must still
+        // hard-error instead of producing an empty placeholder document.
+        let pdf = route_pdf_sized(&[(1_000_000.0, 1.0)]);
+        let output = tempfile::tempdir().unwrap();
+        let output_root = output.path().to_path_buf();
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            scope_window_render_test_hook(
+                render_test_hook(|_| Box::pin(async { Ok(()) }), |_, _| {}, |_| {}),
+                async move {
+                    client
+                        .parse_and_write_official_pdf(
+                            crate::PdfInput::Bytes(pdf),
+                            route_options(),
+                            &output_root,
+                            "whole-skip",
+                        )
+                        .await
+                },
+            ),
+        )
+        .await
+        .expect("route timed out");
+
+        assert!(matches!(
+            result,
+            Err(crate::VlmError::Pdf(message)) if message.contains("u16 limit")
+        ));
+        assert!(!output.path().join("whole-skip/vlm").exists());
+    }
+
+    #[tokio::test]
+    async fn route_whole_window_render_failure_is_a_hard_error() {
+        async fn handler(Json(_): Json<Value>) -> Json<Value> {
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
+        }
+        let client =
+            route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        let worker_hook = Arc::new(crate::pdf::PageRenderTestHook::new(
+            |_| Err(crate::Error::Pdf("injected window render failure".into())),
+            |_, _| {},
+        ));
+        let output = tempfile::tempdir().unwrap();
+        let output_root = output.path().to_path_buf();
+        let pdf = route_pdf(1);
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            scope_window_render_test_hook(
+                render_test_hook(|_| Box::pin(async { Ok(()) }), |_, _| {}, |_| {}),
+                crate::pdf::scope_page_render_test_hook(worker_hook, async move {
+                    client
+                        .parse_and_write_official_pdf(
+                            crate::PdfInput::Bytes(pdf),
+                            route_options(),
+                            &output_root,
+                            "whole-fail",
+                        )
+                        .await
+                }),
+            ),
+        )
+        .await
+        .expect("route timed out");
+
+        assert!(matches!(
+            result,
+            Err(crate::VlmError::Pdf(message)) if message == "injected window render failure"
+        ));
+        assert!(!output.path().join("whole-fail/vlm").exists());
+    }
+
+    #[tokio::test]
     async fn render_test_hook_is_task_local_and_scope_isolated() {
         let first = render_test_hook(|_| Box::pin(async { Ok(()) }), |_, _| {}, |_| {});
         let second = render_test_hook(|_| Box::pin(async { Ok(()) }), |_, _| {}, |_| {});
@@ -1942,7 +2296,7 @@ mod tests {
 
     #[test]
     fn window_planner_preserves_order_count_bound_and_byte_sum() {
-        let window = plan_window(&[7, 3, 9], 0, 2, 16, 16, |index| {
+        let (window, warnings) = plan_window(&[7, 3, 9], 0, 2, 16, 16, |index| {
             Ok(match index {
                 7 => 4,
                 3 => 5,
@@ -1951,57 +2305,102 @@ mod tests {
             })
         })
         .expect("window");
+        assert!(warnings.is_empty());
 
         assert_eq!(window.indexes, vec![7, 3]);
         assert_eq!(window.bytes, 9);
         assert_eq!(window.mode, WindowPlanMode::Slot);
+        assert_eq!(window.consumed, 2);
     }
 
     #[test]
     fn window_planner_admits_slot_boundary_and_stops_before_next_page() {
-        let window =
-            plan_window(&[0, 1, 2], 0, 3, 10, 10, |index| Ok([7, 3, 1][index])).expect("window");
+        let (window, warnings) =
+            plan_window(&[0, 1, 2], 0, 3, 10, 10, |index| Ok([7, 3, 1][index]))
+                .expect("window");
+        assert!(warnings.is_empty());
         assert_eq!(window.indexes, vec![0, 1]);
         assert_eq!(window.bytes, 10);
 
-        let next = plan_window(&[0, 1, 2], 2, 3, 10, 10, |index| Ok([7, 3, 1][index]))
+        let (next, warnings) = plan_window(&[0, 1, 2], 2, 3, 10, 10, |index| Ok([7, 3, 1][index]))
             .expect("next window");
+        assert!(warnings.is_empty());
         assert_eq!(next.indexes, vec![2]);
         assert_eq!(next.bytes, 1);
     }
 
     #[test]
     fn window_planner_uses_single_page_full_cap_fallback_then_resumes() {
-        let window = plan_window(&[4, 5], 0, 2, 5, 10, |index| Ok([6, 2][index - 4]))
+        let (window, warnings) = plan_window(&[4, 5], 0, 2, 5, 10, |index| Ok([6, 2][index - 4]))
             .expect("fallback window");
+        assert!(warnings.is_empty());
         assert_eq!(window.indexes, vec![4]);
         assert_eq!(window.bytes, 6);
         assert_eq!(window.mode, WindowPlanMode::FullCapFallback);
 
-        let next = plan_window(&[4, 5], 1, 2, 5, 10, |index| Ok([6, 2][index - 4]))
+        let (next, warnings) = plan_window(&[4, 5], 1, 2, 5, 10, |index| Ok([6, 2][index - 4]))
             .expect("resumed window");
+        assert!(warnings.is_empty());
         assert_eq!(next.indexes, vec![5]);
         assert_eq!(next.bytes, 2);
         assert_eq!(next.mode, WindowPlanMode::Slot);
     }
 
     #[test]
-    fn window_planner_rejects_full_cap_plus_one_before_admitting_work() {
+    fn window_planner_skips_full_cap_pages_with_warning() {
         let mut looked_up = Vec::new();
-        let error = plan_window(&[12, 13], 0, 2, 5, 10, |index| {
+        let (window, warnings) = plan_window(&[12, 13], 0, 2, 5, 10, |index| {
             looked_up.push(index);
-            Ok(11)
+            Ok(if index == 12 { 11 } else { 3 })
         })
-        .expect_err("page exceeds full cap");
+        .expect("a page over the full cap is skipped, not fatal");
 
-        assert_eq!(looked_up, vec![12]);
+        assert_eq!(looked_up, vec![12, 13]);
+        assert_eq!(window.indexes, vec![13]);
+        assert_eq!(window.bytes, 3);
+        assert_eq!(window.mode, WindowPlanMode::Slot);
+        assert_eq!(window.consumed, 2);
+        assert_eq!(
+            warnings,
+            vec!["page 12 skipped: page exceeds the in-flight image byte budget (11 bytes)".to_owned()]
+        );
+    }
+
+    #[test]
+    fn window_planner_skips_pages_whose_byte_estimate_fails_with_warning() {
+        let (window, warnings) = plan_window(&[0, 1, 2], 0, 3, 16, 16, |index| {
+            if index == 1 {
+                Err(crate::VlmError::Pdf("page 1 has invalid dimensions".into()))
+            } else {
+                Ok(match index {
+                    0 => 4,
+                    2 => 6,
+                    _ => unreachable!(),
+                })
+            }
+        })
+        .expect("an unrenderable page is skipped, not fatal");
+
+        assert_eq!(window.indexes, vec![0, 2]);
+        assert_eq!(window.bytes, 10);
+        assert_eq!(window.mode, WindowPlanMode::Slot);
+        assert_eq!(window.consumed, 3);
+        assert_eq!(
+            warnings,
+            vec!["page 1 skipped: PDF error: page 1 has invalid dimensions".to_owned()]
+        );
+    }
+
+    #[test]
+    fn window_planner_hard_errors_when_every_page_is_skipped() {
+        let error = plan_window(&[0, 1], 0, 2, 16, 16, |_| {
+            Err(crate::VlmError::Pdf("unrenderable page".into()))
+        })
+        .expect_err("an all-skipped window must stay a hard error");
+
         assert!(matches!(
             error,
-            crate::VlmError::LimitExceeded {
-                resource: "in-flight image bytes",
-                limit: 10,
-                actual: 11,
-            }
+            crate::VlmError::Pdf(message) if message == "unrenderable page"
         ));
     }
 
@@ -2040,18 +2439,18 @@ mod tests {
         let mut cursor = 0;
         let mut trace = Vec::new();
 
-        let current = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("current");
+        let (current, _) = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("current");
         retain_window(&mut cursor, &current).expect("retain current");
         trace.extend(current.indexes.iter().copied());
 
-        let prefetch = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("prefetch");
+        let (prefetch, _) = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("prefetch");
         retain_window(&mut cursor, &prefetch).expect("retain prefetch");
         trace.extend(prefetch.indexes.iter().copied());
         let cursor_after_prefetch = cursor;
         let promoted = prefetch; // Promotion moves ownership; it never changes the cursor.
         assert_eq!(cursor, cursor_after_prefetch);
 
-        let next = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("next");
+        let (next, _) = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("next");
         retain_window(&mut cursor, &next).expect("retain next");
         trace.extend(next.indexes.iter().copied());
 
@@ -2064,9 +2463,9 @@ mod tests {
     fn last_prefetched_window_is_promoted_without_extra_planning() {
         let indexes = [0, 1, 2, 3];
         let mut cursor = 0;
-        let current = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("current");
+        let (current, _) = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("current");
         retain_window(&mut cursor, &current).expect("retain current");
-        let prefetch = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("prefetch");
+        let (prefetch, _) = plan_window(&indexes, cursor, 2, 2, 4, |_| Ok(1)).expect("prefetch");
         retain_window(&mut cursor, &prefetch).expect("retain prefetch");
 
         let promoted = prefetch;
@@ -2080,17 +2479,17 @@ mod tests {
         let indexes = [0, 1, 2, 3];
         let bytes = [2, 6, 2, 2];
         let mut cursor = 0;
-        let current = plan_window(&indexes, cursor, 2, 5, 10, |index| Ok(bytes[index]))
+        let (current, _) = plan_window(&indexes, cursor, 2, 5, 10, |index| Ok(bytes[index]))
             .expect("current slot");
         retain_window(&mut cursor, &current).expect("retain current");
-        let fallback =
+        let (fallback, _) =
             plan_window(&indexes, cursor, 2, 5, 10, |index| Ok(bytes[index])).expect("fallback");
         retain_window(&mut cursor, &fallback).expect("retain fallback");
         let cursor_after_fallback = cursor;
         let promoted = fallback;
         assert_eq!(cursor, cursor_after_fallback);
 
-        let resumed = plan_window(&indexes, cursor, 2, 5, 10, |index| Ok(bytes[index]))
+        let (resumed, _) = plan_window(&indexes, cursor, 2, 5, 10, |index| Ok(bytes[index]))
             .expect("resumed slot A");
         assert_eq!(current.indexes, vec![0]);
         assert_eq!(promoted.mode, WindowPlanMode::FullCapFallback);

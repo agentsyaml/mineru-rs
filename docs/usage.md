@@ -2,12 +2,6 @@
 
 [简体中文](usage.md) | [English](usage.en.md)
 
-`mineru-vlm` 将 PDF 用纯 Rust 的 Hayro 在本地以 **200 DPI** 渲染成页面图像，再调用外部、OpenAI 兼容的 MinerU VLM 服务生成版面与内容结果。它不做本地模型推理、不下载模型、不包含 `mineru-api`，且只接受 PDF。
-
-### Rust 扩展：官方形状输出
-
-`mineru-vlm --official-output` 是 Rust 专用的低层直接路由：它可接受 PDF 目录（递归处理），并写入 `<output>/<stem>/vlm` 的六个官方形状产物和预览。此模式下 `--base-url`、`--model` 可由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME` 或单模型发现补充；默认兼容模式仍要求两者。`--batch-size` 仅可与该开关一起使用，省略时使用官方路由的编译默认值 32。它是每页真实的语义推理请求准入（推理批大小），**不是**输入文档分组，也**不是** MinerU 的 64 页处理窗口；页并发（`--page-concurrency`）与处理窗口（`--processing-window-size`）是相互独立的轴。
-
 兼容性基线、参考套件和可复现安装方式见 [compatibility.md](compatibility.md)。该声明仅覆盖 `vlm-http-client` 的 PDF 流程，不是完整 MinerU 3.4.4 兼容性声明。
 
 ## 构建与前置条件
@@ -16,10 +10,10 @@
 
 ```sh
 cargo build --release
-./target/release/mineru-vlm --help
+./target/release/mineru --help
 ```
 
-可执行文件为 `target/release/mineru-vlm`。渲染不依赖 PDFium 或其他本地/native PDF 运行时。
+可执行文件为 `target/release/mineru`。渲染不依赖 PDFium 或其他本地/native PDF 运行时。
 
 ## 快速开始
 
@@ -41,56 +35,32 @@ mineru -p input.pdf -o out/
 
 ## 服务与模型
 
-先向服务查询模型；从返回 JSON 的 `data[].id` 选择一个值作为 `--model`：
+先向服务查询模型；从返回 JSON 的 `data[].id` 选择一个值，设为 `MINERU_VL_MODEL_NAME`：
 
 ```sh
 curl -H "Authorization: Bearer $MINERU_VL_API_KEY" \
   "https://<server>/v1/models"
 ```
 
-`--base-url` 可传服务根地址（如 `https://<server>/`）或 `/v1` 前缀（如 `https://<server>/v1`）；程序会访问对应的 `/v1/models` 和 `/v1/chat/completions`。`--model` 必填，不能为空。
+直接模式下 `mineru` 的服务地址与模型 ID 由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME` 环境变量提供，`--url` 可覆盖服务地址；程序会访问对应的 `/v1/models` 和 `/v1/chat/completions`。
 
 认证优先使用环境变量 `MINERU_VL_API_KEY`，也可用 `--api-key` 覆盖它。避免把密钥直接写进命令行：它可能进入 shell 历史或日志。
 
 ```sh
+export MINERU_VL_SERVER="https://<server>"
+export MINERU_VL_MODEL_NAME="<model-id>"
 export MINERU_VL_API_KEY='<your-key>'
-./target/release/mineru-vlm "input.pdf" \
-  --base-url "https://<server>/v1" \
-  --model "<model-id>" \
-  --output "output"
+
+./target/release/mineru -p "input.pdf" -o output
 ```
 
 若必须临时传入密钥：
 
 ```sh
-./target/release/mineru-vlm "input.pdf" --base-url "https://<server>/" \
-  --model "<model-id>" --api-key "<your-key>"
+export MINERU_VL_MODEL_NAME="<model-id>"
+./target/release/mineru -p "input.pdf" -u "https://<server>/v1" \
+  --api-key "<your-key>"
 ```
-
-## 命令行参数
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `input` | 必填 | 输入 PDF 路径（位置参数）。 |
-| `--base-url` | 必填 | OpenAI 兼容服务根地址或 `/v1` 前缀。 |
-| `--model` | 必填 | `GET /v1/models` 返回的模型 ID。 |
-| `--output <目录>` | `output` | 输出目录。 |
-| `--api-key <密钥>` | 无 | Bearer 令牌；优先于 `MINERU_VL_API_KEY`。 |
-| `--page-start <n>` | 无（从 0） | 起始页，**从 0 开始**。 |
-| `--page-end <n>` | 无（到末页） | 结束页，**包含该页**。 |
-| `--no-formula` | 关闭 | 不进行公式处理。 |
-| `--no-table` | 关闭 | 不进行表格处理。 |
-| `--no-image-analysis` | 关闭 | 不进行图像分析。 |
-
-只处理第 0 到第 2 页，并关闭公式和图像分析：
-
-```sh
-./target/release/mineru-vlm "input.pdf" --base-url "https://<server>/v1" \
-  --model "<model-id>" --page-start 0 --page-end 2 \
-  --no-formula --no-image-analysis --output "result"
-```
-
-只给出 `--page-end` 时从第 0 页开始；只给出 `--page-start` 时处理到末页。起始页大于结束页、或范围超出 PDF 页数都会失败。任一错误会写入 stderr，进程以退出码 1 结束。
 
 ---
 
@@ -431,24 +401,16 @@ output/
 以下示例只使用公开 API，可放入自己的 Tokio 异步程序：
 
 ```rust
-use mineru::{ClientConfig, MinerUClient, ParseOptions, PdfInput, write_outputs};
+use mineru::{RunOptions, run};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = ClientConfig::new("https://<server>/v1", "<model-id>")?;
-    let client = MinerUClient::new(config)?;
-
-    client.check_model().await?;
-    let document = client
-        .parse_pdf(PdfInput::Path("input.pdf".into()), ParseOptions::default())
-        .await?;
-    let outputs = write_outputs(&document, "output")?;
-    println!("{}", outputs.markdown.display());
+    run(RunOptions::new("input.pdf", "out/")).await?;
     Ok(())
 }
 ```
 
-需要认证时，在构造 `MinerUClient` 前为可变 `ClientConfig` 的公开 `bearer_token` 设置 `BearerToken::new(...)`。`check_model()` 会请求模型列表并确认配置的模型在其中。
+认证来自 `MINERU_VL_API_KEY`（服务端点与模型分别用 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME`）。若要在代码中覆盖服务端点、模型或认证，请在调用 `run` 前设置 `RunOptions` 的公开字段（`api_url`、`api_key`）。
 
 ## Python 和 Node.js 绑定
 
@@ -528,7 +490,7 @@ mineru.run({ path: 'input.pdf', output: 'out/' }).then(({ warnings }) => {
 
 `--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`、`--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES` 和 `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` 接受无符号十进制字节数（允许空白和 `_`）。优先级为 CLI、环境变量、编译默认值：输入 4_293_918_719 字节、编码文档 8 GiB、输出 8 GiB。显式的非法、零、溢出或平台不可表示值会失败；不再存在任意硬上限——配置值本身作为策略使用，而不会被夹紧到另一个常数。
 
-这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过常驻上限（`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`，默认 512 MiB）的源 PDF，单个 VLM 响应仍限制为 10 MiB（`--http-max-response-bytes`）。编码策略应在 `mineru-vlm-api` 配置；规范远程模式会拒绝编码覆盖项。普通遗留 `mineru-vlm` 保持常驻解析器限制，编码文档覆盖项需要 `--official-output`。
+这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过常驻上限（`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`，默认 512 MiB）的源 PDF，单个 VLM 响应仍限制为 10 MiB（`--http-max-response-bytes`）。编码策略应在 `mineru-vlm-api` 配置；规范远程模式会拒绝编码覆盖项。
 
 | 项目 | 默认值 |
 | --- | ---: |
@@ -547,13 +509,13 @@ mineru.run({ path: 'input.pdf', output: 'out/' }).then(({ warnings }) => {
 - **上游锁定**：200 DPI、64 页窗口、3 个渲染 worker、VLM HTTP 最大并发 100、HTTP 请求超时 600 秒。
 - **Rust 防护**：10 秒连接超时、24 小时总超时，以及页数、PDF、资产、响应、渲染图像、像素、在途图像和版面块限制。
 
-10,000 页支持仅是高内存下的尽力而为：输入字节、最终页面结果和资产都会保留在内存中，并非无上限保证。库调用可调整公开的 `ClientConfig.limits`、`timeouts`、`request_concurrency` 和 `render_workers`，再调用 `validate()`（`MinerUClient::new` 也会验证）；应按可用 RAM 和服务端点容量配置。所有限制、并发和 worker 必须大于零；所有超时必须非零，且单请求超时不得超过总超时。
+10,000 页支持仅是高内存下的尽力而为：输入字节、最终页面结果和资产都会保留在内存中，并非无上限保证。库调用可调整公开的 `ClientConfig.limits`、`timeouts`、`request_concurrency` 和 `render_workers`，再调用 `validate()`（`ClientConfig::new` 也会验证）；应按可用 RAM 和服务端点容量配置。所有限制、并发和 worker 必须大于零；所有超时必须非零，且单请求超时不得超过总超时。
 
 ## 限制与排错
 
 - Hayro 不支持加密 PDF；复杂/高级 PDF 效果的渲染可能与其他渲染器不同。遇到无效 PDF、页映射不一致、尺寸限制或渲染异常会明确失败，不会静默跳过。
 - 预览支持页面旋转 `0/90/180/270`。其目标是可用的视觉与语义对齐；由于写入了标注且 PDF 序列化会变化，预览文件字节不等于原 PDF。其他旋转会失败。
 - `401` 通常是缺失或无效的 API key；`404` 通常是 `--base-url` 路径不对。确认服务实际暴露 `/v1/models` 与 `/v1/chat/completions`。
-- `check_model` 或模型检查失败时，确认 `GET /v1/models` 返回的 `data` 中含所选 ID，并检查认证和 base URL。
+- 模型校验失败时（`GET /v1/models` 未返回所配置的模型，或未配置模型但端点返回多个模型），确认 `GET /v1/models` 返回的 `data` 中含所选 ID，并检查认证和 base URL。
 - `no valid layout tokens` 表示服务返回内容不含 MinerU 所需的版面 token；请选择兼容的 MinerU VLM 模型/服务，而不是普通聊天模型。
 - `limit exceeded` 表示超过上表资源上限；缩小输入或在库调用中调整并验证配置。Hayro 不支持的 PDF 则需用支持该 PDF 特性的文件/渲染流程处理后再试。

@@ -1,4 +1,4 @@
-use crate::{BlockKind, ContentBlock, Error, NormalizedBbox, Result, Rotation};
+use crate::{ContentBlock, Error, NormalizedBbox, Result, Rotation};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{
     ExtendedColorType, ImageEncoder, Rgb, RgbImage,
@@ -9,11 +9,6 @@ use image::{
     imageops::FilterType,
 };
 use serde_json::{Map, Value};
-
-pub(crate) fn page_png(image: &RgbImage) -> Result<String> {
-    let normalized = image::imageops::resize(image, 1036, 1036, FilterType::CatmullRom);
-    data_url(&normalized)
-}
 
 pub(crate) fn min_edge_dimensions(width: u32, height: u32, target: u32) -> (u32, u32) {
     let scale = target as f32 / width.min(height).max(1) as f32;
@@ -85,10 +80,6 @@ fn rotate(image: RgbImage, rotation: Option<Rotation>) -> RgbImage {
         _ => image,
     }
 }
-pub(crate) fn data_url(image: &RgbImage) -> Result<String> {
-    Ok(png_data_url(&png_bytes(image)?))
-}
-
 pub(crate) fn png_bytes(image: &RgbImage) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     PngEncoder::new_with_quality(&mut bytes, CompressionType::Fast, PngFilterType::Adaptive)
@@ -102,10 +93,6 @@ pub(crate) fn png_bytes(image: &RgbImage) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn png_data_url(bytes: &[u8]) -> String {
-    format!("data:image/png;base64,{}", STANDARD.encode(bytes))
-}
-
 pub(crate) fn jpeg_data_url(image: &RgbImage) -> Result<String> {
     let mut bytes = Vec::new();
     JpegEncoder::new_with_quality(&mut bytes, 75)
@@ -117,66 +104,6 @@ pub(crate) fn jpeg_data_url(image: &RgbImage) -> Result<String> {
         )
         .map_err(|e| Error::Image(e.to_string()))?;
     Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes)))
-}
-
-fn area(b: NormalizedBbox) -> f32 {
-    (b.right - b.left) * (b.bottom - b.top)
-}
-fn overlap(a: NormalizedBbox, b: NormalizedBbox) -> f32 {
-    (a.right.min(b.right) - a.left.max(b.left)).max(0.0)
-        * (a.bottom.min(b.bottom) - a.top.max(b.top)).max(0.0)
-}
-
-/// Marks image blocks that belong to their best containing table.
-pub(crate) fn build_table_image_map(blocks: &mut [ContentBlock]) -> Vec<(usize, Vec<usize>)> {
-    let tables: Vec<_> = blocks
-        .iter()
-        .enumerate()
-        .filter_map(|(i, b)| (b.kind.as_str() == BlockKind::TABLE).then_some(i))
-        .collect();
-    let mut out: Vec<_> = tables.iter().map(|&i| (i, Vec::new())).collect();
-    for image in 0..blocks.len() {
-        if blocks[image].kind.as_str() != BlockKind::IMAGE || area(blocks[image].bbox) <= 0.0 {
-            continue;
-        }
-        blocks[image].metadata.remove("_absorbed_by_table");
-        blocks[image].metadata.remove("_skip_asset");
-        let best = tables
-            .iter()
-            .copied()
-            .filter(|&table| {
-                overlap(blocks[image].bbox, blocks[table].bbox) / area(blocks[image].bbox) >= 0.9
-            })
-            .min_by(|&a, &b| {
-                let ra = overlap(blocks[image].bbox, blocks[a].bbox) / area(blocks[image].bbox);
-                let rb = overlap(blocks[image].bbox, blocks[b].bbox) / area(blocks[image].bbox);
-                rb.total_cmp(&ra)
-                    .then(area(blocks[a].bbox).total_cmp(&area(blocks[b].bbox)))
-            });
-        if let Some(table) = best {
-            blocks[image]
-                .metadata
-                .insert("_absorbed_by_table".into(), Value::from(table));
-            blocks[image]
-                .metadata
-                .insert("_skip_asset".into(), Value::Bool(true));
-            out.iter_mut()
-                .find(|(i, _)| *i == table)
-                .unwrap()
-                .1
-                .push(image);
-        }
-    }
-    for (_, images) in &mut out {
-        images.sort_by(|a, b| {
-            blocks[*a]
-                .bbox
-                .top
-                .total_cmp(&blocks[*b].bbox.top)
-                .then(blocks[*a].bbox.left.total_cmp(&blocks[*b].bbox.left))
-        });
-    }
-    out
 }
 
 pub(crate) const TABLE_IMAGE_TOKEN_LETTERS: &str = "ACDGHKTWXYZ";
@@ -335,6 +262,7 @@ fn paint_token(image: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, text: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlockKind;
     use image::{DynamicImage, ImageFormat};
     use std::io::Cursor;
 
@@ -381,15 +309,10 @@ mod tests {
     }
 
     #[test]
-    fn png_data_url_uses_the_canonical_png_bytes() {
+    fn png_bytes_produce_a_standard_png() {
         let image = RgbImage::from_pixel(2, 1, Rgb([1, 2, 3]));
         let bytes = png_bytes(&image).unwrap();
-        assert_eq!(
-            STANDARD
-                .decode(data_url(&image).unwrap().rsplit(',').next().unwrap())
-                .unwrap(),
-            bytes
-        );
+        assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
     }
 
     #[test]
@@ -414,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn table_image_mask_selects_tiebreak_draws_tokens_and_rotates() {
+    fn table_image_mask_draws_tokens_and_rotates() {
         let outer = block(
             BlockKind::TABLE,
             NormalizedBbox::new(0.1, 0.1, 0.9, 0.9).unwrap(),
@@ -430,18 +353,7 @@ mod tests {
             NormalizedBbox::new(0.3, 0.4, 0.5, 0.6).unwrap(),
             None,
         );
-        let second = block(
-            BlockKind::IMAGE,
-            NormalizedBbox::new(0.25, 0.25, 0.35, 0.35).unwrap(),
-            None,
-        );
-        let mut blocks = vec![outer, inner, first, second];
-        let map = build_table_image_map(&mut blocks);
-        assert_eq!(map[1], (1, vec![3, 2]));
-        for &i in &[2, 3] {
-            assert_eq!(blocks[i].metadata["_absorbed_by_table"], Value::from(1));
-            assert_eq!(blocks[i].metadata["_skip_asset"], Value::Bool(true));
-        }
+        let mut blocks = vec![outer, inner, first];
 
         let mut page = RgbImage::from_pixel(100, 100, Rgb([240, 240, 240]));
         for y in 40..60 {

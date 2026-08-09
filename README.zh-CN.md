@@ -41,18 +41,11 @@ cargo add mineru
 ```
 
 ```rust
-use mineru::{ClientConfig, MinerUClient, ParseOptions, PdfInput};
+use mineru::{RunOptions, run};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = MinerUClient::new(ClientConfig::new(
-        "https://example.test/v1",
-        "model-id",
-    )?)?;
-    let document = client
-        .parse_pdf(PdfInput::Path("input.pdf".into()), ParseOptions::default())
-        .await?;
-    println!("{} pages", document.pages.len());
+    run(RunOptions::new("input.pdf", "out/")).await?;
     Ok(())
 }
 ```
@@ -115,7 +108,7 @@ cargo install mineru
 mineru --help
 ```
 
-该软件包安装 `mineru`、`mineru-api`、`mineru-vlm` 和 `mineru-vlm-api` 二进制文件。若还要安装 `mineru-office-convert` Office 转换辅助程序，请使用 `--features office` 构建：
+该软件包安装 `mineru`、`mineru-api` 和 `mineru-vlm-api` 二进制文件。若还要安装 `mineru-office-convert` Office 转换辅助程序，请使用 `--features office` 构建：
 
 ```sh
 cargo install mineru --features office

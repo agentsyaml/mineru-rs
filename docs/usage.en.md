@@ -2,12 +2,6 @@
 
 [简体中文](usage.md) | [English](usage.en.md)
 
-`mineru-vlm` renders PDFs locally to page images at **200 DPI** using pure-Rust Hayro, then calls an external, OpenAI-compatible MinerU VLM service to generate layout and content results. It does not perform local model inference, download models, include `mineru-api`, and accepts PDFs only.
-
-### Rust extension: official-shape output
-
-`mineru-vlm --official-output` is a Rust-only low-level direct route: it accepts PDF directories (processed recursively) and writes six official-shape artifacts and a preview to `<output>/<stem>/vlm`. In this mode, `--base-url` and `--model` may be supplied by `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, or single-model discovery; the default compatibility mode still requires both. `--batch-size` is available only with this switch; when omitted it uses the official route's compiled default of 32. It is the real per-page semantic inference request admission (inference batching), **not** input-document grouping and **not** MinerU's 64-page processing window. Page concurrency (`--page-concurrency`) and the processing window (`--processing-window-size`) remain separate axes.
-
 See [compatibility.md](compatibility.md) for the compatibility baseline, reference suite, and reproducible installation. This statement covers only the `vlm-http-client` PDF flow; it is not a full MinerU 3.4.4 compatibility statement.
 
 ## Build and prerequisites
@@ -16,10 +10,10 @@ Rust 1.89 is required:
 
 ```sh
 cargo build --release
-./target/release/mineru-vlm --help
+./target/release/mineru --help
 ```
 
-The executable is `target/release/mineru-vlm`. Rendering does not depend on PDFium or another local/native PDF runtime.
+The executable is `target/release/mineru`. Rendering does not depend on PDFium or another local/native PDF runtime.
 
 ## Quickstart
 
@@ -44,56 +38,32 @@ below.
 
 ## Service and model
 
-Query the service for models first; choose a value from `data[].id` in the returned JSON as `--model`:
+Query the service for models first; choose a value from `data[].id` in the returned JSON and set it as `MINERU_VL_MODEL_NAME`:
 
 ```sh
 curl -H "Authorization: Bearer $MINERU_VL_API_KEY" \
   "https://<server>/v1/models"
 ```
 
-`--base-url` may be the service root (for example, `https://<server>/`) or the `/v1` prefix (for example, `https://<server>/v1`); the program accesses the corresponding `/v1/models` and `/v1/chat/completions`. `--model` is required and must not be empty.
+In direct mode, `mineru`'s service address and model ID are supplied by the `MINERU_VL_SERVER` and `MINERU_VL_MODEL_NAME` environment variables; `--url` overrides the service address. The program accesses the corresponding `/v1/models` and `/v1/chat/completions`.
 
 Authentication preferentially uses the `MINERU_VL_API_KEY` environment variable; `--api-key` can override it. Avoid putting keys directly on the command line: they may enter shell history or logs.
 
 ```sh
+export MINERU_VL_SERVER="https://<server>"
+export MINERU_VL_MODEL_NAME="<model-id>"
 export MINERU_VL_API_KEY='<your-key>'
-./target/release/mineru-vlm "input.pdf" \
-  --base-url "https://<server>/v1" \
-  --model "<model-id>" \
-  --output "output"
+
+./target/release/mineru -p "input.pdf" -o output
 ```
 
 If a key must be passed temporarily:
 
 ```sh
-./target/release/mineru-vlm "input.pdf" --base-url "https://<server>/" \
-  --model "<model-id>" --api-key "<your-key>"
+export MINERU_VL_MODEL_NAME="<model-id>"
+./target/release/mineru -p "input.pdf" -u "https://<server>/v1" \
+  --api-key "<your-key>"
 ```
-
-## Command-line options
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `input` | Required | Input PDF path (positional argument). |
-| `--base-url` | Required | OpenAI-compatible service root address or `/v1` prefix. |
-| `--model` | Required | Model ID returned by `GET /v1/models`. |
-| `--output <directory>` | `output` | Output directory. |
-| `--api-key <key>` | None | Bearer token; takes precedence over `MINERU_VL_API_KEY`. |
-| `--page-start <n>` | None (starts at 0) | Start page, **zero-based**. |
-| `--page-end <n>` | None (through the last page) | End page, **inclusive**. |
-| `--no-formula` | Off | Do not process formulas. |
-| `--no-table` | Off | Do not process tables. |
-| `--no-image-analysis` | Off | Do not analyze images. |
-
-Process only pages 0 through 2, disabling formula and image analysis:
-
-```sh
-./target/release/mineru-vlm "input.pdf" --base-url "https://<server>/v1" \
-  --model "<model-id>" --page-start 0 --page-end 2 \
-  --no-formula --no-image-analysis --output "result"
-```
-
-When only `--page-end` is given, processing starts at page 0; when only `--page-start` is given, it continues through the last page. A start page greater than the end page, or a range outside the PDF page count, fails. Any error is written to stderr and the process exits with status 1.
 
 ---
 
@@ -434,24 +404,19 @@ output/
 The following example uses only the public API and can be placed in your own Tokio async program:
 
 ```rust
-use mineru::{ClientConfig, MinerUClient, ParseOptions, PdfInput, write_outputs};
+use mineru::{RunOptions, run};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = ClientConfig::new("https://<server>/v1", "<model-id>")?;
-    let client = MinerUClient::new(config)?;
-
-    client.check_model().await?;
-    let document = client
-        .parse_pdf(PdfInput::Path("input.pdf".into()), ParseOptions::default())
-        .await?;
-    let outputs = write_outputs(&document, "output")?;
-    println!("{}", outputs.markdown.display());
+    run(RunOptions::new("input.pdf", "out/")).await?;
     Ok(())
 }
 ```
 
-When authentication is required, set `BearerToken::new(...)` on the public `bearer_token` of a mutable `ClientConfig` before constructing `MinerUClient`. `check_model()` requests the model list and confirms that it contains the configured model.
+Authentication comes from `MINERU_VL_API_KEY` (or `MINERU_VL_SERVER` /
+`MINERU_VL_MODEL_NAME` for the service endpoint and model). To override the
+service endpoint, model, or authentication in code, set the corresponding
+public fields on `RunOptions` (`api_url`, `api_key`) before calling `run`.
 
 ## Python and Node.js bindings
 
@@ -543,7 +508,7 @@ and `clientSideOutputGeneration`.
 
 `--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`, `--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES`, and `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` accept unsigned decimal bytes (whitespace and `_` are allowed). CLI overrides environment, then the compiled default: 4_293_918_719 input bytes, 8 GiB encoded document bytes, and 8 GiB output bytes. Explicit invalid, zero, overflowing, or platform-unrepresentable values fail; there are no arbitrary hard ceilings — a configured value is used as policy rather than clamped to another constant.
 
-These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above the resident cap (`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`, default 512 MiB) before `lopdf` loads them, and one VLM response remains capped at 10 MiB (`--http-max-response-bytes`). Configure encoded policy on `mineru-vlm-api`; canonical remote mode rejects its encoded override. Ordinary legacy `mineru-vlm` keeps its resident parser cap and requires `--official-output` for an encoded-document override.
+These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above the resident cap (`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`, default 512 MiB) before `lopdf` loads them, and one VLM response remains capped at 10 MiB (`--http-max-response-bytes`). Configure encoded policy on `mineru-vlm-api`; canonical remote mode rejects its encoded override.
 
 | Item | Default |
 | --- | ---: |
@@ -562,13 +527,13 @@ These are disk/document totals, not resident allocations: parsed PDFs and the cu
 - **Upstream-locked**: 200 DPI, 64-page window, 3 rendering workers, VLM HTTP maximum concurrency 100, HTTP request timeout 600 seconds.
 - **Rust safeguards**: 10-second connection timeout, 24-hour total timeout, and limits for page count, PDF, assets, responses, rendered images, pixels, in-flight images, and layout blocks.
 
-Support for 10,000 pages is only best effort with high memory: input bytes, final page results, and assets are all retained in memory; it is not an unbounded guarantee. Library callers can adjust the public `ClientConfig.limits`, `timeouts`, `request_concurrency`, and `render_workers`, then call `validate()` (`MinerUClient::new` also validates); configure them for available RAM and service-endpoint capacity. All limits, concurrency values, and worker counts must be greater than zero; all timeouts must be nonzero, and the per-request timeout must not exceed the total timeout.
+Support for 10,000 pages is only best effort with high memory: input bytes, final page results, and assets are all retained in memory; it is not an unbounded guarantee. Library callers can adjust the public `ClientConfig.limits`, `timeouts`, `request_concurrency`, and `render_workers`, then call `validate()` (`ClientConfig::new` also validates); configure them for available RAM and service-endpoint capacity. All limits, concurrency values, and worker counts must be greater than zero; all timeouts must be nonzero, and the per-request timeout must not exceed the total timeout.
 
 ## Limitations and troubleshooting
 
 - Hayro does not support encrypted PDFs; rendering of complex/advanced PDF effects may differ from other renderers. Invalid PDFs, inconsistent page mappings, size limits, or rendering errors fail explicitly and are not silently skipped.
 - The preview supports page rotations `0/90/180/270`. Its goal is usable visual and semantic alignment; because annotations are written and PDF serialization changes, the preview file's bytes are not identical to the original PDF. Other rotations fail.
 - `401` usually means a missing or invalid API key; `404` usually means an incorrect `--base-url` path. Confirm the service actually exposes `/v1/models` and `/v1/chat/completions`.
-- If `check_model` or model checking fails, confirm that `data` returned by `GET /v1/models` contains the selected ID, and check authentication and the base URL.
+- If model checking fails (the configured model was not returned by `GET /v1/models`, or no model is configured and the endpoint returns more than one), confirm that `data` returned by `GET /v1/models` contains the selected ID, and check authentication and the base URL.
 - `no valid layout tokens` means the service response does not contain the layout tokens required by MinerU; choose a compatible MinerU VLM model/service rather than a general chat model.
 - `limit exceeded` means a resource limit from the table above was exceeded; reduce the input or adjust and validate the configuration in a library caller. PDFs unsupported by Hayro must be processed first using a file/rendering workflow that supports the relevant PDF features, then retried.

@@ -9,16 +9,6 @@ use std::{
 
 const PREVIEW_KIND: &str = "layout_preview";
 
-pub(crate) fn generate(
-    source: &[u8],
-    pages: &[PageResult],
-    stem: &str,
-    limits: &Limits,
-    remaining: usize,
-) -> Result<Asset> {
-    generate_inner(source, pages, stem, limits, remaining, None)
-}
-
 pub(crate) fn generate_until(
     source: &[u8],
     pages: &[PageResult],
@@ -578,6 +568,23 @@ mod tests {
     use crate::{BlockKind, ContentBlock, NormalizedBbox, pdf};
     use lopdf::Object;
     use serde_json::Map;
+
+    fn generate(
+        source: &[u8],
+        pages: &[PageResult],
+        stem: &str,
+        limits: &Limits,
+        remaining: usize,
+    ) -> Result<Asset> {
+        generate_until(
+            source,
+            pages,
+            stem,
+            limits,
+            remaining,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        )
+    }
 
     fn source(rotation: i64, user_unit: Option<f32>) -> Vec<u8> {
         let mut doc = Document::with_version("1.5");

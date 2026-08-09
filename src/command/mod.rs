@@ -250,16 +250,6 @@ impl Environment {
         self.0.get(name).cloned()
     }
 
-    /// Builds a frozen environment map from a lookup over the documented env names.
-    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<OsString>) -> Self {
-        Self(Arc::new(
-            ENV_NAMES
-                .into_iter()
-                .filter_map(|name| lookup(name).map(|value| (name, value)))
-                .collect(),
-        ))
-    }
-
     pub(super) fn string(&self, name: &str) -> Option<String> {
         self.0.get(name)?.to_str().map(str::to_owned)
     }
@@ -552,7 +542,6 @@ async fn run_core(
                 no_formula: None,
                 no_table: None,
                 no_image_analysis: None,
-                canonical_mixed: true,
                 document_limits,
             },
             office_workers,
@@ -971,25 +960,6 @@ pub(super) fn server_owned_error(
             controls.join(", ")
         )
     })
-}
-
-/// Rejects frozen-environment knobs that cannot act in the legacy `mineru-vlm` ordinary lane
-/// (no remote API client, result archive, task poller, or Office helper). Mirrors the canonical
-/// direct-mode rejection; ordinary mode has no CLI service surface, so only the frozen
-/// environment is checked. Runs before any network or output work.
-#[doc(hidden)]
-pub fn legacy_ordinary_mode_error(lookup: impl Fn(&str) -> Option<OsString>) -> Option<String> {
-    let environment = Environment::from_lookup(lookup);
-    // Official-route page admission cannot act without the official route.
-    if environment.os("MINERU_OFFICIAL_PAGE_CONCURRENCY").is_some() {
-        return Some(
-            "MINERU_OFFICIAL_PAGE_CONCURRENCY applies only to --official-output; configure the server for ordinary mode"
-                .into(),
-        );
-    }
-    let service = service::ServiceOverrides::default();
-    server_owned_error(&service, &environment)
-        .or_else(|| remote_only_service_error(&service, &environment))
 }
 
 fn behaviorless_warning(options: &RunOptions) -> Option<String> {
@@ -1461,65 +1431,6 @@ pub async fn run_cli(argv: Vec<OsString>, context: RunContext) -> i32 {
     if result.is_ok() { 0 } else { 1 }
 }
 
-#[doc(hidden)]
-#[derive(Clone, Debug)]
-pub struct LegacyDirectOptions {
-    pub input: PathBuf,
-    pub output: PathBuf,
-    pub base_url: Option<String>,
-    pub model: Option<String>,
-    pub api_key: Option<String>,
-    pub page_start: Option<usize>,
-    pub page_end: Option<usize>,
-    /// `Some(true)` disables; `None` leaves the strict env/default resolution untouched.
-    pub no_formula: Option<bool>,
-    pub no_table: Option<bool>,
-    pub no_image_analysis: Option<bool>,
-    pub batch_size: usize,
-    pub document_limits: crate::DocumentLimitPolicy,
-}
-
-/// Maps the public hidden `LegacyDirectOptions.batch_size` onto the real inference admission
-/// field (`OfficialPdfOptions::max_requests_per_batch`), not onto input-document grouping.
-fn legacy_batch_core(batch_size: usize) -> Result<env::CoreOverrides, RunError> {
-    if batch_size == 0 {
-        return Err(RunError::new("batch size must be greater than zero"));
-    }
-    Ok(env::CoreOverrides {
-        batch_size: Some(batch_size),
-        ..Default::default()
-    })
-}
-
-#[doc(hidden)]
-pub async fn run_legacy_direct(options: LegacyDirectOptions) -> Result<(), RunError> {
-    let core = legacy_batch_core(options.batch_size)?;
-    direct::run_legacy(
-        direct::DirectOptions {
-            input: options.input,
-            output: options.output,
-            base_url: options.base_url,
-            server_option_label: "--base-url",
-            model: options.model,
-            api_key: options.api_key,
-            page_start: options.page_start,
-            page_end: options.page_end,
-            no_formula: options.no_formula,
-            no_table: options.no_table,
-            no_image_analysis: options.no_image_analysis,
-            canonical_mixed: false,
-            document_limits: options.document_limits,
-        },
-        Environment::process(),
-        RunOverrides {
-            core,
-            ..Default::default()
-        },
-    )
-    .await
-    .map_err(RunError::new)
-}
-
 /// Maps the canonical Clap surface onto typed core overrides. The flag-to-environment-name
 /// correspondence is one-to-one; strict parsing produces errors before any work begins.
 fn cli_core_overrides(cli: &Cli) -> Result<env::CoreOverrides, String> {
@@ -1959,17 +1870,6 @@ mod tests {
             "{text}"
         );
         assert!(text.len() <= FAILURE_CAP);
-    }
-
-    #[test]
-    fn legacy_batch_size_drives_inference_admission_not_document_grouping() {
-        // A positive legacy batch feeds OfficialPdfOptions::max_requests_per_batch.
-        let core = legacy_batch_core(5).unwrap();
-        assert_eq!(core.batch_size, Some(5));
-        let resolved = env::resolve_core(|_| None, &core).unwrap();
-        assert_eq!(resolved.route.max_requests_per_batch, 5);
-        // Zero remains invalid rather than silently meaning "document chunk".
-        assert!(legacy_batch_core(0).is_err());
     }
 
     #[test]
@@ -2573,37 +2473,6 @@ mod tests {
         );
         let message = reject(&T::default(), &all_env).unwrap();
         assert_eq!(message.matches("MINERU_").count(), rows.len(), "{message}");
-    }
-
-    #[test]
-    fn legacy_ordinary_mode_rejects_inert_env_knobs_and_keeps_applicable_ones() {
-        let reject = |name: &str| {
-            legacy_ordinary_mode_error(|n| (n == name).then(|| OsString::from("2"))).is_some()
-        };
-        // Official-route page admission, server-owned caps, and remote-only service controls
-        // cannot act in the legacy ordinary lane.
-        for name in [
-            "MINERU_OFFICIAL_PAGE_CONCURRENCY",
-            "MINERU_API_RECORD_CAP",
-            "MINERU_API_TASK_RETENTION_SECONDS",
-            "MINERU_TASK_RESULT_TIMEOUT_SECONDS",
-            "MINERU_API_CONNECT_TIMEOUT_SECONDS",
-            "MINERU_ARCHIVE_MAX_ENTRIES",
-            "MINERU_ZIP_SCAN_DEPTH_CAP",
-        ] {
-            assert!(reject(name), "{name} must be rejected");
-        }
-        // Transport timing and document-limit knobs genuinely apply to ordinary mode.
-        for name in [
-            "MINERU_VLM_HTTP_TIMEOUT",
-            "MINERU_MAX_INPUT_BYTES",
-            "MINERU_MAX_OUTPUT_BYTES",
-            "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES",
-        ] {
-            assert!(!reject(name), "{name} must stay accepted");
-        }
-        // No configured environment is fine.
-        assert!(legacy_ordinary_mode_error(|_| None).is_none());
     }
 
     #[test]

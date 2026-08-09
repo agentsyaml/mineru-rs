@@ -24,24 +24,6 @@ pub(crate) fn parse_layout(input: &str, max_blocks: usize) -> Result<Vec<Content
     Ok(blocks)
 }
 
-/// Tolerant variant for the direct pipeline: never fails. Oversized or malformed output
-/// degrades to the blocks parsed so far plus a warning so a page is never aborted.
-pub(crate) fn parse_layout_tolerant(
-    input: &str,
-    max_blocks: usize,
-    warnings: &mut Vec<String>,
-) -> Vec<ContentBlock> {
-    let (blocks, truncated) = parse_blocks(input, max_blocks);
-    if truncated {
-        warnings.push(format!(
-            "blocks per page limit {max_blocks} reached; remaining layout blocks truncated"
-        ));
-    } else if blocks.is_empty() && !input.trim().is_empty() {
-        warnings.push("no valid layout tokens; page treated as empty".into());
-    }
-    blocks
-}
-
 fn parse_blocks(input: &str, max_blocks: usize) -> (Vec<ContentBlock>, bool) {
     let mut blocks = Vec::new();
     // Rust's regex engine has no look-ahead; matching each complete header is
@@ -134,7 +116,7 @@ fn parse_blocks(input: &str, max_blocks: usize) -> (Vec<ContentBlock>, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_layout, parse_layout_tolerant};
+    use super::parse_layout;
     use crate::{BlockKind, Rotation};
 
     #[test]
@@ -191,32 +173,23 @@ mod tests {
     }
 
     #[test]
-    fn tolerant_parse_truncates_and_warns_on_oversized_and_empty_output() {
+    fn strict_parse_rejects_oversized_and_malformed_output() {
         let oversized = "<|box_start|>1 1 2 2<|box_end|><|ref_start|>text<|ref_end|><|box_start|>3 3 4 4<|box_end|><|ref_start|>title<|ref_end|>";
-        let mut warnings = Vec::new();
-        let blocks = parse_layout_tolerant(oversized, 1, &mut warnings);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].kind.as_str(), BlockKind::TEXT);
-        assert_eq!(
-            warnings,
-            vec!["blocks per page limit 1 reached; remaining layout blocks truncated".to_owned()]
-        );
+        assert!(matches!(
+            parse_layout(oversized, 1),
+            Err(crate::Error::LimitExceeded {
+                resource: "blocks per page",
+                limit: 1,
+                actual: 2
+            })
+        ));
 
-        let mut warnings = Vec::new();
-        let blocks = parse_layout_tolerant(
+        assert!(parse_layout(
             "<|box_start|>0 0 0 1<|box_end|><|ref_start|>text<|ref_end|>",
-            1,
-            &mut warnings,
-        );
-        assert!(blocks.is_empty());
-        assert_eq!(
-            warnings,
-            vec!["no valid layout tokens; page treated as empty".to_owned()]
-        );
+            1
+        )
+        .is_err());
 
-        let mut warnings = Vec::new();
-        let blocks = parse_layout_tolerant("", 1, &mut warnings);
-        assert!(blocks.is_empty());
-        assert!(warnings.is_empty());
+        assert_eq!(parse_layout("", 1).unwrap().len(), 0);
     }
 }

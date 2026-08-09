@@ -1,4 +1,4 @@
-//! Shared direct VLM runner for the canonical command and legacy CLI boundary.
+//! Shared direct VLM runner for the canonical command.
 use crate::{
     MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialPdfOptions, ProgressCallback,
     ProgressEvent, RasterWorkers, VlmHeader, VlmHttpConfig, canonical_stem,
@@ -13,7 +13,7 @@ use cap_std::{
 };
 use std::{
     ffi::OsString,
-    io::{IsTerminal, Read, Write},
+    io::Read,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -22,14 +22,6 @@ use std::{
 
 pub(super) type WarningCallback = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
 type DirectError = Box<dyn std::error::Error + Send + Sync + 'static>;
-
-use super::RunClock;
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum DirectMode {
-    LegacyOutput,
-    CallbackOutput,
-}
 
 fn emit_event(callback: &Option<ProgressCallback>, event: ProgressEvent) {
     if let Some(callback) = callback {
@@ -90,7 +82,6 @@ pub(super) struct DirectOptions {
     pub no_formula: Option<bool>,
     pub no_table: Option<bool>,
     pub no_image_analysis: Option<bool>,
-    pub canonical_mixed: bool,
     pub document_limits: crate::DocumentLimitPolicy,
 }
 
@@ -575,80 +566,6 @@ fn resolved_route(
     Ok(resolved)
 }
 
-struct Progress<W: Write> {
-    sink: W,
-    tty: bool,
-    failed: bool,
-    count: usize,
-    done: usize,
-    clock: RunClock,
-}
-impl<W: Write> Progress<W> {
-    fn new(sink: W, tty: bool) -> Self {
-        Self {
-            sink,
-            tty,
-            failed: false,
-            count: 0,
-            done: 0,
-            clock: RunClock::start(),
-        }
-    }
-    fn say(&mut self, s: impl std::fmt::Display, final_state: bool) {
-        let stamp = self.clock.stamp();
-        if self.tty {
-            let width = 20;
-            let filled = if self.count == 0 {
-                0
-            } else {
-                width * self.done / self.count
-            };
-            let _ = write!(
-                self.sink,
-                "\r{stamp} [{}{}] {}/{}: {s}\x1b[K",
-                "█".repeat(filled),
-                "░".repeat(width - filled),
-                self.done,
-                self.count
-            );
-            if final_state {
-                let _ = writeln!(self.sink);
-            }
-            let _ = self.sink.flush();
-        } else {
-            let _ = writeln!(self.sink, "{stamp} {s}");
-        }
-    }
-}
-
-pub(super) async fn run_legacy(
-    options: DirectOptions,
-    env: super::Environment,
-    overrides: super::RunOverrides,
-) -> Result<(), DirectError> {
-    // The legacy direct lane never runs a remote API client or task service; explicit
-    // remote-only or server-owned controls are behaviorless and rejected before work.
-    if let Some(message) = super::remote_only_service_error(&overrides.service, &env) {
-        return Err(err(message));
-    }
-    if let Some(message) = super::server_owned_error(&overrides.service, &env) {
-        return Err(err(message));
-    }
-    let service = resolve_service_for_env(&env, &overrides)?;
-    run_impl(
-        options,
-        None,
-        None,
-        None,
-        DirectMode::LegacyOutput,
-        None,
-        env,
-        overrides,
-        service,
-    )
-    .await
-}
-
 pub(super) async fn run_with_scoped_events(
     options: DirectOptions,
     office_workers: OfficeWorkers,
@@ -658,55 +575,14 @@ pub(super) async fn run_with_scoped_events(
     events: Option<super::CommandCallback>,
     warnings: Option<WarningCallback>,
 ) -> Result<(), DirectError> {
-    run_impl(
-        options,
-        None,
-        events,
-        warnings,
-        DirectMode::CallbackOutput,
-        Some(office_workers),
-        env,
-        overrides,
-        service,
-    )
-    .await
-}
-
-/// Legacy/public entries have no explicit Phase-1B CLI seam; resolve the frozen snapshot only.
-fn resolve_service_for_env(
-    env: &super::Environment,
-    overrides: &super::RunOverrides,
-) -> Result<super::service::ResolvedService, DirectError> {
-    let policy =
-        crate::DocumentLimitPolicy::resolve(&overrides.document_limits, |name| env.os(name))
-            .map_err(err)?;
-    super::service::resolve_service(&(|name| env.os(name)), &overrides.service, policy).map_err(err)
-}
-
-async fn run_impl(
-    options: DirectOptions,
-    events: Option<ProgressCallback>,
-    command_events: Option<super::CommandCallback>,
-    warnings: Option<WarningCallback>,
-    mode: DirectMode,
-    office_workers: Option<OfficeWorkers>,
-    env: super::Environment,
-    overrides: super::RunOverrides,
-    service: super::service::ResolvedService,
-) -> Result<(), DirectError> {
-    if !options.canonical_mixed {
-        return run_legacy_impl(options, &env, &overrides, service).await;
-    }
-    let office_workers = office_workers.ok_or_else(|| err("office workers unavailable"))?;
     let raster_workers = RasterWorkers::default();
     let result = run_inner(
         &options,
         &office_workers,
         &raster_workers,
+        None,
         events,
-        command_events,
         warnings,
-        mode,
         &env,
         &overrides,
         &service,
@@ -717,143 +593,6 @@ async fn run_impl(
     result
 }
 
-fn enumerate_legacy(
-    path: &Path,
-    pdfs: &mut Vec<PathBuf>,
-    skipped: &mut Vec<PathBuf>,
-) -> Result<(), DirectError> {
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() || !(meta.is_file() || meta.is_dir()) {
-        return Err(err(format!(
-            "unsupported symlink or special file: {}",
-            path.display()
-        )));
-    }
-    if meta.is_file() {
-        if path
-            .extension()
-            .is_some_and(|x| x.eq_ignore_ascii_case("pdf"))
-        {
-            pdfs.push(path.to_owned());
-        } else {
-            skipped.push(path.to_owned());
-        }
-        return Ok(());
-    }
-    let mut entries: Vec<_> = std::fs::read_dir(path)?.collect::<Result<_, _>>()?;
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        enumerate_legacy(&entry.path(), pdfs, skipped)?;
-    }
-    Ok(())
-}
-
-async fn run_legacy_impl(
-    options: DirectOptions,
-    env: &super::Environment,
-    overrides: &super::RunOverrides,
-    _service: super::service::ResolvedService,
-) -> Result<(), DirectError> {
-    let mut resolved = resolved_route(&options, env, overrides)?;
-    apply_document_limits(
-        &mut resolved.route,
-        options.document_limits,
-        &overrides.core,
-    )?;
-    let totals =
-        crate::document_limits::OfficialDocumentTotals::from_policy(options.document_limits);
-    let route = resolved.route;
-    route.validate()?;
-    let input = absolute(&options.input)?;
-    let output = absolute(&options.output)?;
-    let mut pdfs = Vec::new();
-    let mut skipped = Vec::new();
-    enumerate_legacy(&input, &mut pdfs, &mut skipped)?;
-    pdfs.sort();
-    if pdfs.is_empty() {
-        return Err(err("no PDF inputs found"));
-    }
-    let input_dir = std::fs::symlink_metadata(&input)?
-        .is_dir()
-        .then(|| open_dir(&input))
-        .transpose()?;
-    let mut planned = std::collections::BTreeSet::new();
-    let candidates: Vec<_> = pdfs
-        .into_iter()
-        .map(|path| {
-            let stem = canonical_stem(
-                path.file_stem()
-                    .and_then(|x| x.to_str())
-                    .ok_or_else(|| err("non-UTF-8 input name"))?,
-            )
-            .map_err(|e| Box::new(e) as DirectError)?;
-            if !planned.insert(format!("{}/vlm", stem.to_ascii_lowercase())) {
-                return Err(err("duplicate output stem"));
-            }
-            output_chain(&output, &stem, input_dir.as_ref(), "vlm")?;
-            Ok((path, stem))
-        })
-        .collect::<Result<_, DirectError>>()?;
-    for path in skipped {
-        eprintln!("skipped unsupported input: {}", path.display());
-    }
-    let http = config(&options, env, resolved.http)?;
-    let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
-        resolved.page_concurrency,
-        route.processing_window_size,
-        http.max_concurrency,
-    )
-    .map_err(|error| err(error.to_string()))?;
-    let client = MinerUVlmClient::connect(http, MinerUVlmConfig::default()).await?;
-    let total = candidates.len();
-    let mut progress = Progress::new(std::io::stderr(), std::io::stderr().is_terminal());
-    let mut completed = 0;
-    for (path, stem) in &candidates {
-        progress.count = total;
-        progress.say(
-            format_args!(
-                "document {}/{}: processing {}",
-                completed + 1,
-                total,
-                path.display()
-            ),
-            false,
-        );
-        let result = async {
-            let snapshot = snapshot(
-                path,
-                route.max_pdf_bytes,
-                options.document_limits.max_input_bytes,
-            )?;
-            let root = output_chain(&output, stem, input_dir.as_ref(), "vlm")?;
-            client
-                .parse_and_write_official_pdf_with_totals_and_page_concurrency(
-                    crate::PdfInput::Bytes(snapshot.bytes),
-                    route.clone(),
-                    &root,
-                    stem,
-                    totals,
-                    page_concurrency.clone(),
-                )
-                .await
-                .map_err(|e| Box::new(e) as DirectError)
-        }
-        .await;
-        if let Err(error) = result {
-            progress.failed = true;
-            progress.say(format_args!("failed {}", path.display()), true);
-            return Err(error);
-        }
-        completed += 1;
-        progress.done += 1;
-        progress.say(
-            format_args!("document {completed}/{total}: completed {}", path.display()),
-            false,
-        );
-    }
-    Ok(())
-}
-
 async fn run_inner(
     options: &DirectOptions,
     office_workers: &OfficeWorkers,
@@ -861,7 +600,6 @@ async fn run_inner(
     events: Option<ProgressCallback>,
     command_events: Option<super::CommandCallback>,
     warnings: Option<WarningCallback>,
-    mode: DirectMode,
     env: &super::Environment,
     overrides: &super::RunOverrides,
     service: &super::service::ResolvedService,
@@ -908,11 +646,7 @@ async fn run_inner(
         },
     );
     for path in skipped {
-        if mode == DirectMode::LegacyOutput {
-            eprintln!("skipped unsupported input: {}", path.display());
-        } else {
-            emit_warning(&warnings, "unsupported input", &path.display().to_string());
-        }
+        emit_warning(&warnings, "unsupported input", &path.display().to_string());
     }
     let http = config(options, env, resolved.http)?;
     let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
@@ -922,31 +656,14 @@ async fn run_inner(
     )
     .map_err(|error| err(error.to_string()))?;
     let client = MinerUVlmClient::connect(http, MinerUVlmConfig::default()).await?;
-    let total = candidates.len();
-    let mut progress = Progress::new(std::io::stderr(), std::io::stderr().is_terminal());
-    let mut completed = 0;
-    progress.count = total;
     for (candidate_id, path, kind, stem) in &candidates {
         let task_events = document_events(&command_events, &events, *candidate_id);
-        if mode == DirectMode::LegacyOutput {
-            progress.say(
-                format_args!(
-                    "document {}/{}: processing {}",
-                    completed + 1,
-                    total,
-                    path.display()
-                ),
-                false,
-            );
-        }
-        if mode == DirectMode::CallbackOutput {
-            emit_event(
-                &task_events,
-                ProgressEvent::DocumentStarted {
-                    document: stem.clone(),
-                },
-            );
-        }
+        emit_event(
+            &task_events,
+            ProgressEvent::DocumentStarted {
+                document: stem.clone(),
+            },
+        );
         let cleanup_warning = cleanup_warning_callback(&warnings);
         let result = async {
             let deadline = Instant::now()
@@ -975,23 +692,21 @@ async fn run_inner(
             )
             .await
             .map_err(err)?;
-            if mode == DirectMode::CallbackOutput {
-                if let Some(message) = warning {
-                    emit_event(
-                        &task_events,
-                        ProgressEvent::OfficeWarning {
-                            document: stem.clone(),
-                            message,
-                        },
-                    );
-                }
+            if let Some(message) = warning {
                 emit_event(
                     &task_events,
-                    ProgressEvent::DocumentPrepared {
+                    ProgressEvent::OfficeWarning {
                         document: stem.clone(),
+                        message,
                     },
                 );
             }
+            emit_event(
+                &task_events,
+                ProgressEvent::DocumentPrepared {
+                    document: stem.clone(),
+                },
+            );
             let mut route = route.clone();
             if !kind.supports_page_range() {
                 route.start_page = 0;
@@ -1001,68 +716,37 @@ async fn run_inner(
                 .checked_duration_since(Instant::now())
                 .filter(|d| !d.is_zero())
                 .ok_or_else(|| err("input deadline expired"))?;
-            if mode == DirectMode::CallbackOutput {
-                client
-                    .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
-                        prepared,
-                        route,
-                        &root,
-                        stem,
-                        task_events.clone(),
-                        cleanup_warning,
-                        totals,
-                        page_concurrency.clone(),
-                    )
-                    .await
-                    .map_err(|e| -> DirectError { Box::new(e) })
-            } else {
-                client
-                    .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
-                        prepared,
-                        route,
-                        &root,
-                        stem,
-                        None,
-                        None,
-                        totals,
-                        page_concurrency.clone(),
-                    )
-                    .await
-                    .map_err(|e| -> DirectError { Box::new(e) })
-            }
+            client
+                .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
+                    prepared,
+                    route,
+                    &root,
+                    stem,
+                    task_events.clone(),
+                    cleanup_warning,
+                    totals,
+                    page_concurrency.clone(),
+                )
+                .await
+                .map_err(|e| -> DirectError { Box::new(e) })
         }
         .await;
         if let Err(e) = result {
-            if mode == DirectMode::CallbackOutput {
-                emit_event(
-                    &task_events,
-                    ProgressEvent::DocumentFailed {
-                        document: stem.clone(),
-                        message: e.to_string(),
-                    },
-                );
-            }
-            progress.failed = true;
-            if mode == DirectMode::LegacyOutput {
-                progress.say(format_args!("failed {}", path.display()), true);
-            }
-            return Err(e);
-        }
-        completed += 1;
-        progress.done += 1;
-        if mode == DirectMode::CallbackOutput {
             emit_event(
                 &task_events,
-                ProgressEvent::DocumentCompleted {
+                ProgressEvent::DocumentFailed {
                     document: stem.clone(),
+                    message: e.to_string(),
                 },
             );
-        } else {
-            progress.say(
-                format_args!("document {completed}/{total}: completed {}", path.display()),
-                false,
-            );
+            return Err(e);
         }
+        emit_event(
+            &task_events,
+            ProgressEvent::DocumentCompleted {
+                document: stem.clone(),
+            },
+        );
     }
     Ok(())
 }
@@ -1090,7 +774,6 @@ mod tests {
             no_formula: None,
             no_table: None,
             no_image_analysis: None,
-            canonical_mixed: true,
             document_limits: crate::DocumentLimitPolicy::defaults(),
         }
     }
@@ -1361,39 +1044,6 @@ mod tests {
     }
 
     #[test]
-    fn progress_tty_redraws_once_and_failure_cannot_succeed() {
-        let mut tty = Progress::new(Vec::new(), true);
-        tty.count = 2;
-        tty.done = 1;
-        tty.say("processing", false);
-        tty.failed = true;
-        tty.say("failed", true);
-        let output = String::from_utf8(tty.sink).unwrap();
-        assert!(
-            output.starts_with("\r[+")
-                && output.contains("\x1b[K")
-                && output.contains("[██████████░░░░░░░░░░]")
-        );
-        assert_eq!(output.matches('\n').count(), 1);
-        assert!(tty.failed);
-
-        let mut plain = Progress::new(Vec::new(), false);
-        plain.say("processing", false);
-        plain.failed = true;
-        plain.say("failed", true);
-        let output = String::from_utf8(plain.sink).unwrap();
-        let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 2);
-        for (line, suffix) in lines.iter().zip(["processing", "failed"]) {
-            assert!(
-                line.starts_with("[+") && line.ends_with(&format!("] {suffix}")),
-                "{output:?}"
-            );
-        }
-        assert!(!output.contains("completed"));
-    }
-
-    #[test]
     fn direct_callbacks_ignore_panics() {
         emit_event(
             &Some(Arc::new(|_| panic!("event callback"))),
@@ -1474,7 +1124,6 @@ mod tests {
                 no_formula: None,
                 no_table: None,
                 no_image_analysis: None,
-                canonical_mixed: true,
                 document_limits: crate::DocumentLimitPolicy::defaults(),
             },
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
@@ -1622,7 +1271,6 @@ mod tests {
                 no_formula: None,
                 no_table: None,
                 no_image_analysis: None,
-                canonical_mixed: true,
                 document_limits: crate::DocumentLimitPolicy::defaults(),
             },
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),

@@ -115,7 +115,6 @@ jobs:
               "mineru",
               "mineru-api",
               "mineru-office-convert",
-              "mineru-vlm",
               "mineru-vlm-api",
           }
           PY

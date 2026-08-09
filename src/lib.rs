@@ -1,30 +1,22 @@
 //! Shared API for the MinerU VLM client.
 
-mod client;
-pub mod command;
 mod config;
+pub mod command;
 mod document_limits;
-mod document_postprocess;
 mod error;
-mod extractor;
 mod image_pipeline;
 #[doc(hidden)]
 pub mod input_prepare;
 mod layout;
-mod markdown;
-mod middle_json;
 #[doc(hidden)]
 pub mod mineru_api;
 mod office_workers;
 mod official_builders;
 mod official_output;
 mod official_route;
-mod openai;
 mod output;
 mod pdf;
-mod pipeline;
 mod preview;
-mod profile;
 mod progress_events;
 mod types;
 mod vlm_client;
@@ -37,7 +29,6 @@ mod vlm_types;
 #[doc(hidden)]
 pub mod vlm_api;
 
-pub use client::MinerUClient;
 pub use command::{RunContext, RunError, RunOptions, RunReport, run, run_with_context};
 pub use config::{BearerToken, ClientConfig, Limits, Timeouts};
 #[doc(hidden)]
@@ -73,5 +64,5 @@ pub use vlm_types::{
     VlmLayoutBlock, VlmPreparedExtraction, VlmPreparedLayout, VlmPriority, VlmRequest,
     VlmSemaphore, VlmSseStream,
 };
-// Internal legacy modules still refer to these through crate::. They are not public API.
-use vlm_types::*;
+// crate-internal re-export: shared modules resolve `crate::TaskWorkLease` through here.
+use vlm_types::TaskWorkLease;
