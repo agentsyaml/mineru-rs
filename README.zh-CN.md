@@ -70,7 +70,9 @@ import mineru_rs
 
 async def main() -> None:
     result = await mineru_rs.parse("input.pdf")
-    Path("out.md").write_text(result.markdown, encoding="utf-8")
+    await asyncio.to_thread(
+        Path("out.md").write_text, result.markdown, encoding="utf-8"
+    )
 
 
 asyncio.run(main())
@@ -87,16 +89,12 @@ pnpm add @alexsun-top/mineru
 # 或：npm install @alexsun-top/mineru
 ```
 
-```js
-const fs = require('fs')
-const mineru = require('@alexsun-top/mineru')
+```ts
+import { writeFile } from 'node:fs/promises'
+import mineru from '@alexsun-top/mineru'
 
-async function main() {
-  const { markdown } = await mineru.parse({ path: 'input.pdf' })
-  fs.writeFileSync('out.md', markdown)
-}
-
-main()
+const { markdown } = await mineru.parse({ path: 'input.pdf' })
+await writeFile('out.md', markdown)
 ```
 
 `run({ path, output })` 则把完整输出树写入 `output`（见[英文使用指南](docs/usage.en.md)）。根软件包安装两个等效二进制文件 `mineru` 和 `mineru-rs`，两者都指向 `bin/mineru.js`；若 `PATH` 上已有另一个 `mineru` 命令，应优先使用 `mineru-rs`。

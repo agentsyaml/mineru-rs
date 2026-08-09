@@ -1304,7 +1304,11 @@ impl MinerUVlmClient {
                         *block = to_vlm(native);
                     }
                 }
-                Ok((snapshot, preprocessor.post_process(blocks)?, snapshot_warnings))
+                Ok((
+                    snapshot,
+                    preprocessor.post_process(blocks)?,
+                    snapshot_warnings,
+                ))
             })
             .await?;
         warnings.extend(snapshot_warnings);

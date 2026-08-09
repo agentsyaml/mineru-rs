@@ -28,7 +28,7 @@ async def main() -> None:
 
     out = Path("output/document.md")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(result.markdown, encoding="utf-8")
+    await asyncio.to_thread(out.write_text, result.markdown, encoding="utf-8")
 
     print(f"parsed {path}: markdown {len(result.markdown)} chars -> {out}")
     if result.warnings:

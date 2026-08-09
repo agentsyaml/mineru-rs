@@ -450,7 +450,9 @@ async fn stage_window(
     for warning in &current.warnings {
         crate::progress_events::emit(
             events,
-            ProgressEvent::VlmWarning { message: warning.clone() },
+            ProgressEvent::VlmWarning {
+                message: warning.clone(),
+            },
         );
     }
     let mut rendered = current.rendered.into_iter().peekable();
@@ -1968,8 +1970,7 @@ mod tests {
         async fn handler(Json(_): Json<Value>) -> Json<Value> {
             Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
         }
-        let client =
-            route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        let client = route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
         let events = Arc::new(Mutex::new(Vec::new()));
         let callback: crate::ProgressCallback = {
             let events = Arc::clone(&events);
@@ -2038,7 +2039,9 @@ mod tests {
             })
             .collect();
         assert!(
-            messages.iter().any(|message| message.contains("page 1 failed")),
+            messages
+                .iter()
+                .any(|message| message.contains("page 1 failed")),
             "{messages:?}"
         );
     }
@@ -2048,8 +2051,7 @@ mod tests {
         async fn handler(Json(_): Json<Value>) -> Json<Value> {
             Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
         }
-        let client =
-            route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        let client = route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
         let events = Arc::new(Mutex::new(Vec::new()));
         let callback: crate::ProgressCallback = {
             let events = Arc::clone(&events);
@@ -2111,7 +2113,9 @@ mod tests {
             })
             .collect();
         assert!(
-            messages.iter().any(|message| message.contains("page 1 skipped")),
+            messages
+                .iter()
+                .any(|message| message.contains("page 1 skipped")),
             "{messages:?}"
         );
     }
@@ -2121,8 +2125,7 @@ mod tests {
         async fn handler(Json(_): Json<Value>) -> Json<Value> {
             Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
         }
-        let client =
-            route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        let client = route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
         // Every page is unrenderable (viewport beyond Hayro's u16 limit): the window must still
         // hard-error instead of producing an empty placeholder document.
         let pdf = route_pdf_sized(&[(1_000_000.0, 1.0)]);
@@ -2159,8 +2162,7 @@ mod tests {
         async fn handler(Json(_): Json<Value>) -> Json<Value> {
             Json(json!({"choices":[{"finish_reason":"stop","message":{"content":""}}]}))
         }
-        let client =
-            route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
+        let client = route_client(Router::new().route("/v1/chat/completions", post(handler))).await;
         let worker_hook = Arc::new(crate::pdf::PageRenderTestHook::new(
             |_| Err(crate::Error::Pdf("injected window render failure".into())),
             |_, _| {},
@@ -2316,8 +2318,7 @@ mod tests {
     #[test]
     fn window_planner_admits_slot_boundary_and_stops_before_next_page() {
         let (window, warnings) =
-            plan_window(&[0, 1, 2], 0, 3, 10, 10, |index| Ok([7, 3, 1][index]))
-                .expect("window");
+            plan_window(&[0, 1, 2], 0, 3, 10, 10, |index| Ok([7, 3, 1][index])).expect("window");
         assert!(warnings.is_empty());
         assert_eq!(window.indexes, vec![0, 1]);
         assert_eq!(window.bytes, 10);
@@ -2362,7 +2363,10 @@ mod tests {
         assert_eq!(window.consumed, 2);
         assert_eq!(
             warnings,
-            vec!["page 12 skipped: page exceeds the in-flight image byte budget (11 bytes)".to_owned()]
+            vec![
+                "page 12 skipped: page exceeds the in-flight image byte budget (11 bytes)"
+                    .to_owned()
+            ]
         );
     }
 

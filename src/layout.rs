@@ -184,11 +184,13 @@ mod tests {
             })
         ));
 
-        assert!(parse_layout(
-            "<|box_start|>0 0 0 1<|box_end|><|ref_start|>text<|ref_end|>",
-            1
-        )
-        .is_err());
+        assert!(
+            parse_layout(
+                "<|box_start|>0 0 0 1<|box_end|><|ref_start|>text<|ref_end|>",
+                1
+            )
+            .is_err()
+        );
 
         assert_eq!(parse_layout("", 1).unwrap().len(), 0);
     }

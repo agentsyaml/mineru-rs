@@ -77,7 +77,9 @@ import mineru_rs
 
 async def main() -> None:
     result = await mineru_rs.parse("input.pdf")
-    Path("out.md").write_text(result.markdown, encoding="utf-8")
+    await asyncio.to_thread(
+        Path("out.md").write_text, result.markdown, encoding="utf-8"
+    )
 
 
 asyncio.run(main())
@@ -99,16 +101,12 @@ pnpm add @alexsun-top/mineru
 # or: npm install @alexsun-top/mineru
 ```
 
-```js
-const fs = require('fs')
-const mineru = require('@alexsun-top/mineru')
+```ts
+import { writeFile } from 'node:fs/promises'
+import mineru from '@alexsun-top/mineru'
 
-async function main() {
-  const { markdown } = await mineru.parse({ path: 'input.pdf' })
-  fs.writeFileSync('out.md', markdown)
-}
-
-main()
+const { markdown } = await mineru.parse({ path: 'input.pdf' })
+await writeFile('out.md', markdown)
 ```
 
 `run({ path, output })` writes the full output tree to `output` instead (see

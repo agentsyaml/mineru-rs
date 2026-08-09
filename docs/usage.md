@@ -431,7 +431,9 @@ import mineru_rs
 
 async def main() -> None:
     result = await mineru_rs.parse("input.pdf")
-    Path("out.md").write_text(result.markdown, encoding="utf-8")
+    await asyncio.to_thread(
+        Path("out.md").write_text, result.markdown, encoding="utf-8"
+    )
 
 
 asyncio.run(main())
@@ -460,26 +462,21 @@ asyncio.run(main())
 pnpm add @alexsun-top/mineru   # 或：npm install @alexsun-top/mineru
 ```
 
-```js
-const fs = require('fs')
-const mineru = require('@alexsun-top/mineru')
+```ts
+import { writeFile } from 'node:fs/promises'
+import mineru from '@alexsun-top/mineru'
 
-async function main() {
-  const { markdown } = await mineru.parse({ path: 'input.pdf' })
-  fs.writeFileSync('out.md', markdown)
-}
-
-main()
+const { markdown } = await mineru.parse({ path: 'input.pdf' })
+await writeFile('out.md', markdown)
 ```
 
 `parse()` 解析为 `{ markdown, warnings }`；markdown 字符串在内存中返回，由调用方决定如何持久化。`run()` 写入完整输出树并解析为 `{ warnings }`：
 
-```js
-const mineru = require('@alexsun-top/mineru')
+```ts
+import mineru from '@alexsun-top/mineru'
 
-mineru.run({ path: 'input.pdf', output: 'out/' }).then(({ warnings }) => {
-  if (warnings.length) console.warn(warnings)
-})
+const { warnings } = await mineru.run({ path: 'input.pdf', output: 'out/' })
+if (warnings.length) console.warn(warnings)
 ```
 
 选项以 camelCase 命名镜像 CLI：`apiUrl`、`method`、`backend`、`effort`、`lang`、`url`、`start`、`end`、`formula`、`table`、`imageAnalysis` 和 `clientSideOutputGeneration`。
