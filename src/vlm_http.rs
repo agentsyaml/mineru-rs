@@ -92,10 +92,6 @@ impl std::fmt::Debug for VlmHttpClient {
 }
 
 impl VlmHttpClient {
-    pub(crate) fn official_response_cap(&self) -> usize {
-        self.config.max_response_bytes
-    }
-
     pub async fn connect(config: VlmHttpConfig) -> VlmResult<Self> {
         Self::connect_for_task(config, TaskWorkLease::default()).await
     }
@@ -1501,7 +1497,7 @@ mod tests {
         let (text, _raw, warnings) = client
             .predict_official_budgeted(
                 VlmRequest::default(),
-                client.official_response_cap(),
+                client.config.max_response_bytes,
                 None,
                 tokio::time::Instant::now() + Duration::from_secs(2),
             )
@@ -1520,7 +1516,7 @@ mod tests {
             oversized
                 .predict_official_budgeted(
                     VlmRequest::default(),
-                    oversized.official_response_cap(),
+                    oversized.config.max_response_bytes,
                     Some(high_budget),
                     tokio::time::Instant::now() + Duration::from_secs(2),
                 )
@@ -1533,7 +1529,7 @@ mod tests {
         client
             .predict_official_budgeted(
                 VlmRequest::default(),
-                client.official_response_cap(),
+                client.config.max_response_bytes,
                 Some(Arc::clone(&raw)),
                 tokio::time::Instant::now() + Duration::from_secs(2),
             )
@@ -1543,7 +1539,7 @@ mod tests {
             client
                 .predict_official_budgeted(
                     VlmRequest::default(),
-                    client.official_response_cap(),
+                    client.config.max_response_bytes,
                     Some(raw),
                     tokio::time::Instant::now() + Duration::from_secs(2),
                 )

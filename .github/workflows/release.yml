@@ -981,7 +981,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/agentsyaml/mineru-rs
+          images: ghcr.io/agentsyaml/mineru-cli
           flavor: |
             latest=false
           tags: |
@@ -1062,7 +1062,7 @@ jobs:
       - name: Verify pushed manifest index
         id: container-manifest
         env:
-          IMAGE: ghcr.io/agentsyaml/mineru-rs
+          IMAGE: ghcr.io/agentsyaml/mineru-cli
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
@@ -1076,7 +1076,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Verify stable tags resolve to pushed digest
         env:
-          IMAGE: ghcr.io/agentsyaml/mineru-rs
+          IMAGE: ghcr.io/agentsyaml/mineru-cli
           DIGEST: ${{ steps.container-manifest.outputs.digest }}
           RELEASE_TAG: v${{ needs.identity.outputs.version }}
         run: |
@@ -1089,7 +1089,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Pull and smoke each immutable platform image
         env:
-          IMAGE: ghcr.io/agentsyaml/mineru-rs
+          IMAGE: ghcr.io/agentsyaml/mineru-cli
           DIGEST: ${{ steps.container-manifest.outputs.digest }}
         run: |
           set -euo pipefail

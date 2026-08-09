@@ -312,7 +312,10 @@ mod tests {
     fn png_bytes_produce_a_standard_png() {
         let image = RgbImage::from_pixel(2, 1, Rgb([1, 2, 3]));
         let bytes = png_bytes(&image).unwrap();
-        assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+        );
     }
 
     #[test]

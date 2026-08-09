@@ -156,11 +156,11 @@ def self_test():
         pass
     else:
         raise AssertionError("malformed child digest must fail")
-    assert expected_tags("ghcr.io/agentsyaml/mineru-rs", "v1.2.3") == {
-        "ghcr.io/agentsyaml/mineru-rs:1.2.3",
-        "ghcr.io/agentsyaml/mineru-rs:1.2",
-        "ghcr.io/agentsyaml/mineru-rs:1",
-        "ghcr.io/agentsyaml/mineru-rs:latest",
+    assert expected_tags("ghcr.io/agentsyaml/mineru-cli", "v1.2.3") == {
+        "ghcr.io/agentsyaml/mineru-cli:1.2.3",
+        "ghcr.io/agentsyaml/mineru-cli:1.2",
+        "ghcr.io/agentsyaml/mineru-cli:1",
+        "ghcr.io/agentsyaml/mineru-cli:latest",
     }
     assert expected_tags("ghcr.io/agentsyaml/mineru-rs-cuda", "v1.2.3", "-sm80") == {
         "ghcr.io/agentsyaml/mineru-rs-cuda:1.2.3-sm80",

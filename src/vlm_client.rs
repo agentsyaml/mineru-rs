@@ -1362,7 +1362,11 @@ impl MinerUVlmClient {
                         *block = to_vlm(native);
                     }
                 }
-                Ok((snapshot, preprocessor.post_process(blocks)?, snapshot_warnings))
+                Ok((
+                    snapshot,
+                    preprocessor.post_process(blocks)?,
+                    snapshot_warnings,
+                ))
             })
             .await?;
         warnings.extend(snapshot_warnings);
@@ -1523,6 +1527,8 @@ impl MinerUVlmClient {
             preprocessor: MinerUVlmPreprocessor { config },
             layout_semaphore: Arc::new(Semaphore::new(1)),
             official_page_semaphore: Arc::new(Semaphore::new(1)),
+            #[cfg(test)]
+            semantic_scheduler_hook: None,
         })
     }
     pub(crate) async fn connect_for_task(

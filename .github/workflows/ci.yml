@@ -76,7 +76,10 @@ jobs:
       - name: Check formatting
         run: cargo +1.89.0 fmt --all -- --check
       - name: Test root package
-        run: cargo +1.89.0 test --locked -p mineru --all-targets --all-features -- --test-threads=4
+        # Explicit feature set, not --all-features: mistralrs-cuda needs nvcc and
+        # mistralrs-metal needs the macOS Metal framework, both unavailable on this
+        # ubuntu runner. mistralrs (CPU) is covered by the rust-office-mistralrs job.
+        run: cargo +1.89.0 test --locked -p mineru --all-targets --features office -- --test-threads=4
       - name: Run hermetic API process end-to-end tests
         run: |
           cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --ignored --test-threads=1

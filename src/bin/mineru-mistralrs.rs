@@ -40,13 +40,15 @@ async fn main() {
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     validate_input(&cli.input)?;
     let model = MistralRsConfig::from_parts(cli.model_path, cli.allow_download)?;
-    let mut options = OfficialPdfOptions::default();
-    options.start_page = cli.page_start.unwrap_or(0);
-    options.end_page = cli.page_end;
-    options.formula_enable = !cli.no_formula;
-    options.table_enable = !cli.no_table;
-    options.image_analysis = !cli.no_image_analysis;
-    options.max_requests_per_batch = 1;
+    let options = OfficialPdfOptions {
+        start_page: cli.page_start.unwrap_or(0),
+        end_page: cli.page_end,
+        formula_enable: !cli.no_formula,
+        table_enable: !cli.no_table,
+        image_analysis: !cli.no_image_analysis,
+        max_requests_per_batch: 1,
+        ..OfficialPdfOptions::default()
+    };
     options.validate()?;
     let stem = canonical_stem(
         cli.input

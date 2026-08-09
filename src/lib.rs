@@ -1,7 +1,7 @@
 //! Shared API for the MinerU VLM client.
 
-mod config;
 pub mod command;
+mod config;
 mod document_limits;
 mod error;
 mod image_pipeline;
