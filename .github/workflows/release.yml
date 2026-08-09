@@ -1209,7 +1209,7 @@ jobs:
             set -eu
             test "$(id -u)" -ne 0
             test -x /usr/local/bin/mineru-mistralrs
-            ldd /usr/local/bin/mineru-mistralrs > /tmp/mineru-mistralrs-ldd.txt
+            ldd /usr/local/bin/mineru-mistralrs > /tmp/mineru-mistralrs-ldd.txt || true
             missing="$(sed -n "s/^[[:space:]]*\([^ ]*\) => not found$/\1/p" /tmp/mineru-mistralrs-ldd.txt)"
             test "$missing" = "libcuda.so.1"
           '
