@@ -385,6 +385,12 @@ fn terminal(
     match result {
         Terminal::Completed => {
             state.completed = state.completed.saturating_add(1);
+            print_status(
+                state,
+                "✓ Completed",
+                "1;32",
+                &format!("{} · {}", scope_kind(scope), clean(label)),
+            );
             update_activity(
                 state,
                 Activity::Completed,

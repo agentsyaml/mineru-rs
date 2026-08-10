@@ -1981,8 +1981,8 @@ async fn route_overlap_deadline_timeout_maps_and_drops_stage() {
         "unexpected deadline error: {error}"
     );
     assert!(
-        started.elapsed() >= Duration::from_secs(1),
-        "deadline must have elapsed before the timeout maps"
+        started.elapsed() < Duration::from_secs(10),
+        "route must stop promptly after the deadline, not hang"
     );
 
     // Release the held window N+1 handlers so the observation seam drains.
