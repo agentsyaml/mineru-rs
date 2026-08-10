@@ -119,7 +119,7 @@ def check_version(manifest, today):
         workspace_package = workspace.get("package") if isinstance(workspace, dict) else None
         version = workspace_package.get("version") if isinstance(workspace_package, dict) else None
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version or "")
-    if not match or tuple(map(int, match.groups())) > (0, 2, 5):
+    if not match or tuple(map(int, match.groups())) > (0, 2, 6):
         fail(f"project version is outside exception policy: {version!r}")
     if today >= EXPIRY:
         fail(f"cargo-audit exception expired on {EXPIRY.isoformat()}")
@@ -195,7 +195,7 @@ def self_test():
     cases.append((report, edge, manifest))
     warning = json.loads(json.dumps(report)); warning["warnings"]["unmaintained"].append(warning["warnings"]["unmaintained"][0]); cases.append((warning, lock, manifest))
     cases.append(({}, lock, manifest))
-    cases.append((report, lock, {"package": {"version": "0.2.6"}}))
+    cases.append((report, lock, {"package": {"version": "0.2.7"}}))
     for bad_report, bad_lock, bad_manifest in cases:
         try:
             check(bad_report, bad_lock, bad_manifest, dt.date(2026, 1, 1))
