@@ -1189,7 +1189,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' '${{ steps.meta.outputs.tags }}' > "$RUNNER_TEMP/ghcr-cuda-tags.txt"
-          python3 .github/scripts/verify_container_release.py tags --digest "$DIGEST" --image "$IMAGE" --release-tag "$RELEASE_TAG" --tags-file "$RUNNER_TEMP/ghcr-cuda-tags.txt" --tag-suffix -sm80 | tee "$RUNNER_TEMP/ghcr-cuda-tags-summary.txt"
+          python3 .github/scripts/verify_container_release.py tags --digest "$DIGEST" --image "$IMAGE" --release-tag "$RELEASE_TAG" --tags-file "$RUNNER_TEMP/ghcr-cuda-tags.txt" --tag-suffix=-sm80 | tee "$RUNNER_TEMP/ghcr-cuda-tags-summary.txt"
           {
             echo "### GHCR CUDA sm80 tags"
             cat "$RUNNER_TEMP/ghcr-cuda-tags-summary.txt"
