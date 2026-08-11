@@ -1,6 +1,6 @@
 {
   "name": "@alexsun-top/mineru",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Native Node.js helpers for MinerU Rust",
   "main": "api.js",
   "types": "api.d.ts",

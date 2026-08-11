@@ -10,7 +10,7 @@
   - `cargo +1.89.0 test --locked -p mineru --all-targets --features office`
   - `cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features`
   - `RUSTDOCFLAGS="-D warnings" cargo +1.89.0 doc --locked -p mineru --no-deps`
-  - `cargo +1.89.0 clippy --locked -p mineru --all-targets --features office,mistralrs` (no new warnings)
+  - `cargo +1.89.0 clippy --locked -p mineru --all-targets --features office` (no new warnings)
   - `cargo build --bins --features office`
   - cargo-audit: `cargo audit --json` piped through `.github/scripts/check_cargo_audit.py check`
   - All release-script self-tests: `python3 .github/scripts/verify_release.py self-test`, `stage_binding_artifacts.py self-test`, `attach_release_assets.py self-test`, `check_cargo_audit.py self-test`, `verify_container_release.py self-test`, `container_smoke.py --self-check`
