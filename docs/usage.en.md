@@ -133,7 +133,7 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `--render-timeout-seconds <n>` | `300` | Per-render timeout. Overrides `MINERU_PDF_RENDER_TIMEOUT`. |
 | `--batch-size <n>` | `32` | Per-page semantic inference request admission (inference batching), distinct from page concurrency and the processing window. Overrides `MINERU_BATCH_SIZE`. |
 | `--total-deadline-seconds <n>` | `86400` | Per-document total deadline. Overrides `MINERU_TOTAL_DEADLINE_SECONDS`. |
-| `--max-pdf-bytes <n>` | `536870912` | Resident source-PDF cap. Overrides `MINERU_MAX_PDF_BYTES`. |
+| `--max-pdf-bytes <n>` | `1073741824` | Resident source-PDF cap. Overrides `MINERU_MAX_PDF_BYTES`. |
 | `--max-pages <n>` | `10000` | Maximum selected pages per document. Overrides `MINERU_MAX_PAGES`. |
 | `--max-page-pixels <n>` | `100000000` | Per-page pixel cap. Overrides `MINERU_MAX_PAGE_PIXELS`. |
 | `--max-rendered-image-bytes <n>` | `67108864` | Per-render RGB cap. Overrides `MINERU_MAX_RENDERED_IMAGE_BYTES`. |
@@ -181,10 +181,7 @@ In API mode, the local VLM transport knobs (`--page-concurrency`, `--processing-
 ### Container
 
 The API server has no published container image; run it from a source build
-(see [Build and prerequisites](#build-and-prerequisites) above). The only
-published image, `ghcr.io/agentsyaml/mineru-rs-cuda:latest-sm80`, ships only
-the `mineru-mistralrs` local-inference CLI, exposes no server port, and does
-not contain `mineru-api`.
+(see [Build and prerequisites](#build-and-prerequisites) above).
 
 ### Startup
 
@@ -268,7 +265,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | Per-render timeout in seconds. |
 | `MINERU_BATCH_SIZE` | `32` | Per-page semantic inference request admission. |
 | `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | Per-document total deadline. |
-| `MINERU_MAX_PDF_BYTES` | `536870912` | Resident source-PDF cap. |
+| `MINERU_MAX_PDF_BYTES` | `1073741824` | Resident source-PDF cap. |
 | `MINERU_MAX_PAGES` | `10000` | Maximum selected pages per document. |
 | `MINERU_MAX_PAGE_PIXELS` | `100000000` | Per-page pixel cap. |
 | `MINERU_MAX_RENDERED_IMAGE_BYTES` | `67108864` | Per-render RGB cap. |
@@ -488,11 +485,11 @@ and `clientSideOutputGeneration`.
 
 `--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`, `--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES`, and `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` accept unsigned decimal bytes (whitespace and `_` are allowed). CLI overrides environment, then the compiled default: 4_293_918_719 input bytes, 8 GiB encoded document bytes, and 8 GiB output bytes. Explicit invalid, zero, overflowing, or platform-unrepresentable values fail; there are no arbitrary hard ceilings — a configured value is used as policy rather than clamped to another constant.
 
-These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above the resident cap (`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`, default 512 MiB) before `lopdf` loads them, and one VLM response remains capped at 10 MiB (`--http-max-response-bytes`). Configure encoded policy on `mineru-api`; canonical remote mode rejects its encoded override.
+These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above the resident cap (`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`, default 1 GiB) before `lopdf` loads them, and one VLM response remains capped at 10 MiB (`--http-max-response-bytes`). Configure encoded policy on `mineru-api`; canonical remote mode rejects its encoded override.
 
 | Item | Default |
 | --- | ---: |
-| PDF size / page count | 512 MiB / 10,000 pages |
+| PDF size / page count | 1 GiB / 10,000 pages |
 | Per-page pixels / rendered RGB image | 100,000,000 / 64 MiB |
 | Response body / all assets | 10 MiB / 1 GiB |
 | Layout blocks per page / page window | 256 / 64 pages |
@@ -508,6 +505,19 @@ These are disk/document totals, not resident allocations: parsed PDFs and the cu
 - **Rust safeguards**: 10-second connection timeout, 24-hour total timeout, and limits for page count, PDF, assets, responses, rendered images, pixels, in-flight images, and layout blocks.
 
 Support for 10,000 pages is only best effort with high memory: input bytes, final page results, and assets are all retained in memory; it is not an unbounded guarantee. Library callers can adjust the public `ClientConfig.limits`, `timeouts`, `request_concurrency`, and `render_workers`, then call `validate()` (`ClientConfig::new` also validates); configure them for available RAM and service-endpoint capacity. All limits, concurrency values, and worker counts must be greater than zero; all timeouts must be nonzero, and the per-request timeout must not exceed the total timeout.
+
+## Input limits and how to raise them
+
+The pipeline enforces size limits at several independent stages. When a limit is hit, the error message names the file, its size, the limit value, and the knob (flag or environment variable) that raises it; a single failing document does not abort the batch — remaining documents continue. Local parsing of a large file consumes memory roughly proportional to the file size (the disk/document totals above are separate from the resident cap below).
+
+| Limit | Default | Flag | Environment | Enforced at |
+| --- | ---: | --- | --- | --- |
+| Resident source-PDF cap `max_pdf_bytes` | 1 GiB | `--max-pdf-bytes` | `MINERU_MAX_PDF_BYTES` | File read and local PDF parsing (including PDFs produced by Office conversion) |
+| Input transfer cap `max_input_bytes` | 4_293_918_719 (≈4 GiB) | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | Input ingestion / transfer |
+| Output cap `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | Output generation |
+| OOXML archive cap | 512 MiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office document preflight |
+| Office conversion input cap | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | LibreOffice conversion |
+| Server-side file cap (with `--api-url`) | 512 MiB | `--file-cap` (server: `mineru-api`) | `MINERU_API_FILE_CAP` (server) | Upload at the server |
 
 ## Limitations and troubleshooting
 

@@ -36,7 +36,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_pdf_bytes: 512 * 1024 * 1024,
+            max_pdf_bytes: 1024 * 1024 * 1024,
             max_total_asset_bytes: 1024 * 1024 * 1024,
             max_pages: 10_000,
             max_page_pixels: 100_000_000,
@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(
             config.limits,
             Limits {
-                max_pdf_bytes: 512 * 1024 * 1024,
+                max_pdf_bytes: 1024 * 1024 * 1024,
                 max_total_asset_bytes: 1024 * 1024 * 1024,
                 max_pages: 10_000,
                 max_page_pixels: 100_000_000,

@@ -10,9 +10,8 @@ The MinerU VLM model can run in two ways:
 
 - **Remote** — point the tools at an OpenAI-compatible MinerU VLM service and
   parse documents without running a model on your own machine.
-- **Local (optional)** — run the MinerU Qwen2-VL model with the
-  `mineru-mistralrs` backend on CPU or NVIDIA CUDA. The weights (~2.3 GB) can
-  be downloaded automatically on first use.
+- **Local (optional)** — serve a quantized MinerU model yourself with llama.cpp
+  (`llama-server`) and point the tools at it; see [Docker](#docker).
 
 Within the MinerU 3.4.4 VLM scope, MinerU Rust is a drop-in replacement for the
 MinerU Python SDK's `vlm-http-client` path and can replace that VLM workflow
@@ -59,24 +58,11 @@ layout preview `{stem}_layout.pdf`.
 Prefer the `MINERU_VL_API_KEY` environment variable over `--api-key` so the
 key does not end up in shell history.
 
-### Local: parse with the model on your machine
+### Local: serve the model with llama.cpp
 
-Build the local backend and run it (CPU):
-
-```sh
-cargo build --release --locked --features mistralrs --bin mineru-mistralrs
-
-./target/release/mineru-mistralrs input.pdf --output output
-```
-
-By default the first run downloads the fixed model
-`opendatalab/MinerU2.5-2509-1.2B` (~2.3 GB) into the Hugging Face cache, then
-reuses it. Pass `--model-path /path/to/model` to use a local model directory
-instead, or `--allow-download=false` to forbid downloading (then `--model-path`
-is required). Results are written to `output/<stem>/vlm/` in MinerU's official
-output shape. See [Local model settings](#local-model-settings),
-[Docker](#docker) for the CUDA image, and
-[Standalone binaries](#standalone-binaries) for prebuilt executables.
+Run the compose `llama-server` profile (or start `llama-server` yourself with a
+quantized MinerU GGUF model), then point `MINERU_VL_SERVER` at
+`http://localhost:30000/v1`. See [Docker](#docker).
 
 ## Rust library
 
@@ -202,9 +188,7 @@ for service configuration and complete options.
 
 ### Prebuilt
 
-- **Standalone binaries** — CPU, CUDA, and Metal builds of `mineru-mistralrs`,
-  see [Standalone binaries](#standalone-binaries).
-- **Docker** — CUDA image, see [Docker](#docker).
+- **Docker** — llama.cpp server profile, see [Docker](#docker).
 - **crates.io** — install the remote-only command-line tools (requires Rust
   1.89+):
 
@@ -212,12 +196,6 @@ for service configuration and complete options.
   cargo install mineru
   cargo install mineru --features office   # also installs the Office helper
   ```
-
-  The published crate intentionally does not include the local model backend;
-  build `mineru-mistralrs` from source (below), use the CUDA image, or download
-  a standalone binary.
-  Note: `cargo install mineru --features mistralrs` would compile but silently
-  use the unpatched upstream core — do not use that flag on the published crate.
 - **Python** — `pip install mineru-rs` (CPython 3.9+).
 - **Node.js** — `npm install @alexsun-top/mineru` (Node.js 18+).
 
@@ -232,29 +210,11 @@ cargo build --release
 ./target/release/mineru --help
 ```
 
-Build the optional local `mineru-mistralrs` backend:
-
-```sh
-cargo build --release --locked --features mistralrs --bin mineru-mistralrs
-```
-
 As a library in your own project: `cargo add mineru`.
 
 ## Command-line usage
 
 ### Options
-
-The local `mineru-mistralrs` backend parses PDFs with these options:
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `input` | required | PDF to parse (positional argument). |
-| `--output <dir>` | `output` | Directory for the results. |
-| `--page-start <n>` | 0 | First page to parse (zero-based). |
-| `--page-end <n>` | last page | Last page to parse (inclusive). |
-| `--no-formula` | off | Skip formula recognition. |
-| `--no-table` | off | Skip table recognition. |
-| `--no-image-analysis` | off | Skip image/figure analysis. |
 
 The canonical `mineru` command reads the service address and model from the
 `MINERU_VL_SERVER` and `MINERU_VL_MODEL_NAME` environment variables:
@@ -266,22 +226,11 @@ export MINERU_VL_API_KEY="<your-key>"
 mineru -p input.pdf -o output
 ```
 
-Process pages 0–2 with the local backend, disabling formulas and image analysis:
-
-```sh
-mineru-mistralrs input.pdf --page-start 0 --page-end 2 \
-  --no-formula --no-image-analysis --output output
-```
-
 ### Output
 
 - `mineru` (remote) writes to `output/` directly: `document.md`,
   `document.json`, `middle.json`, `content_list.json`, cropped `assets/`, and
   a layout preview `{stem}_layout.pdf`.
-- `mineru-mistralrs` (local) writes MinerU official-shape output to
-  `output/<stem>/vlm/`: `{stem}.md`, `{stem}_middle.json`, `{stem}_model.json`,
-  `{stem}_content_list.json`, `{stem}_content_list_v2.json`,
-  `{stem}_layout.pdf`, and `images/`.
 
 `{stem}` is the input filename without its extension.
 
@@ -292,104 +241,65 @@ configured VLM, and returns result archives. It performs no local inference.
 See [CLI and API server](#cli-and-api-server) for the API-mode submission
 flow.
 
-## Local model and Hugging Face settings
+## 输入上限与放大配置 / Input limits and how to raise them
 
-The local `mineru-mistralrs` backend loads a Qwen2-VL MinerU model from one of
-two sources, controlled by CLI options:
+流水线在多个独立阶段执行大小上限。触发上限时，报错消息会给出具体文件名、大小、限制值与放大旋钮（flag 或环境变量）；单个文档失败不会中断整批处理，其余文档继续。本地解析大文件会按文件大小占用内存（磁盘总量上限与常驻内存上限相互独立）。
 
-| Option | Default | Effect |
-| --- | --- | --- |
-| `--model-path <dir>` | none | Use a local model directory. Always takes priority and never falls back to downloading. |
-| `--allow-download[=<bool>]` | `true` | Download `opendatalab/MinerU2.5-2509-1.2B` (~2.3 GB) on first use into the Hugging Face cache when `--model-path` is absent. |
+| 上限 | 默认值 | Flag | 环境变量 | 触发阶段 |
+| --- | ---: | --- | --- | --- |
+| 本地驻留/解析上限 `max_pdf_bytes` | 1 GiB | `--max-pdf-bytes` | `MINERU_MAX_PDF_BYTES` | 文件读取与 PDF 本地解析（含办公室文档转换后 PDF） |
+| 输入传输上限 `max_input_bytes` | 4_293_918_719（≈4 GiB） | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | 输入摄取/传输 |
+| 输出上限 `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | 输出生成 |
+| OOXML 归档上限 | 512 MiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office 文档预检 |
+| Office 转换输入上限 | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | LibreOffice 转换 |
+| 服务器端文件上限（`--api-url` 模式） | 512 MiB | `--file-cap`（服务端 `mineru-api`） | `MINERU_API_FILE_CAP`（服务端） | 服务器上传 |
 
-`--allow-download` accepts an explicit boolean value
-(`--allow-download=false` disables downloading; then `--model-path` is
-required). The legacy `MINERU_VL_MODEL_DIR` and `MINERU_VL_AUTO_DOWNLOAD`
-environment variables are still honored, with the CLI options taking
-precedence.
+Each limit can be raised independently via its flag or environment variable; see the [Chinese usage guide](docs/usage.md) or [English usage guide](docs/usage.en.md) for the full option tables.
 
-A local model directory must contain `config.json` (Qwen2-VL architecture),
-`tokenizer.json`, `preprocessor_config.json`, and `model.safetensors`; it is
-validated before anything else happens.
-
-Hugging Face settings that also apply to downloads:
-
-| Variable | Effect |
-| --- | --- |
-| `HF_HOME` | Where the model cache lives. |
-| `HF_TOKEN` | Hugging Face access token, for gated or private repositories. |
-| `HF_HUB_OFFLINE=1` | Force fully offline operation from the local cache. |
-
-## The four binaries
+## The binaries
 
 | Binary | Purpose |
 | --- | --- |
 | `mineru` | Canonical CLI: PDF, image, and Office documents, either directly against a VLM or through a `mineru-api` server. |
 | `mineru-api` | HTTP API server (see above). |
 | `mineru-office-convert` | Office (.docx/.pptx/.xlsx) → PDF conversion helper used by `mineru`; built with `--features office`. |
-| `mineru-mistralrs` | Local PDF parsing with the Qwen2-VL MinerU model; built from source with `--features mistralrs`, or shipped in the CUDA image and standalone binaries. |
 
 ## Docker
 
-### CUDA image (local inference)
+### Docker Compose profiles
 
-`ghcr.io/agentsyaml/mineru-rs-cuda:latest-sm80` ships `mineru-mistralrs` for
-local parsing on NVIDIA GPUs. The tag targets compute capability 8.0
-(Ampere-class) GPUs; it is not a universal all-GPU image. The image ENTRYPOINT
-is `mineru-mistralrs`, so arguments after the image name go straight to the
-CLI:
+The bundled [`docker-compose.yaml`](docker-compose.yaml) runs the MinerU
+OpenAI-compatible server on an NVIDIA GPU behind one of two profiles:
 
-```sh
-mkdir -p output .hf-cache
-docker run --rm --gpus all --user "$(id -u):$(id -g)" \
-  -v "$(pwd):/work" -w /work \
-  -e HF_HOME=/work/.hf-cache \
-  ghcr.io/agentsyaml/mineru-rs-cuda:latest-sm80 \
-  input.pdf --output output
-```
+| Profile | Image | Purpose |
+| --- | --- | --- |
+| `openai-server` | `alexsuntop/mineru:3.4.2` | vLLM-backed MinerU server (default, port `30000`). |
+| `llama-server` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | llama.cpp server for quantized (GGUF) MinerU models, port `30000`. |
 
-For a different GPU, build your own image with your GPU's compute capability
-(for example, `89` for RTX 40-series):
+Start the vLLM server:
 
 ```sh
-docker build --platform linux/amd64 -f Dockerfile.cuda --build-arg CUDA_COMPUTE_CAP=89 -t mineru-rs-cuda .
-docker run --rm --gpus all --user "$(id -u):$(id -g)" \
-  -v "$(pwd):/work" -w /work \
-  -e HF_HOME=/work/.hf-cache \
-  mineru-rs-cuda input.pdf --output output
+docker compose --profile openai-server up -d
 ```
 
-The `.hf-cache` bind mount keeps downloaded weights across runs. You may use a
-named volume mounted at `/data` instead; the CUDA image defaults `HF_HOME` to
-that path.
-
-There is no CPU Docker image; the CPU backend ships as a standalone binary
-instead (see below).
-
-## Standalone binaries
-
-Prebuilt `mineru-mistralrs` executables are attached to every GitHub Release
-as `mineru-mistralrs-{variant}-{rust-target}.tar.gz`; each tarball contains the
-single executable and needs no npm or Python wrapper.
-
-| Variant | Rust target | Platform | Notes |
-| --- | --- | --- | --- |
-| `cpu` | `x86_64-unknown-linux-gnu` | Linux, amd64 | CPU inference. |
-| `cpu` | `aarch64-unknown-linux-gnu` | Linux, arm64 | CPU inference. |
-| `cpu` | `aarch64-apple-darwin` | macOS, Apple Silicon | CPU inference. |
-| `metal` | `aarch64-apple-darwin` | macOS, Apple Silicon | Metal-accelerated inference; requires macOS 13+ and Apple Silicon. |
-| `cuda` | `x86_64-unknown-linux-gnu` | Linux, amd64 | CUDA inference; requires an NVIDIA driver (`libcuda.so.1`) and a compute capability 8.0 (Ampere-class) or newer GPU. |
-
-Download, extract, and run:
+Start the quantized llama.cpp server. Put your GGUF file(s) in `./models`
+(or set `LLAMA_MODELS_DIR`), then point `LLAMA_MODEL` at the container path:
 
 ```sh
-curl -LO https://github.com/agentsyaml/mineru-rs/releases/latest/download/mineru-mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz
-tar xzf mineru-mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz
-./mineru-mistralrs input.pdf --output output
+LLAMA_MODEL=/models/mineru-q4_k_m.gguf \
+docker compose --profile llama-server up -d
+# or fetch from Hugging Face without local files:
+# LLAMA_ARG_HF_REPO=your-org/mineru-gguf:Q4_K_M docker compose --profile llama-server up -d
 ```
 
-Each Release also attaches a `SHA256SUMS` file covering its artifacts, so the
-tarball can be verified against it before use.
+Both server profiles expose `http://localhost:30000` (override with
+`MINERU_PORT_OVERRIDE_VLLM` / `MINERU_PORT_OVERRIDE_LLAMA`); they map the same
+host port, so start only one at a time.
+
+`COMPOSE_PROFILES` can also activate a profile implicitly, e.g.
+`COMPOSE_PROFILES=llama-server docker compose up -d`.
+
+There is no CPU Docker image.
 
 ## Examples
 
@@ -401,10 +311,6 @@ tarball can be verified against it before use.
 ```sh
 cargo build --release
 cargo test
-
-# local backend unit tests (the real-model test is ignored unless
-# MINERU_VL_MODEL_DIR points at local weights)
-cargo test --features mistralrs --lib
 ```
 
 ## License

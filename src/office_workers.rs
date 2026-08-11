@@ -178,7 +178,11 @@ impl OfficeWorkers {
         let limits = self.limits;
         let ooxml = self.ooxml;
         if input.len() > limits.input_bytes {
-            return Err(OfficeConvertError::Failed("input too large".into()));
+            return Err(OfficeConvertError::Failed(format!(
+                "input too large: office input exceeds limit of {} bytes; limit {} bytes; raise with --office-input-bytes or MINERU_OFFICE_INPUT_BYTES",
+                input.len(),
+                limits.input_bytes
+            )));
         }
         if timeout.is_zero() {
             return Err(OfficeConvertError::Failed("invalid timeout".into()));
@@ -589,6 +593,21 @@ mod tests {
             convert(&w, "ok").await,
             Err(OfficeConvertError::Draining)
         ));
+    }
+
+    #[tokio::test]
+    async fn input_limit_error_names_the_raise_knob() {
+        let mut w = workers();
+        w.limits.input_bytes = 16;
+        let error = w
+            .convert("ok", vec![0; 17], Duration::from_secs(1))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("input too large"));
+        assert!(
+            error.contains("--office-input-bytes") && error.contains("MINERU_OFFICE_INPUT_BYTES")
+        );
     }
 
     #[tokio::test]

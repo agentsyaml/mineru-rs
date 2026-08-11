@@ -12,6 +12,7 @@ use cap_std::{
     fs::{Dir, OpenOptions},
 };
 use std::{
+    collections::HashSet,
     ffi::OsString,
     io::Read,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -376,16 +377,20 @@ fn snapshot(path: &Path, cap: usize, max_input_bytes: u64) -> Result<Snapshot, D
     if !metadata.is_file() {
         return Err(err("input is not a regular file"));
     }
-    if metadata.len() > max_input_bytes {
+    let size = metadata.len();
+    let label = path.display().to_string();
+    if size > max_input_bytes {
         return Err(err(format!(
-            "input exceeds configured limit of {max_input_bytes} bytes"
+            "input \"{label}\" is {size} bytes; exceeds configured input limit of {max_input_bytes} bytes; raise with --max-input-bytes or MINERU_MAX_INPUT_BYTES"
         )));
     }
-    if metadata.len() > cap as u64 {
-        return Err(err("input exceeds resident preparation limit"));
+    if size > cap as u64 {
+        return Err(err(format!(
+            "input \"{label}\" is {size} bytes; exceeds resident preparation limit of {cap} bytes; raise with --max-pdf-bytes or MINERU_MAX_PDF_BYTES"
+        )));
     }
     let mut data = Vec::with_capacity(cap.min(1024 * 1024));
-    copy_capped(&mut file, &mut data, cap, max_input_bytes)?;
+    copy_capped(&mut file, &mut data, cap, max_input_bytes, &label)?;
     Ok(Snapshot { bytes: data.into() })
 }
 
@@ -394,6 +399,7 @@ fn copy_capped(
     output: &mut Vec<u8>,
     cap: usize,
     source_cap: u64,
+    label: &str,
 ) -> Result<(), DirectError> {
     let mut total = 0u64;
     let mut buffer = [0; 64 * 1024];
@@ -405,14 +411,63 @@ fn copy_capped(
         total = total.saturating_add(read as u64);
         if total > source_cap {
             return Err(err(format!(
-                "input exceeds configured limit of {source_cap} bytes"
+                "input \"{label}\" is {total} bytes; exceeds configured input limit of {source_cap} bytes; raise with --max-input-bytes or MINERU_MAX_INPUT_BYTES"
             )));
         }
         if output.len().saturating_add(read) > cap {
-            return Err(err("input exceeds maximum input size"));
+            return Err(err(format!(
+                "input \"{label}\" is {total} bytes; exceeds maximum input size of {cap} bytes; raise with --max-pdf-bytes or MINERU_MAX_PDF_BYTES"
+            )));
         }
         output.extend_from_slice(&buffer[..read]);
     }
+}
+
+/// Returns the message for a document whose on-disk length trips any preparation limit, in the
+/// same wording `snapshot` uses. The batch preflight is advisory only: `snapshot` stays the final
+/// enforcer (TOCTOU-safe, no-follow open preserved), so the two must agree on the wording.
+fn preflight_limit_message(
+    label: &str,
+    len: u64,
+    kind: DocumentKind,
+    max_input_bytes: u64,
+    max_pdf_bytes: usize,
+    ooxml_archive_bytes: u64,
+    office_input_bytes: usize,
+) -> Option<String> {
+    if len > max_input_bytes {
+        return Some(format!(
+            "input \"{label}\" is {len} bytes; exceeds configured input limit of {max_input_bytes} bytes; raise with --max-input-bytes or MINERU_MAX_INPUT_BYTES"
+        ));
+    }
+    if len > max_pdf_bytes as u64 {
+        return Some(format!(
+            "input \"{label}\" is {len} bytes; exceeds resident preparation limit of {max_pdf_bytes} bytes; raise with --max-pdf-bytes or MINERU_MAX_PDF_BYTES"
+        ));
+    }
+    if kind.is_office() && len > ooxml_archive_bytes {
+        return Some(format!(
+            "input \"{label}\" is {len} bytes; exceeds OOXML archive limit of {ooxml_archive_bytes} bytes; raise with --ooxml-archive-bytes or MINERU_OOXML_ARCHIVE_BYTES"
+        ));
+    }
+    if kind.is_office() && len > office_input_bytes as u64 {
+        return Some(format!(
+            "input \"{label}\" is {len} bytes; exceeds office conversion input limit of {office_input_bytes} bytes; raise with --office-input-bytes or MINERU_OFFICE_INPUT_BYTES"
+        ));
+    }
+    None
+}
+
+/// Joins per-document failures into the batch summary: count, then the first 16 details.
+fn format_failures(failures: &[(String, String)]) -> String {
+    let details = failures
+        .iter()
+        .take(16)
+        .map(|(stem, message)| format!("{stem}: {message}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let suffix = if failures.len() > 16 { "; ..." } else { "" };
+    format!("{} document(s) failed: {details}{suffix}", failures.len())
 }
 #[cfg(unix)]
 fn same_dir(a: &Dir, b: &Dir) -> std::io::Result<bool> {
@@ -648,6 +703,40 @@ async fn run_inner(
     for path in skipped {
         emit_warning(&warnings, "unsupported input", &path.display().to_string());
     }
+    // Advisory batch preflight: announce every document that will be rejected by a preparation
+    // limit before any parsing starts. `snapshot` remains the final enforcer; doomed documents
+    // are skipped in the main loop below so the rest of the batch still runs.
+    let mut failures: Vec<(String, String)> = Vec::new();
+    let mut doomed: HashSet<PathBuf> = HashSet::new();
+    for (candidate_id, path, kind, stem) in &candidates {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            continue;
+        };
+        let Some(message) = preflight_limit_message(
+            &path.display().to_string(),
+            metadata.len(),
+            *kind,
+            options.document_limits.max_input_bytes,
+            route.max_pdf_bytes,
+            service.ooxml.archive_bytes,
+            service.office.input_bytes,
+        ) else {
+            continue;
+        };
+        let task_events = document_events(&command_events, &events, *candidate_id);
+        emit_event(
+            &task_events,
+            ProgressEvent::DocumentFailed {
+                document: stem.clone(),
+                message: message.clone(),
+            },
+        );
+        failures.push((stem.clone(), message));
+        doomed.insert(path.clone());
+    }
+    if !doomed.is_empty() && doomed.len() == candidates.len() {
+        return Err(err(format_failures(&failures)));
+    }
     let http = config(options, env, resolved.http)?;
     let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
         resolved.page_concurrency,
@@ -657,6 +746,9 @@ async fn run_inner(
     .map_err(|error| err(error.to_string()))?;
     let client = MinerUVlmClient::connect(http, MinerUVlmConfig::default()).await?;
     for (candidate_id, path, kind, stem) in &candidates {
+        if doomed.contains(path) {
+            continue;
+        }
         let task_events = document_events(&command_events, &events, *candidate_id);
         emit_event(
             &task_events,
@@ -739,7 +831,8 @@ async fn run_inner(
                     message: e.to_string(),
                 },
             );
-            return Err(e);
+            failures.push((stem.clone(), e.to_string()));
+            continue;
         }
         emit_event(
             &task_events,
@@ -748,7 +841,11 @@ async fn run_inner(
             },
         );
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(err(format_failures(&failures)))
+    }
 }
 
 #[cfg(test)]
@@ -896,17 +993,66 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_uses_an_overflow_probe() {
+    fn snapshot_uses_an_overflow_probe_and_names_the_file_and_knob() {
         let temp = tempfile::tempdir().unwrap();
         let pdf = temp.path().join("large.pdf");
         std::fs::write(&pdf, b"12345").unwrap();
+        // Over the configured input limit (checked first) names the input knob and the file.
+        let max_input = snapshot_pdf(&pdf, 10, 4).unwrap_err().to_string();
+        assert!(max_input.contains("large.pdf"), "{max_input}");
+        assert!(max_input.contains("configured input limit"), "{max_input}");
+        assert!(max_input.contains("--max-input-bytes"), "{max_input}");
+        assert!(max_input.contains("MINERU_MAX_INPUT_BYTES"), "{max_input}");
+        // Over the resident preparation cap names the resident knob and the file.
+        let resident = snapshot_pdf(&pdf, 4, 10).unwrap_err().to_string();
+        assert!(resident.contains("large.pdf"), "{resident}");
         assert!(
-            snapshot_pdf(&pdf, 4, 4)
-                .unwrap_err()
-                .to_string()
-                .contains("exceeds")
+            resident.contains("resident preparation limit"),
+            "{resident}"
         );
+        assert!(resident.contains("--max-pdf-bytes"), "{resident}");
+        assert!(resident.contains("MINERU_MAX_PDF_BYTES"), "{resident}");
         assert_eq!(snapshot_pdf(&pdf, 5, 5).unwrap().bytes.as_ref(), b"12345");
+    }
+
+    #[test]
+    fn preflight_names_the_tripped_limit_and_respects_kind() {
+        let plain = |len| preflight_limit_message("big", len, DocumentKind::Pdf, 100, 10, 100, 100);
+        assert!(plain(101).unwrap().contains("--max-input-bytes"));
+        let resident = plain(11).unwrap();
+        assert!(resident.contains("--max-pdf-bytes"), "{resident}");
+        assert!(
+            resident.contains("resident preparation limit"),
+            "{resident}"
+        );
+        assert!(plain(10).is_none());
+
+        let office =
+            |len| preflight_limit_message("big", len, DocumentKind::Docx, 100, 100, 5, 100);
+        assert!(office(6).unwrap().contains("--ooxml-archive-bytes"));
+        assert!(office(5).is_none());
+        let office =
+            |len| preflight_limit_message("big", len, DocumentKind::Xlsx, 100, 100, 100, 4);
+        assert!(office(5).unwrap().contains("--office-input-bytes"));
+        assert!(office(4).is_none());
+
+        // The office-only limits never trip non-office kinds.
+        assert!(preflight_limit_message("big", 50, DocumentKind::Png, 100, 100, 5, 4).is_none());
+    }
+
+    #[test]
+    fn failure_summary_counts_and_caps_details_at_sixteen() {
+        let failures: Vec<(String, String)> = (0..20)
+            .map(|i| (format!("doc{i}"), format!("boom {i}")))
+            .collect();
+        let summary = format_failures(&failures);
+        assert!(summary.starts_with("20 document(s) failed: "), "{summary}");
+        assert!(summary.contains("doc0: boom 0"), "{summary}");
+        assert!(summary.contains("doc15: boom 15"), "{summary}");
+        assert!(!summary.contains("doc16"), "{summary}");
+        assert!(summary.ends_with("; ..."), "{summary}");
+        let one = format_failures(&[("a".into(), "bad".into())]);
+        assert_eq!(one, "1 document(s) failed: a: bad");
     }
 
     #[test]
@@ -1087,14 +1233,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callback_runner_stops_after_first_preparation_failure() {
+    async fn callback_runner_preflights_oversized_documents_and_continues() {
         use super::super::{CommandEvent, CommandScope, DocumentId};
         use std::sync::Mutex;
 
         let input = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
-        std::fs::write(input.path().join("a.png"), b"not a PNG").unwrap();
-        std::fs::write(input.path().join("b.png"), b"also not a PNG").unwrap();
+        // `a` exceeds the configured input limit, `b` exceeds the resident cap (below the input
+        // limit), and `c` is small enough to run but has invalid content.
+        std::fs::write(input.path().join("a.png"), [b'x'; 12]).unwrap();
+        std::fs::write(input.path().join("b.png"), [b'y'; 8]).unwrap();
+        std::fs::write(input.path().join("c.png"), b"nope").unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let event_callback = {
             let events = Arc::clone(&events);
@@ -1111,6 +1260,10 @@ mod tests {
                     .push((source.to_owned(), message.to_owned()))
             }) as WarningCallback
         };
+        let env = super::super::Environment::from_values(HashMap::from([(
+            "MINERU_MAX_PDF_BYTES",
+            OsString::from("5"),
+        )]));
         let result = run_with_scoped_events(
             DirectOptions {
                 input: input.path().to_owned(),
@@ -1124,10 +1277,10 @@ mod tests {
                 no_formula: None,
                 no_table: None,
                 no_image_analysis: None,
-                document_limits: crate::DocumentLimitPolicy::defaults(),
+                document_limits: crate::DocumentLimitPolicy::new(10, 10, 10).unwrap(),
             },
             OfficeWorkers::with_executable(std::env::current_exe().unwrap()),
-            super::super::Environment::process(),
+            env,
             super::super::RunOverrides::default(),
             super::super::service::resolve_service(
                 &(|name| std::env::var_os(name)),
@@ -1139,35 +1292,55 @@ mod tests {
             Some(warning_callback),
         )
         .await;
-        assert_eq!(result.unwrap_err().to_string(), "invalid image");
+        let summary = result.unwrap_err().to_string();
+        assert!(summary.contains("3 document(s) failed"), "{summary}");
+        assert!(summary.contains("--max-input-bytes"), "{summary}");
+        assert!(summary.contains("--max-pdf-bytes"), "{summary}");
+        assert!(summary.contains("c: invalid image"), "{summary}");
         let events = events.lock().unwrap();
         assert!(matches!(
             events[0],
             CommandEvent::RunPlanned {
-                documents: 2,
+                documents: 3,
                 api_tasks: 0
             }
         ));
-        // The first document fails at preparation; the runner stops before starting the second.
+        // Both oversized documents are announced up front, before any document starts.
         assert!(matches!(
             events[1],
-            CommandEvent::Progress {
-                scope: CommandScope::Document(DocumentId(1)),
-                event: ProgressEvent::DocumentStarted { .. },
-            }
-        ));
-        assert!(matches!(
-            events[2],
             CommandEvent::Progress {
                 scope: CommandScope::Document(DocumentId(1)),
                 event: ProgressEvent::DocumentFailed { .. },
             }
         ));
+        assert!(matches!(
+            events[2],
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(2)),
+                event: ProgressEvent::DocumentFailed { .. },
+            }
+        ));
+        // The in-limit document still runs and fails on its own; the batch did not abort.
+        assert!(matches!(
+            events[3],
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(3)),
+                event: ProgressEvent::DocumentStarted { .. },
+            }
+        ));
+        assert!(matches!(
+            events[4],
+            CommandEvent::Progress {
+                scope: CommandScope::Document(DocumentId(3)),
+                event: ProgressEvent::DocumentFailed { .. },
+            }
+        ));
+        // The preflight-skipped documents never started.
         assert!(!events.iter().any(|event| matches!(
             event,
             CommandEvent::Progress {
-                scope: CommandScope::Document(DocumentId(2)),
-                ..
+                scope: CommandScope::Document(DocumentId(1) | DocumentId(2)),
+                event: ProgressEvent::DocumentStarted { .. },
             }
         )));
         assert!(warnings.lock().unwrap().is_empty());
@@ -1286,7 +1459,12 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(result.unwrap_err().to_string(), "invalid image");
+        // The second document fails but no longer aborts the batch; the run summarizes instead.
+        let summary = result.unwrap_err().to_string();
+        assert_eq!(
+            summary, "1 document(s) failed: b: invalid image",
+            "{summary}"
+        );
         let events = events.lock().unwrap();
         assert!(matches!(
             events[0],

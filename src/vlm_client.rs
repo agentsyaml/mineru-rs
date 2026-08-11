@@ -822,8 +822,6 @@ const OFFICIAL_PAGE_CONCURRENCY: usize = 4;
 #[derive(Debug, Clone)]
 enum VlmBackend {
     Http(VlmHttpClient),
-    #[cfg(feature = "mistralrs")]
-    MistralRs(crate::mistralrs_client::MistralRsClient),
 }
 
 impl VlmBackend {
@@ -834,22 +832,10 @@ impl VlmBackend {
         budget: Option<Arc<ByteBudget>>,
         deadline: tokio::time::Instant,
     ) -> VlmResult<(String, usize, Vec<String>)> {
-        match self {
-            Self::Http(client) => {
-                client
-                    .predict_official_budgeted(request, cap, budget, deadline)
-                    .await
-            }
-            #[cfg(feature = "mistralrs")]
-            Self::MistralRs(client) => {
-                // mistralrs reports no truncation warnings; the raw-reply bytes still flow
-                // through the shared budget.
-                let (text, bytes) = client
-                    .predict_official_budgeted(request, cap, budget, deadline)
-                    .await?;
-                Ok((text, bytes, Vec::new()))
-            }
-        }
+        let Self::Http(client) = self;
+        client
+            .predict_official_budgeted(request, cap, budget, deadline)
+            .await
     }
 
     async fn aio_batch_predict(
@@ -857,11 +843,8 @@ impl VlmBackend {
         requests: Vec<VlmRequest>,
         semaphore: VlmSemaphore,
     ) -> VlmResult<Vec<String>> {
-        match self {
-            Self::Http(client) => client.aio_batch_predict(requests, semaphore).await,
-            #[cfg(feature = "mistralrs")]
-            Self::MistralRs(client) => client.aio_batch_predict(requests, semaphore).await,
-        }
+        let Self::Http(client) = self;
+        client.aio_batch_predict(requests, semaphore).await
     }
 }
 
@@ -1505,31 +1488,6 @@ impl MinerUVlmClient {
 
     pub async fn connect(http: VlmHttpConfig, config: MinerUVlmConfig) -> VlmResult<Self> {
         Self::connect_for_task(http, config, TaskWorkLease::default()).await
-    }
-    #[cfg(feature = "mistralrs")]
-    pub async fn connect_mistralrs(
-        model: crate::MistralRsConfig,
-        config: MinerUVlmConfig,
-    ) -> VlmResult<Self> {
-        let image_config = Arc::new(VlmHttpConfig::default());
-        let task_work_lease = TaskWorkLease::default();
-        Ok(Self {
-            backend: VlmBackend::MistralRs(
-                crate::mistralrs_client::MistralRsClient::connect(
-                    model,
-                    image_config.max_response_bytes,
-                )
-                .await?,
-            ),
-            max_decoded_pixels: image_config.max_decoded_pixels,
-            image_config,
-            task_work_lease,
-            preprocessor: MinerUVlmPreprocessor { config },
-            layout_semaphore: Arc::new(Semaphore::new(1)),
-            official_page_semaphore: Arc::new(Semaphore::new(1)),
-            #[cfg(test)]
-            semantic_scheduler_hook: None,
-        })
     }
     pub(crate) async fn connect_for_task(
         http: VlmHttpConfig,

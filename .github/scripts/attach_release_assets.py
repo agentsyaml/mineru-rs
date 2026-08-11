@@ -31,9 +31,6 @@ TARGETS = (
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
-# Standalone `mineru-mistralrs` CLI tarballs attached alongside the six main
-# library archives; variant is one of cpu/cuda/metal.
-STANDALONE_RE = re.compile(r"mineru-mistralrs-(?:cpu|cuda|metal)-([a-z0-9_-]+)\.tar\.gz\Z")
 
 
 def fail(message: str) -> typing.NoReturn:
@@ -111,8 +108,7 @@ def parse_sums(payload: bytes, names: set[str]) -> dict[str, str]:
 
 def sealed_hashes(directory: Path, version: str) -> dict[str, str]:
     archives = approved_archive_names(version)
-    standalone = {entry.name for entry in plain_files(directory) if STANDALONE_RE.fullmatch(entry.name)}
-    files = require_exact_files(directory, approved_names(version) | standalone)
+    files = require_exact_files(directory, approved_names(version))
     records = parse_sums(files[SUMS_NAME].read_bytes(), archives)
     for name in archives:
         actual = sha256_file(files[name])

@@ -17,8 +17,6 @@ VULNERABILITIES = {
 }
 WARNINGS = {
     ("RUSTSEC-2025-0141", "bincode", "1.3.3"),
-    ("RUSTSEC-2025-0057", "fxhash", "0.2.1"),
-    ("RUSTSEC-2025-0119", "number_prefix", "0.4.0"),
     ("RUSTSEC-2024-0436", "paste", "1.0.15"),
     ("RUSTSEC-2026-0206", "rustybuzz", "0.20.1"),
     ("RUSTSEC-2026-0192", "ttf-parser", "0.25.1"),

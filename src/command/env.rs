@@ -662,7 +662,7 @@ mod tests {
         // Environment still feeds the knobs the CLI did not configure.
         assert_eq!(resolved.route.max_layout_blocks_per_page, 300);
         assert_eq!(resolved.http.max_keepalive_connections, 20);
-        assert_eq!(resolved.route.max_pdf_bytes, 512 * 1024 * 1024);
+        assert_eq!(resolved.route.max_pdf_bytes, 1024 * 1024 * 1024);
     }
 
     #[test]
@@ -727,7 +727,7 @@ mod tests {
             ("MINERU_OFFICIAL_PAGE_CONCURRENCY", "4", "9", "24"),
             ("MINERU_PDF_RENDER_THREADS", "3", "5", "6"),
             ("MINERU_PDF_RENDER_TIMEOUT", "300", "120", "240"),
-            ("MINERU_MAX_PDF_BYTES", "536870912", "700", "900"),
+            ("MINERU_MAX_PDF_BYTES", "1073741824", "700", "900"),
             ("MINERU_MAX_PAGES", "10000", "999", "1001"),
             ("MINERU_MAX_PAGE_PIXELS", "100000000", "42", "43"),
             ("MINERU_MAX_RENDERED_IMAGE_BYTES", "67108864", "44", "45"),

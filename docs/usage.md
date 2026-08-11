@@ -130,7 +130,7 @@ export MINERU_VL_API_KEY="<your-key>"
 | `--render-timeout-seconds <n>` | `300` | 单次渲染超时。覆盖 `MINERU_PDF_RENDER_TIMEOUT`。 |
 | `--batch-size <n>` | `32` | 每页语义推理请求准入（推理批大小），区别于页并发与处理窗口。覆盖 `MINERU_BATCH_SIZE`。 |
 | `--total-deadline-seconds <n>` | `86400` | 单文档总 deadline。覆盖 `MINERU_TOTAL_DEADLINE_SECONDS`。 |
-| `--max-pdf-bytes <n>` | `536870912` | 常驻源 PDF 上限。覆盖 `MINERU_MAX_PDF_BYTES`。 |
+| `--max-pdf-bytes <n>` | `1073741824` | 常驻源 PDF 上限。覆盖 `MINERU_MAX_PDF_BYTES`。 |
 | `--max-pages <n>` | `10000` | 每文档最大选中页数。覆盖 `MINERU_MAX_PAGES`。 |
 | `--max-page-pixels <n>` | `100000000` | 单页像素上限。覆盖 `MINERU_MAX_PAGE_PIXELS`。 |
 | `--max-rendered-image-bytes <n>` | `67108864` | 单次渲染 RGB 上限。覆盖 `MINERU_MAX_RENDERED_IMAGE_BYTES`。 |
@@ -177,7 +177,7 @@ API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--processing-wind
 
 ### 容器
 
-API 服务没有已发布的容器镜像；请从源码构建运行（见上文[构建与前置条件](#构建与前置条件)）。唯一发布的镜像 `ghcr.io/agentsyaml/mineru-rs-cuda:latest-sm80` 仅内置 `mineru-mistralrs` 本地推理 CLI，不提供服务端口，也不包含 `mineru-api`。
+API 服务没有已发布的容器镜像；请从源码构建运行（见上文[构建与前置条件](#构建与前置条件)）。
 
 ### 启动
 
@@ -261,7 +261,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
 | `MINERU_BATCH_SIZE` | `32` | 每页语义推理请求准入。 |
 | `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | 单文档总 deadline。 |
-| `MINERU_MAX_PDF_BYTES` | `536870912` | 常驻源 PDF 上限。 |
+| `MINERU_MAX_PDF_BYTES` | `1073741824` | 常驻源 PDF 上限。 |
 | `MINERU_MAX_PAGES` | `10000` | 每文档最大选中页数。 |
 | `MINERU_MAX_PAGE_PIXELS` | `100000000` | 单页像素上限。 |
 | `MINERU_MAX_RENDERED_IMAGE_BYTES` | `67108864` | 单次渲染 RGB 上限。 |
@@ -466,11 +466,11 @@ if (warnings.length) console.warn(warnings)
 
 `--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`、`--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES` 和 `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` 接受无符号十进制字节数（允许空白和 `_`）。优先级为 CLI、环境变量、编译默认值：输入 4_293_918_719 字节、编码文档 8 GiB、输出 8 GiB。显式的非法、零、溢出或平台不可表示值会失败；不再存在任意硬上限——配置值本身作为策略使用，而不会被夹紧到另一个常数。
 
-这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过常驻上限（`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`，默认 512 MiB）的源 PDF，单个 VLM 响应仍限制为 10 MiB（`--http-max-response-bytes`）。编码策略应在 `mineru-api` 配置；规范远程模式会拒绝编码覆盖项。
+这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过常驻上限（`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`，默认 1 GiB）的源 PDF，单个 VLM 响应仍限制为 10 MiB（`--http-max-response-bytes`）。编码策略应在 `mineru-api` 配置；规范远程模式会拒绝编码覆盖项。
 
 | 项目 | 默认值 |
 | --- | ---: |
-| PDF 大小 / 页数 | 512 MiB / 10,000 页 |
+| PDF 大小 / 页数 | 1 GiB / 10,000 页 |
 | 单页像素 / 渲染 RGB 图像 | 100,000,000 / 64 MiB |
 | 响应体 / 全部资产 | 10 MiB / 1 GiB |
 | 单页版面块数 / 页窗口 | 256 / 64 页 |
@@ -486,6 +486,19 @@ if (warnings.length) console.warn(warnings)
 - **Rust 防护**：10 秒连接超时、24 小时总超时，以及页数、PDF、资产、响应、渲染图像、像素、在途图像和版面块限制。
 
 10,000 页支持仅是高内存下的尽力而为：输入字节、最终页面结果和资产都会保留在内存中，并非无上限保证。库调用可调整公开的 `ClientConfig.limits`、`timeouts`、`request_concurrency` 和 `render_workers`，再调用 `validate()`（`ClientConfig::new` 也会验证）；应按可用 RAM 和服务端点容量配置。所有限制、并发和 worker 必须大于零；所有超时必须非零，且单请求超时不得超过总超时。
+
+## 输入上限与放大配置
+
+流水线在多个独立阶段执行大小上限。触发上限时，报错消息会给出具体文件名、大小、限制值与放大旋钮（flag 或环境变量）；单个文档失败不会中断整批处理，其余文档继续。本地解析大文件会按文件大小占用内存（上面的磁盘/文档总量与下面的常驻上限相互独立）。
+
+| 上限 | 默认值 | Flag | 环境变量 | 触发阶段 |
+| --- | ---: | --- | --- | --- |
+| 本地驻留/解析上限 `max_pdf_bytes` | 1 GiB | `--max-pdf-bytes` | `MINERU_MAX_PDF_BYTES` | 文件读取与 PDF 本地解析（含办公室文档转换后 PDF） |
+| 输入传输上限 `max_input_bytes` | 4_293_918_719（≈4 GiB） | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | 输入摄取/传输 |
+| 输出上限 `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | 输出生成 |
+| OOXML 归档上限 | 512 MiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office 文档预检 |
+| Office 转换输入上限 | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | LibreOffice 转换 |
+| 服务器端文件上限（`--api-url` 模式） | 512 MiB | `--file-cap`（服务端 `mineru-api`） | `MINERU_API_FILE_CAP`（服务端） | 服务器上传 |
 
 ## 限制与排错
 

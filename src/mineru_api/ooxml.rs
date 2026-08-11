@@ -104,7 +104,10 @@ fn detect_with(path: &Path, limits: Limits) -> Result<Option<&'static str>, Stri
         Err(_) => return Ok(None),
     };
     if size > limits.archive {
-        return Err("OOXML archive exceeds size limit".into());
+        return Err(format!(
+            "OOXML archive exceeds size limit ({size} bytes; limit {} bytes); raise with --ooxml-archive-bytes or MINERU_OOXML_ARCHIVE_BYTES",
+            limits.archive
+        ));
     }
     detect_reader(file, size, limits)
 }
@@ -118,7 +121,10 @@ fn detect_reader<R: Read + std::io::Seek>(
         return Err("OOXML limits are invalid".into());
     }
     if size > limits.archive {
-        return Err("OOXML archive exceeds size limit".into());
+        return Err(format!(
+            "OOXML archive exceeds size limit ({size} bytes; limit {} bytes); raise with --ooxml-archive-bytes or MINERU_OOXML_ARCHIVE_BYTES",
+            limits.archive
+        ));
     }
     let scanned = match scan(&mut file, limits.scan) {
         Ok(v) => v,
@@ -163,7 +169,13 @@ fn detect_reader<R: Read + std::io::Seek>(
         total = total
             .checked_add(entry.size())
             .filter(|v| *v <= limits.total)
-            .ok_or("OOXML archive exceeds expanded size limit")?;
+            .ok_or_else(|| {
+                format!(
+                    "OOXML archive exceeds expanded size limit ({} bytes; limit {} bytes); raise with --ooxml-expanded-bytes or MINERU_OOXML_EXPANDED_BYTES",
+                    total.saturating_add(entry.size()),
+                    limits.total
+                )
+            })?;
         let named_xml = is_xml_name(&name);
         let declared = entry.size();
         let packed = entry.compressed_size();
@@ -436,12 +448,21 @@ fn read_entry<R: Read>(
     }
     if named_xml || xml_like(&out) {
         if total > limits.xml {
-            return Err("OOXML XML exceeds per-entry limit".into());
+            return Err(format!(
+                "OOXML XML exceeds per-entry limit ({total} bytes; limit {} bytes); raise with --ooxml-xml-entry-bytes or MINERU_OOXML_XML_ENTRY_BYTES",
+                limits.xml
+            ));
         }
         *xml_total = xml_total
             .checked_add(total)
             .filter(|v| *v <= limits.xml_total)
-            .ok_or("OOXML XML exceeds aggregate limit")?;
+            .ok_or_else(|| {
+                format!(
+                    "OOXML XML exceeds aggregate limit ({} bytes; limit {} bytes); raise with --ooxml-xml-total-bytes or MINERU_OOXML_XML_TOTAL_BYTES",
+                    xml_total.saturating_add(total),
+                    limits.xml_total
+                )
+            })?;
         return Ok(Some(out));
     }
     Ok(None)
@@ -1691,6 +1712,68 @@ mod tests {
         let mut l = limits(&b);
         l.archive -= 1;
         assert!(detect_with_bytes(&b, l).is_err());
+    }
+
+    #[test]
+    fn limit_errors_name_their_raise_knobs() {
+        let (r, t) = xml("docx", true);
+        let b = package(r, t);
+
+        let mut archive = limits(&b);
+        archive.archive -= 1;
+        let error = detect_with_bytes(&b, archive).unwrap_err();
+        assert!(error.contains("OOXML archive exceeds size limit"));
+        assert!(
+            error.contains("--ooxml-archive-bytes") && error.contains("MINERU_OOXML_ARCHIVE_BYTES")
+        );
+
+        let error = detect_with_bytes(
+            &b,
+            Limits {
+                archive: u64::MAX,
+                total: 1,
+                ..limits(&b)
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("OOXML archive exceeds expanded size limit"));
+        assert!(
+            error.contains("--ooxml-expanded-bytes")
+                && error.contains("MINERU_OOXML_EXPANDED_BYTES")
+        );
+
+        let error = detect_with_bytes(
+            &b,
+            Limits {
+                archive: u64::MAX,
+                total: u64::MAX,
+                xml: 10,
+                ..limits(&b)
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("OOXML XML exceeds per-entry limit"));
+        assert!(
+            error.contains("--ooxml-xml-entry-bytes")
+                && error.contains("MINERU_OOXML_XML_ENTRY_BYTES")
+        );
+
+        let error = detect_with_bytes(
+            &b,
+            Limits {
+                archive: u64::MAX,
+                total: u64::MAX,
+                xml: u64::MAX,
+                xml_total: 10,
+                ..limits(&b)
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("OOXML XML exceeds aggregate limit"));
+        assert!(
+            error.contains("--ooxml-xml-total-bytes")
+                && error.contains("MINERU_OOXML_XML_TOTAL_BYTES")
+        );
     }
     #[test]
     fn zero_limits_are_hard_errors() {

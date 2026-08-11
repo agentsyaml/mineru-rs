@@ -10,8 +10,6 @@ pub mod input_prepare;
 mod layout;
 #[doc(hidden)]
 pub mod mineru_api;
-#[cfg(feature = "mistralrs")]
-mod mistralrs_client;
 mod office_workers;
 mod official_builders;
 mod official_output;
@@ -47,8 +45,6 @@ pub use mineru_api::{
     RemoteApiDocument, RemoteApiEnv, RemoteApiFailure, RemoteApiOptions, normalize_remote_language,
     selected_document_pages,
 };
-#[cfg(feature = "mistralrs")]
-pub use mistralrs_client::{MistralRsConfig, MistralRsModelSource};
 #[doc(hidden)]
 pub use office_workers::{OfficeConvertError, OfficeWorkers};
 pub use official_output::canonical_stem;

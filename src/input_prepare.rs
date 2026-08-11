@@ -231,7 +231,11 @@ pub(crate) async fn prepare_with_warning_and_ooxml(
     }
     validation_options.validate().map_err(|e| e.to_string())?;
     if bytes.len() > options.max_pdf_bytes {
-        return Err("input exceeds PDF byte limit".into());
+        return Err(format!(
+            "input exceeds PDF byte limit ({} bytes; limit {} bytes); raise with --max-pdf-bytes or MINERU_MAX_PDF_BYTES",
+            bytes.len(),
+            options.max_pdf_bytes
+        ));
     }
     if remaining.is_zero() {
         return Err("input preparation deadline expired".into());
@@ -437,7 +441,11 @@ fn finish_image_pdf(
 }
 fn validate_prepared_pdf(bytes: &[u8], o: &OfficialPdfOptions) -> Result<(), String> {
     if bytes.len() > o.max_pdf_bytes {
-        return Err("PDF exceeds size limit".into());
+        return Err(format!(
+            "PDF exceeds size limit ({} bytes; limit {} bytes); raise with --max-pdf-bytes or MINERU_MAX_PDF_BYTES",
+            bytes.len(),
+            o.max_pdf_bytes
+        ));
     }
     let doc = Document::load_mem(bytes).map_err(|_| "invalid generated PDF")?;
     if doc.is_encrypted() || doc.get_pages().is_empty() || doc.get_pages().len() > o.max_pages {
@@ -543,6 +551,34 @@ mod tests {
         .unwrap();
         assert_eq!(prepared.kind, DocumentKind::Pdf);
         assert_eq!(warning, None);
+    }
+
+    #[tokio::test]
+    async fn pdf_byte_limit_error_names_the_raise_knob() {
+        let workers = OfficeWorkers::with_executable("unused".into());
+        let mut options = OfficialPdfOptions::default();
+        options.max_pdf_bytes = 4;
+        let error = prepare_with_warning(
+            Bytes::from_static(b"%PDF-1.4"),
+            DocumentKind::Pdf,
+            &options,
+            &workers,
+            &RasterWorkers::default(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("input exceeds PDF byte limit"));
+        assert!(error.contains("--max-pdf-bytes") && error.contains("MINERU_MAX_PDF_BYTES"));
+    }
+
+    #[test]
+    fn prepared_pdf_size_error_names_the_raise_knob() {
+        let mut options = OfficialPdfOptions::default();
+        options.max_pdf_bytes = 4;
+        let error = validate_prepared_pdf(b"0123456789", &options).unwrap_err();
+        assert!(error.contains("PDF exceeds size limit"));
+        assert!(error.contains("--max-pdf-bytes") && error.contains("MINERU_MAX_PDF_BYTES"));
     }
 
     #[tokio::test]

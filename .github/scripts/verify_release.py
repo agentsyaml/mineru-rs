@@ -35,7 +35,7 @@ except ModuleNotFoundError:  # Python 3.9 wheel lanes never parse TOML.
 
 REPOSITORY = "https://github.com/agentsyaml/mineru-rs"
 LICENSE = "MIT OR Apache-2.0"
-BINS = {"mineru", "mineru-api", "mineru-office-convert", "mineru-mistralrs"}
+BINS = {"mineru", "mineru-api", "mineru-office-convert"}
 NPM_ROOT = "@alexsun-top/mineru"
 PLATFORMS = {
     "darwin-x64": ("darwin", "x64", None, "macosx_10_12_x86_64"),
@@ -55,8 +55,6 @@ WHEEL_SLOTS = {
 }
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-BINARY_RE = re.compile(r"mineru-mistralrs-(cpu|cuda|metal)-([a-z0-9_-]+)\.tar\.gz\Z")
-BINARY_MEMBER_NAMES = {"mineru-mistralrs", "mineru-mistralrs.exe"}
 NPM_DEV_DEPENDENCIES = {"@napi-rs/cli": "^3.8.2"}
 PYPI_USER_AGENT = "mineru-rs-release-verifier/1"
 CRATES_IO = "https://crates.io/api/v1/crates"
@@ -526,7 +524,7 @@ def validate_crate_manifest(files: dict[str, bytes], version: str) -> None:
     if bins != BINS or "mineru-cli" in bins:
         fail(f"normalized Cargo.toml binaries differ: {sorted(bins)}")
     if set(package.get("include", [])) != {
-        "Cargo.toml", "Cargo.lock", "src/**", "/README.md", "vendor/mistralrs-core/**", "README.zh-CN.md",
+        "Cargo.toml", "Cargo.lock", "src/**", "/README.md", "README.zh-CN.md",
         "LICENSE-MIT", "LICENSE-APACHE",
         "docs/usage.md", "docs/usage.en.md", "docs/compatibility.md", "!tests/fixtures/input/README.md", *CRATE_FIXTURES,
     }:
@@ -679,36 +677,6 @@ def check_wheels(args: argparse.Namespace) -> None:
         matching = [path for path, platform in platforms.items() if marker in platform]
         if len(matching) != 1:
             fail(f"expected exactly one {slot} wheel, found {[p.name for p in matching]}")
-    print("\n".join(str(path) for path in files))
-
-
-def validate_binary(path: Path) -> str:
-    match = BINARY_RE.fullmatch(path.name)
-    if not match:
-        fail(f"binary filename is not mineru-mistralrs-<variant>-<target>.tar.gz: {path.name}")
-    variant, target = match.group(1), match.group(2)
-    with tarfile.open(path, "r:gz") as archive:
-        members = archive.getmembers()
-    if len(members) != 1:
-        fail(f"binary tarball {path.name} must contain exactly one member, found {len(members)}")
-    member = members[0]
-    name = PurePosixPath(member.name)
-    if len(name.parts) != 1 or name.name not in BINARY_MEMBER_NAMES:
-        fail(f"binary tarball {path.name} member must be named mineru-mistralrs(.exe), found {member.name!r}")
-    if not member.isfile() or member.issym() or member.islnk():
-        fail(f"binary tar member {member.name!r} in {path.name} is not a regular file")
-    if member.mode & 0o111 == 0:
-        fail(f"binary tar member {member.name!r} in {path.name} has no executable bit (mode={member.mode:o})")
-    return f"{variant}-{target}"
-
-
-def check_binaries(args: argparse.Namespace) -> None:
-    files = only_files(args.directory, ".tar.gz")
-    if len(files) != args.count:
-        fail(f"expected {args.count} binary tarballs, found {len(files)}")
-    keys = [validate_binary(path) for path in files]
-    if len(keys) != len(set(keys)):
-        fail(f"duplicate variant+target binary tarballs: {sorted(keys)}")
     print("\n".join(str(path) for path in files))
 
 
@@ -1273,14 +1241,6 @@ def self_test(_: argparse.Namespace) -> None:
                     member.mode = modes.get(name, 0o644)
                     archive.addfile(member, io.BytesIO(data))
 
-        def write_binary(path: Path, mode: int = 0o755, names: tuple[str, ...] = ("mineru-mistralrs",)) -> None:
-            with tarfile.open(path, "w:gz") as archive:
-                for name in names:
-                    member = tarfile.TarInfo(name)
-                    member.size = 1
-                    member.mode = mode
-                    archive.addfile(member, io.BytesIO(b"x"))
-
         version = "1.2.3"
         optional = {f"{NPM_ROOT}-{suffix}": version for suffix in PLATFORMS}
         identity_npm = {
@@ -1683,72 +1643,6 @@ def self_test(_: argparse.Namespace) -> None:
         missing = archives / binary_asset_name("aarch64-pc-windows-msvc", version)
         missing.unlink()
         must_fail(lambda: check_binary_set(argparse.Namespace(directory=archives, version=version)), "incomplete binary set was accepted")
-        binary_dir = Path(tmp) / "binary"
-        binary_dir.mkdir()
-        binary_targets = (
-            ("cpu", "x86_64-unknown-linux-gnu"),
-            ("cpu", "aarch64-unknown-linux-gnu"),
-            ("cpu", "aarch64-apple-darwin"),
-            ("metal", "aarch64-apple-darwin"),
-            ("cuda", "x86_64-unknown-linux-gnu"),
-        )
-        for variant, target in binary_targets:
-            write_binary(binary_dir / f"mineru-mistralrs-{variant}-{target}.tar.gz")
-        check_binaries(argparse.Namespace(directory=binary_dir, version=version, count=5))
-        assert validate_binary(binary_dir / "mineru-mistralrs-metal-aarch64-apple-darwin.tar.gz") == (
-            "metal-aarch64-apple-darwin"
-        )
-
-        binary_count_dir = Path(tmp) / "binary-count"
-        binary_count_dir.mkdir()
-        write_binary(binary_count_dir / "mineru-mistralrs-cpu-aarch64-apple-darwin.tar.gz")
-        must_fail(
-            lambda: check_binaries(argparse.Namespace(directory=binary_count_dir, version=version, count=5)),
-            "wrong binary count was accepted",
-        )
-
-        binary_name_dir = Path(tmp) / "binary-name"
-        binary_name_dir.mkdir()
-        bad_named = binary_name_dir / "mineru-mistralrs-avx-x86_64-unknown-linux-gnu.tar.gz"
-        write_binary(bad_named)
-        must_fail(lambda: validate_binary(bad_named), "binary with invalid variant was accepted")
-        write_binary(binary_name_dir / "mineru-mistralrs-cpu.tar.gz")
-        must_fail(
-            lambda: validate_binary(binary_name_dir / "mineru-mistralrs-cpu.tar.gz"),
-            "binary without rust target in filename was accepted",
-        )
-
-        binary_multi_dir = Path(tmp) / "binary-multi"
-        binary_multi_dir.mkdir()
-        multi_binary = binary_multi_dir / "mineru-mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz"
-        write_binary(multi_binary, names=("mineru-mistralrs", "extra"))
-        must_fail(lambda: validate_binary(multi_binary), "binary tarball with extra members was accepted")
-
-        binary_noexec_dir = Path(tmp) / "binary-noexec"
-        binary_noexec_dir.mkdir()
-        noexec_binary = binary_noexec_dir / "mineru-mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz"
-        write_binary(noexec_binary, mode=0o644)
-        must_fail(lambda: validate_binary(noexec_binary), "non-executable binary tarball was accepted")
-
-        binary_symlink_dir = Path(tmp) / "binary-symlink"
-        binary_symlink_dir.mkdir()
-        symlink_binary = binary_symlink_dir / "mineru-mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz"
-        with tarfile.open(symlink_binary, "w:gz") as archive:
-            member = tarfile.TarInfo("mineru-mistralrs")
-            member.type = tarfile.SYMTYPE
-            member.linkname = "/bin/true"
-            archive.addfile(member)
-        must_fail(lambda: validate_binary(symlink_binary), "symlink binary member was accepted")
-
-        binary_nested_dir = Path(tmp) / "binary-nested"
-        binary_nested_dir.mkdir()
-        nested_binary = binary_nested_dir / "mineru-mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz"
-        with tarfile.open(nested_binary, "w:gz") as archive:
-            member = tarfile.TarInfo("sub/mineru-mistralrs")
-            member.size = 1
-            member.mode = 0o755
-            archive.addfile(member, io.BytesIO(b"x"))
-        must_fail(lambda: validate_binary(nested_binary), "binary tarball with nested member name was accepted")
     print("verify_release self-test passed")
 
 
@@ -1778,12 +1672,6 @@ def parser() -> argparse.ArgumentParser:
     wheel.add_argument("--count", type=int, required=True)
     wheel.add_argument("--platform", choices=(*WHEEL_SLOTS, "all"), required=True)
     wheel.set_defaults(func=check_wheels)
-
-    binary = sub.add_parser("binary")
-    binary.add_argument("--directory", type=Path, required=True)
-    binary.add_argument("--version", required=True)
-    binary.add_argument("--count", type=int, required=True)
-    binary.set_defaults(func=check_binaries)
 
     preflight = sub.add_parser("pypi-preflight")
     preflight.add_argument("--project", required=True)
