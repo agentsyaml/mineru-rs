@@ -42,9 +42,9 @@ use tokio::{
 };
 
 #[cfg(test)]
-const FILE_CAP: u64 = 512 * 1024 * 1024;
+const FILE_CAP: u64 = 1024 * 1024 * 1024;
 #[cfg(test)]
-const BODY_CAP: usize = 512 * 1024 * 1024 + 1024 * 1024;
+const BODY_CAP: usize = 1024 * 1024 * 1024 + 1024 * 1024;
 #[cfg(test)]
 const TEXT_CAP: usize = 64 * 1024;
 #[cfg(test)]

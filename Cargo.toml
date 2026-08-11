@@ -81,7 +81,7 @@ thiserror = "2"
 tempfile = "3"
 time = { version = "=0.3.55", features = ["formatting", "parsing"] }
 tiff = "=0.11.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "net", "process", "io-util", "signal", "io-std"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "net", "process", "io-util", "signal"] }
 url = { version = "2", features = ["serde"] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = { version = "=0.41.0", default-features = false, features = ["encoding"] }

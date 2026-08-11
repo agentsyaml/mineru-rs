@@ -221,11 +221,17 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` | 关闭 | 公开监听时允许处理 POST 解析请求。 |
 | `MINERU_API_SHUTDOWN_ON_STDIN_EOF` | 关闭 | 等价于 `--shutdown-on-stdin-eof`。 |
 | `MINERU_API_RECORD_CAP` | `32` | 并发任务记录上限。 |
-| `MINERU_API_FILE_CAP` | `536870912` | 单文件上传字节上限。 |
-| `MINERU_API_BODY_CAP` | `537001984` | multipart 请求体字节上限。 |
+| `MINERU_API_FILE_CAP` | `1073741824` | 单文件上传字节上限。 |
+| `MINERU_API_BODY_CAP` | `1074790400` | multipart 请求体字节上限。 |
 | `MINERU_API_TEXT_CAP` | `65536` | 单个表单文本字段字节上限。 |
 | `MINERU_API_TEXT_TOTAL_CAP` | `262144` | 表单文本合计字节上限。 |
 | `MINERU_API_FORM_FIELDS_CAP` | `32` | multipart 表单字段数量上限。 |
+| `MINERU_TASK_RESULT_TIMEOUT_SECONDS` | `3600` | `mineru --api-url` 客户端：任务结果超时秒数。 |
+| `MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS` | `600` | 客户端：结果下载超时秒数。 |
+| `MINERU_API_CONNECT_TIMEOUT_SECONDS` | `10` | 客户端：API 连接超时秒数。 |
+| `MINERU_API_ACQUISITION_TIMEOUT_SECONDS` | `60` | 客户端：任务提交/状态获取超时秒数。 |
+| `MINERU_API_SEND_TIMEOUT_SECONDS` | `300` | 客户端：上传超时秒数。 |
+| `MINERU_API_POLL_INTERVAL_SECONDS` | `1` | 客户端：轮询间隔秒数。 |
 | `MINERU_OFFICE_INPUT_BYTES` | `33554432` | Office 辅助进程输入字节上限（子进程环境）。 |
 | `MINERU_OFFICE_OUTPUT_BYTES` | `67108864` | Office 辅助进程输出 PDF 字节上限。 |
 | `MINERU_OFFICE_STDERR_BYTES` | `4096` | Office 辅助进程 stderr 诊断上限。 |
@@ -238,7 +244,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_OFFICE_JOB_MEMORY_BYTES` | `1073741824` | Office 辅助进程 Windows 作业内存上限。 |
 | `MINERU_OFFICE_PROCESS_TIME_SECONDS` | `120` | Office 辅助进程 Windows 单进程用户时间。 |
 | `MINERU_OFFICE_JOB_TIME_SECONDS` | `120` | Office 辅助进程 Windows 作业用户时间。 |
-| `MINERU_OOXML_ARCHIVE_BYTES` | `536870912` | OOXML 预检归档字节上限。 |
+| `MINERU_OOXML_ARCHIVE_BYTES` | `1073741824` | OOXML 预检归档字节上限。 |
 | `MINERU_OOXML_EXPANDED_BYTES` | `268435456` | OOXML 预检解压字节上限。 |
 | `MINERU_OOXML_XML_ENTRY_BYTES` | `8388608` | OOXML 单个 XML 条目字节上限。 |
 | `MINERU_OOXML_XML_TOTAL_BYTES` | `33554432` | OOXML XML 合计字节上限。 |
@@ -247,18 +253,21 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_OOXML_XML_EVENTS` | `100000` | OOXML XML 事件数上限。 |
 | `MINERU_OOXML_XML_ATTRIBUTES` | `256` | OOXML 单元素属性数上限。 |
 | `MINERU_OOXML_XML_NAMESPACES` | `256` | OOXML 单元素命名空间数上限。 |
+| `MINERU_ARCHIVE_MAX_ENTRIES` | `100000` | 归档最大条目数（ZIP 扫描）。 |
+| `MINERU_ARCHIVE_MAX_RATIO` | `1000` | 归档条目压缩比上限。 |
+| `MINERU_ZIP_SCAN_CENTRAL_CAP` | `67108864` | ZIP 中央目录扫描字节上限（64 MiB）。 |
+| `MINERU_ZIP_SCAN_NAME_CAP` | `4096` | ZIP 单条目名长度上限（字节）。 |
+| `MINERU_ZIP_SCAN_DEPTH_CAP` | `64` | ZIP 条目路径深度上限。 |
+| `MINERU_ZIP_SCAN_TOTAL_NAME_CAP` | `33554432` | ZIP 条目名合计字节上限（32 MiB）。 |
+| `MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP` | `1000000` | ZIP 路径组件合计上限。 |
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
-| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | 官方直接路由页并发；整数范围 1 到 8（`2` 为低内存回退值）。 |
+| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | 官方页准入并发（任意正整数）。 |
 | `MINERU_PDF_RENDER_THREADS` | `3` | 渲染 worker 数。 |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
 | `MINERU_FORMULA_ENABLE` | 开启 | 公式识别默认值（严格 `true`/`false`，不区分大小写）。 |
 | `MINERU_TABLE_ENABLE` | 开启 | 表格识别默认值（严格 `true`/`false`）。 |
 | `MINERU_IMAGE_ANALYSIS_ENABLE` | 开启 | 图像分析默认值（严格 `true`/`false`）。 |
 | `MINERU_LOG_LEVEL` | `info` | 日志级别；`critical` 静默进度输出。 |
-| `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
-| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | 官方页准入并发（任意正整数）。 |
-| `MINERU_PDF_RENDER_THREADS` | `3` | 渲染 worker 数。 |
-| `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
 | `MINERU_BATCH_SIZE` | `32` | 每页语义推理请求准入。 |
 | `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | 单文档总 deadline。 |
 | `MINERU_MAX_PDF_BYTES` | `1073741824` | 常驻源 PDF 上限。 |
@@ -285,12 +294,19 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` | `64` | 每请求图像数上限。 |
 | `MINERU_VLM_MAX_REDIRECTS` | `3` | 重定向上限。 |
 | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP 响应上限。 |
+| `MINERU_VLM_TEXT_BEFORE_IMAGE` | 关闭 | 请求中文本置于图像之前。 |
+| `MINERU_VLM_ALLOW_TRUNCATED_CONTENT` | 关闭 | 允许截断的 VLM 响应内容。 |
+| `MINERU_VLM_ALLOW_REMOTE_IMAGES` | 关闭 | 允许按 URL 拉取远程图像。 |
+| `MINERU_VLM_ALLOW_PRIVATE_REMOTE_IMAGES` | 关闭 | 允许私有/回环地址的远程图像。 |
+| `MINERU_VLM_END_TOKEN` | `<|im_end|>` | VLM 响应的结束 token。 |
 | `MINERU_VL_DEBUG_ENABLE` | 关闭 | VLM 请求调试标记（严格 `true`/`false`）。 |
 | `MINERU_VL_SERVER` | 无 | VLM 服务基础 URL（如 `https://host/v1`）；`mineru` 直接模式与 `mineru-api` 必填。 |
 | `MINERU_VL_MODEL_NAME` | 无 | 模型 ID；`mineru` 直接模式与 `mineru-api` 必填。 |
 | `MINERU_VL_API_KEY` | 无 | VLM 服务的 Bearer 令牌。 |
 
-对规范 CLI，每个数值与布尔变量均为严格解析：布尔只接受不区分大小写的 `true`/`false`（`1`、`yes`、`on` 会报错，不再静默视为关闭）；数值的非法、非有限、不应为零却为零、溢出或平台不可表示的值会在任何网络/输出工作前失败，不再回落到默认值。（服务启动路径在服务车道落地前保留旧的回落行为；其并发配置对非正值仍然启动失败。）
+前缀说明：`MINERU_VL_*` 为遗留前缀（VLM 服务连接核心配置：服务地址、模型 ID、API 密钥），新的传输旋钮统一使用 `MINERU_VLM_*` 前缀。
+
+对规范 CLI，每个数值与布尔变量均为严格解析：布尔只接受不区分大小写的 `true`/`false`（`1`、`yes`、`on` 会报错，不再静默视为关闭）；数值的非法、非有限、不应为零却为零、溢出或平台不可表示的值会在任何网络/输出工作前失败，不再回落到默认值。（例外：仅 `MINERU_API_PUBLIC_BIND_EXPOSED` / `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` / `MINERU_API_SHUTDOWN_ON_STDIN_EOF` 三个服务端布尔仍接受 `1`/`true`/`yes`/`on`。）
 
 ### HTTP 接口
 
@@ -485,7 +501,7 @@ if (warnings.length) console.warn(warnings)
 - **上游锁定**：200 DPI、64 页窗口、3 个渲染 worker、VLM HTTP 最大并发 100、HTTP 请求超时 600 秒。
 - **Rust 防护**：10 秒连接超时、24 小时总超时，以及页数、PDF、资产、响应、渲染图像、像素、在途图像和版面块限制。
 
-10,000 页支持仅是高内存下的尽力而为：输入字节、最终页面结果和资产都会保留在内存中，并非无上限保证。库调用可调整公开的 `ClientConfig.limits`、`timeouts`、`request_concurrency` 和 `render_workers`，再调用 `validate()`（`ClientConfig::new` 也会验证）；应按可用 RAM 和服务端点容量配置。所有限制、并发和 worker 必须大于零；所有超时必须非零，且单请求超时不得超过总超时。
+10,000 页支持仅是高内存下的尽力而为：输入字节、最终页面结果和资产都会保留在内存中，并非无上限保证。通过环境变量（`MINERU_MAX_*`、`MINERU_VLM_*` 等）与 CLI 参数（`--page-concurrency`、`--render-workers`、`--total-deadline-seconds` 等）按可用 RAM 和服务端点容量配置。所有限制、并发和 worker 必须大于零；所有超时必须非零，且单请求超时不得超过总超时。
 
 ## 输入上限与放大配置
 
@@ -496,9 +512,9 @@ if (warnings.length) console.warn(warnings)
 | 本地驻留/解析上限 `max_pdf_bytes` | 1 GiB | `--max-pdf-bytes` | `MINERU_MAX_PDF_BYTES` | 文件读取与 PDF 本地解析（含办公室文档转换后 PDF） |
 | 输入传输上限 `max_input_bytes` | 4_293_918_719（≈4 GiB） | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | 输入摄取/传输 |
 | 输出上限 `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | 输出生成 |
-| OOXML 归档上限 | 512 MiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office 文档预检 |
+| OOXML 归档上限 | 1 GiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office 文档预检 |
 | Office 转换输入上限 | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | LibreOffice 转换 |
-| 服务器端文件上限（`--api-url` 模式） | 512 MiB | `--file-cap`（服务端 `mineru-api`） | `MINERU_API_FILE_CAP`（服务端） | 服务器上传 |
+| 服务器端文件上限（`--api-url` 模式） | 1 GiB | `--file-cap`（服务端 `mineru-api`） | `MINERU_API_FILE_CAP`（服务端） | 服务器上传 |
 
 ## 限制与排错
 

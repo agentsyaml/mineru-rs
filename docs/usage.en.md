@@ -225,11 +225,17 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` | Off | Allow POST parsing requests when publicly bound. |
 | `MINERU_API_SHUTDOWN_ON_STDIN_EOF` | Off | Equivalent to `--shutdown-on-stdin-eof`. |
 | `MINERU_API_RECORD_CAP` | `32` | Max concurrent task records. |
-| `MINERU_API_FILE_CAP` | `536870912` | Per-upload file byte cap. |
-| `MINERU_API_BODY_CAP` | `537001984` | Multipart request body byte cap. |
+| `MINERU_API_FILE_CAP` | `1073741824` | Per-upload file byte cap. |
+| `MINERU_API_BODY_CAP` | `1074790400` | Multipart request body byte cap. |
 | `MINERU_API_TEXT_CAP` | `65536` | Per-form text field byte cap. |
 | `MINERU_API_TEXT_TOTAL_CAP` | `262144` | Aggregate form text byte cap. |
 | `MINERU_API_FORM_FIELDS_CAP` | `32` | Max multipart form fields. |
+| `MINERU_TASK_RESULT_TIMEOUT_SECONDS` | `3600` | `mineru --api-url` client: task-result timeout in seconds. |
+| `MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS` | `600` | Client: result-download timeout in seconds. |
+| `MINERU_API_CONNECT_TIMEOUT_SECONDS` | `10` | Client: API connect timeout in seconds. |
+| `MINERU_API_ACQUISITION_TIMEOUT_SECONDS` | `60` | Client: task submission/status-acquisition timeout in seconds. |
+| `MINERU_API_SEND_TIMEOUT_SECONDS` | `300` | Client: upload timeout in seconds. |
+| `MINERU_API_POLL_INTERVAL_SECONDS` | `1` | Client: polling interval in seconds. |
 | `MINERU_OFFICE_INPUT_BYTES` | `33554432` | Office helper input byte cap (child-environment). |
 | `MINERU_OFFICE_OUTPUT_BYTES` | `67108864` | Office helper output PDF byte cap. |
 | `MINERU_OFFICE_STDERR_BYTES` | `4096` | Office helper stderr diagnostic cap. |
@@ -242,7 +248,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_OFFICE_JOB_MEMORY_BYTES` | `1073741824` | Office helper Windows job memory limit. |
 | `MINERU_OFFICE_PROCESS_TIME_SECONDS` | `120` | Office helper Windows per-process user time. |
 | `MINERU_OFFICE_JOB_TIME_SECONDS` | `120` | Office helper Windows per-job user time. |
-| `MINERU_OOXML_ARCHIVE_BYTES` | `536870912` | OOXML preflight archive byte cap. |
+| `MINERU_OOXML_ARCHIVE_BYTES` | `1073741824` | OOXML preflight archive byte cap. |
 | `MINERU_OOXML_EXPANDED_BYTES` | `268435456` | OOXML preflight expanded byte cap. |
 | `MINERU_OOXML_XML_ENTRY_BYTES` | `8388608` | OOXML per-XML-entry byte cap. |
 | `MINERU_OOXML_XML_TOTAL_BYTES` | `33554432` | OOXML aggregate XML byte cap. |
@@ -251,6 +257,13 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_OOXML_XML_EVENTS` | `100000` | OOXML XML event cap. |
 | `MINERU_OOXML_XML_ATTRIBUTES` | `256` | OOXML per-element attribute cap. |
 | `MINERU_OOXML_XML_NAMESPACES` | `256` | OOXML per-element namespace cap. |
+| `MINERU_ARCHIVE_MAX_ENTRIES` | `100000` | Maximum archive entries (ZIP scan). |
+| `MINERU_ARCHIVE_MAX_RATIO` | `1000` | Archive entry compression-ratio cap. |
+| `MINERU_ZIP_SCAN_CENTRAL_CAP` | `67108864` | ZIP central-directory scan byte cap (64 MiB). |
+| `MINERU_ZIP_SCAN_NAME_CAP` | `4096` | ZIP per-entry name length cap (bytes). |
+| `MINERU_ZIP_SCAN_DEPTH_CAP` | `64` | ZIP entry path depth cap. |
+| `MINERU_ZIP_SCAN_TOTAL_NAME_CAP` | `33554432` | ZIP aggregate entry-name byte cap (32 MiB). |
+| `MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP` | `1000000` | ZIP aggregate path-component cap. |
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | Official direct-route page concurrency; any positive value. |
 | `MINERU_PDF_RENDER_THREADS` | `3` | Number of rendering workers. |
@@ -259,10 +272,6 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_TABLE_ENABLE` | On | Default for table recognition (strict `true`/`false`). |
 | `MINERU_IMAGE_ANALYSIS_ENABLE` | On | Default for image analysis (strict `true`/`false`). |
 | `MINERU_LOG_LEVEL` | `info` | Log verbosity; `critical` silences progress. |
-| `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
-| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | Official page admission concurrency (any positive value). |
-| `MINERU_PDF_RENDER_THREADS` | `3` | Rendering workers. |
-| `MINERU_PDF_RENDER_TIMEOUT` | `300` | Per-render timeout in seconds. |
 | `MINERU_BATCH_SIZE` | `32` | Per-page semantic inference request admission. |
 | `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | Per-document total deadline. |
 | `MINERU_MAX_PDF_BYTES` | `1073741824` | Resident source-PDF cap. |
@@ -289,12 +298,21 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` | `64` | Images per request cap. |
 | `MINERU_VLM_MAX_REDIRECTS` | `3` | Redirect cap. |
 | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP response cap. |
+| `MINERU_VLM_TEXT_BEFORE_IMAGE` | Off | Place text before the image in the request. |
+| `MINERU_VLM_ALLOW_TRUNCATED_CONTENT` | Off | Accept truncated VLM response content. |
+| `MINERU_VLM_ALLOW_REMOTE_IMAGES` | Off | Allow fetching images by remote URL. |
+| `MINERU_VLM_ALLOW_PRIVATE_REMOTE_IMAGES` | Off | Allow remote images from private/loopback URLs. |
+| `MINERU_VLM_END_TOKEN` | `<|im_end|>` | End token for VLM responses. |
 | `MINERU_VL_DEBUG_ENABLE` | Off | VLM request debug flag (strict `true`/`false`). |
 | `MINERU_VL_SERVER` | None | VLM service base URL (for example, `https://host/v1`); required by `mineru` direct mode and `mineru-api`. |
 | `MINERU_VL_MODEL_NAME` | None | Model ID; required by `mineru` direct mode and `mineru-api`. |
 | `MINERU_VL_API_KEY` | None | Bearer token for the VLM service. |
 
-For the canonical CLI, every numeric and boolean variable is strict: booleans accept only case-insensitive `true`/`false` (`1`, `yes`, `on` now fail instead of silently meaning off); malformed, non-finite, zero-where-invalid, overflowing, or unrepresentable numeric values fail before any network or output work rather than falling back. (The service startup keeps its legacy fallbacks until the service lane lands; its concurrency setting still fails on non-positive values.)
+Prefix note: `MINERU_VL_*` is the legacy prefix (core VLM service-connection
+settings such as the server URL, model ID, and API key); new transport knobs
+uniformly use the `MINERU_VLM_*` prefix.
+
+For the canonical CLI, every numeric and boolean variable is strict: booleans accept only case-insensitive `true`/`false` (`1`, `yes`, `on` now fail instead of silently meaning off); malformed, non-finite, zero-where-invalid, overflowing, or unrepresentable numeric values fail before any network or output work rather than falling back. (Exception: only the three server booleans `MINERU_API_PUBLIC_BIND_EXPOSED` / `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` / `MINERU_API_SHUTDOWN_ON_STDIN_EOF` still accept `1`/`true`/`yes`/`on`.)
 
 ### HTTP interface
 
@@ -504,7 +522,7 @@ These are disk/document totals, not resident allocations: parsed PDFs and the cu
 - **Upstream-locked**: 200 DPI, 64-page window, 3 rendering workers, VLM HTTP maximum concurrency 100, HTTP request timeout 600 seconds.
 - **Rust safeguards**: 10-second connection timeout, 24-hour total timeout, and limits for page count, PDF, assets, responses, rendered images, pixels, in-flight images, and layout blocks.
 
-Support for 10,000 pages is only best effort with high memory: input bytes, final page results, and assets are all retained in memory; it is not an unbounded guarantee. Library callers can adjust the public `ClientConfig.limits`, `timeouts`, `request_concurrency`, and `render_workers`, then call `validate()` (`ClientConfig::new` also validates); configure them for available RAM and service-endpoint capacity. All limits, concurrency values, and worker counts must be greater than zero; all timeouts must be nonzero, and the per-request timeout must not exceed the total timeout.
+Support for 10,000 pages is only best effort with high memory: input bytes, final page results, and assets are all retained in memory; it is not an unbounded guarantee. Configure the CLI for available RAM and service-endpoint capacity via environment variables (`MINERU_MAX_*`, `MINERU_VLM_*`, and so on) and command-line options such as `--page-concurrency`, `--render-workers`, and `--total-deadline-seconds`. All limits, concurrency values, and worker counts must be greater than zero; all timeouts must be nonzero, and the per-request timeout must not exceed the total timeout.
 
 ## Input limits and how to raise them
 
@@ -515,9 +533,9 @@ The pipeline enforces size limits at several independent stages. When a limit is
 | Resident source-PDF cap `max_pdf_bytes` | 1 GiB | `--max-pdf-bytes` | `MINERU_MAX_PDF_BYTES` | File read and local PDF parsing (including PDFs produced by Office conversion) |
 | Input transfer cap `max_input_bytes` | 4_293_918_719 (≈4 GiB) | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | Input ingestion / transfer |
 | Output cap `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | Output generation |
-| OOXML archive cap | 512 MiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office document preflight |
+| OOXML archive cap | 1 GiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office document preflight |
 | Office conversion input cap | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | LibreOffice conversion |
-| Server-side file cap (with `--api-url`) | 512 MiB | `--file-cap` (server: `mineru-api`) | `MINERU_API_FILE_CAP` (server) | Upload at the server |
+| Server-side file cap (with `--api-url`) | 1 GiB | `--file-cap` (server: `mineru-api`) | `MINERU_API_FILE_CAP` (server) | Upload at the server |
 
 ## Limitations and troubleshooting
 

@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::{future::Future, path::Path, time::Duration};
 use tokio::io::AsyncReadExt;
 
-const BODY_CAP: usize = 64 * 1024;
+const DIAG_BODY_CAP: usize = 64 * 1024;
 
 async fn whole_operation_timeout<T>(
     duration: Duration,
@@ -201,7 +201,7 @@ impl MineruApiClient {
             let value = serde_json::from_slice(&body).map_err(|_| {
                 format!(
                     "invalid JSON payload: {}",
-                    sanitize_vlm_error_bytes(&body, BODY_CAP)
+                    sanitize_vlm_error_bytes(&body, DIAG_BODY_CAP)
                 )
             })?;
             canonicalize_submit_response(&self.origin, submit_response(&value)?)
@@ -297,7 +297,7 @@ impl MineruApiClient {
         serde_json::from_slice(&body).map_err(|_| {
             format!(
                 "invalid JSON payload: {}",
-                sanitize_vlm_error_bytes(&body, BODY_CAP)
+                sanitize_vlm_error_bytes(&body, DIAG_BODY_CAP)
             )
         })
     }
@@ -306,7 +306,7 @@ impl MineruApiClient {
         match self.body(response).await {
             Ok(body) => format!(
                 "{context} HTTP {status}: {}",
-                sanitize_vlm_error_bytes(&body, BODY_CAP)
+                sanitize_vlm_error_bytes(&body, DIAG_BODY_CAP)
             ),
             Err(_) => format!("{context} HTTP {status}"),
         }
@@ -316,7 +316,7 @@ impl MineruApiClient {
         let mut body = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| "response body failed".to_string())?;
-            if checked_body_len(body.len(), chunk.len())? > BODY_CAP {
+            if checked_body_len(body.len(), chunk.len())? > DIAG_BODY_CAP {
                 return Err("response body exceeds limit".into());
             }
             body.extend_from_slice(&chunk);
@@ -507,7 +507,7 @@ fn same_origin(base: &url::Url, url: &url::Url) -> bool {
 }
 
 fn safe_json(value: &Value) -> String {
-    sanitize_vlm_error_bytes(value.to_string().as_bytes(), BODY_CAP)
+    sanitize_vlm_error_bytes(value.to_string().as_bytes(), DIAG_BODY_CAP)
 }
 fn submit_response(value: &Value) -> Result<SubmitResponse, String> {
     let string = |name: &str| {
@@ -701,7 +701,7 @@ mod tests {
             .health()
             .await
             .unwrap_err();
-        assert!(error.len() <= BODY_CAP + 64 && !error.contains("secret"));
+        assert!(error.len() <= DIAG_BODY_CAP + 64 && !error.contains("secret"));
     }
     #[test]
     fn submission_and_mime_normalization_are_exact() {
@@ -1173,7 +1173,7 @@ mod tests {
     }
     #[tokio::test]
     async fn submit_rejects_oversized_response_body() {
-        let body = "x".repeat(BODY_CAP + 1);
+        let body = "x".repeat(DIAG_BODY_CAP + 1);
         let base = server(Router::new().route(
             "/tasks",
             post(move || {
@@ -1636,7 +1636,10 @@ mod tests {
     }
     #[tokio::test]
     async fn health_rejects_malformed_oversized_and_sanitized_bodies_and_times_out() {
-        for body in ["token=secret not-json".to_owned(), "x".repeat(BODY_CAP + 1)] {
+        for body in [
+            "token=secret not-json".to_owned(),
+            "x".repeat(DIAG_BODY_CAP + 1),
+        ] {
             let base = server(Router::new().route(
                 "/health",
                 get(move || {
@@ -1702,7 +1705,7 @@ mod tests {
                 .unwrap_err();
             assert!(!error.contains("secret"), "{error}");
         }
-        let body = "x".repeat(BODY_CAP + 1);
+        let body = "x".repeat(DIAG_BODY_CAP + 1);
         let base = server(Router::new().route(
             "/status",
             get(move || {
@@ -2068,7 +2071,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_rejects_bad_status_and_content_type() {
-        let secret = format!("token=secret{}", "x".repeat(BODY_CAP));
+        let secret = format!("token=secret{}", "x".repeat(DIAG_BODY_CAP));
         let base = server(
             Router::new()
                 .route(
@@ -2091,7 +2094,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.len() <= BODY_CAP + 64 && !error.contains("secret"));
+        assert!(error.len() <= DIAG_BODY_CAP + 64 && !error.contains("secret"));
         assert!(
             client
                 .download_result_zip(
@@ -2293,7 +2296,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("result download body failed") && !error.contains("HTTP 500"));
-        assert!(error.len() <= BODY_CAP + 96);
+        assert!(error.len() <= DIAG_BODY_CAP + 96);
         assert!(!error.contains("secret") && !error.contains('\n') && !error.contains('\u{1b}'));
     }
 
@@ -2342,7 +2345,7 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert!(error.len() <= BODY_CAP + 96, "{error}");
+            assert!(error.len() <= DIAG_BODY_CAP + 96, "{error}");
             assert!(
                 !error.contains("secret") && !error.contains('\n') && !error.contains('\u{1b}')
             );

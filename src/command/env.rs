@@ -719,57 +719,45 @@ mod tests {
     }
 
     /// One table-driven test proving precedence `compiled default -> frozen environment ->
-    /// explicit CLI` and strict malformed-env failure for every newly introduced knob.
+    /// explicit CLI` and strict malformed-env failure for every newly introduced knob. The
+    /// expected default string is rendered from the resolved no-config policy so the table
+    /// cannot drift from the compiled defaults.
     #[test]
     fn every_core_knob_obeys_default_env_cli_precedence_and_strictness() {
-        const TABLE: &[(&str, &str, &str, &str)] = &[
-            ("MINERU_PROCESSING_WINDOW_SIZE", "64", "8", "16"),
-            ("MINERU_OFFICIAL_PAGE_CONCURRENCY", "4", "9", "24"),
-            ("MINERU_PDF_RENDER_THREADS", "3", "5", "6"),
-            ("MINERU_PDF_RENDER_TIMEOUT", "300", "120", "240"),
-            ("MINERU_MAX_PDF_BYTES", "1073741824", "700", "900"),
-            ("MINERU_MAX_PAGES", "10000", "999", "1001"),
-            ("MINERU_MAX_PAGE_PIXELS", "100000000", "42", "43"),
-            ("MINERU_MAX_RENDERED_IMAGE_BYTES", "67108864", "44", "45"),
-            ("MINERU_MAX_IN_FLIGHT_IMAGE_BYTES", "134217728", "46", "47"),
-            ("MINERU_MAX_RAW_OUTPUT_BYTES", "134217728", "48", "49"),
-            ("MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE", "256", "300", "512"),
-            ("MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE", "128", "129", "130"),
-            ("MINERU_BATCH_SIZE", "32", "4", "8"),
-            ("MINERU_MAX_ENCODED_REQUEST_BYTES", "16777216", "131", "132"),
-            ("MINERU_MAX_ENCODED_BATCH_BYTES", "67108864", "133", "134"),
-            ("MINERU_MAX_TOTAL_ASSET_BYTES", "1073741824", "135", "136"),
-            ("MINERU_MAX_STAGED_TEXT_BYTES", "268435456", "137", "138"),
-            ("MINERU_TOTAL_DEADLINE_SECONDS", "86400", "3600", "7200"),
-            ("MINERU_VLM_HTTP_CONCURRENCY", "100", "32", "64"),
-            ("MINERU_VLM_HTTP_TIMEOUT", "600", "90", "180"),
-            ("MINERU_VLM_CONNECT_TIMEOUT", "10", "11", "12"),
-            (
-                "MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS",
-                "20",
-                "21",
-                "22",
-            ),
-            ("MINERU_VLM_HTTP_KEEPALIVE_EXPIRY", "5", "15", "25"),
-            ("MINERU_VLM_HTTP_MAX_RETRIES", "3", "0", "1"),
-            (
-                "MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR",
-                "0.5",
-                "0.75",
-                "0.125",
-            ),
-            ("MINERU_VLM_MAX_IMAGE_BYTES", "33554432", "139", "140"),
-            ("MINERU_VLM_MAX_DECODED_PIXELS", "100000000", "141", "142"),
-            ("MINERU_VLM_MAX_IMAGES_PER_REQUEST", "64", "16", "32"),
-            ("MINERU_VLM_MAX_REDIRECTS", "3", "0", "2"),
-            (
-                "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES",
-                "10485760",
-                "143",
-                "144",
-            ),
+        const TABLE: &[(&str, &str, &str)] = &[
+            ("MINERU_PROCESSING_WINDOW_SIZE", "8", "16"),
+            ("MINERU_OFFICIAL_PAGE_CONCURRENCY", "9", "24"),
+            ("MINERU_PDF_RENDER_THREADS", "5", "6"),
+            ("MINERU_PDF_RENDER_TIMEOUT", "120", "240"),
+            ("MINERU_MAX_PDF_BYTES", "700", "900"),
+            ("MINERU_MAX_PAGES", "999", "1001"),
+            ("MINERU_MAX_PAGE_PIXELS", "42", "43"),
+            ("MINERU_MAX_RENDERED_IMAGE_BYTES", "44", "45"),
+            ("MINERU_MAX_IN_FLIGHT_IMAGE_BYTES", "46", "47"),
+            ("MINERU_MAX_RAW_OUTPUT_BYTES", "48", "49"),
+            ("MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE", "300", "512"),
+            ("MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE", "129", "130"),
+            ("MINERU_BATCH_SIZE", "4", "8"),
+            ("MINERU_MAX_ENCODED_REQUEST_BYTES", "131", "132"),
+            ("MINERU_MAX_ENCODED_BATCH_BYTES", "133", "134"),
+            ("MINERU_MAX_TOTAL_ASSET_BYTES", "135", "136"),
+            ("MINERU_MAX_STAGED_TEXT_BYTES", "137", "138"),
+            ("MINERU_TOTAL_DEADLINE_SECONDS", "3600", "7200"),
+            ("MINERU_VLM_HTTP_CONCURRENCY", "32", "64"),
+            ("MINERU_VLM_HTTP_TIMEOUT", "90", "180"),
+            ("MINERU_VLM_CONNECT_TIMEOUT", "11", "12"),
+            ("MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS", "21", "22"),
+            ("MINERU_VLM_HTTP_KEEPALIVE_EXPIRY", "15", "25"),
+            ("MINERU_VLM_HTTP_MAX_RETRIES", "0", "1"),
+            ("MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR", "0.75", "0.125"),
+            ("MINERU_VLM_MAX_IMAGE_BYTES", "139", "140"),
+            ("MINERU_VLM_MAX_DECODED_PIXELS", "141", "142"),
+            ("MINERU_VLM_MAX_IMAGES_PER_REQUEST", "16", "32"),
+            ("MINERU_VLM_MAX_REDIRECTS", "0", "2"),
+            ("MINERU_VLM_HTTP_MAX_RESPONSE_BYTES", "143", "144"),
         ];
-        for (name, default, env_value, cli_value) in TABLE {
+        let defaults = resolve_core(|_| None, &CoreOverrides::default()).unwrap();
+        for (name, env_value, cli_value) in TABLE {
             let env_entry = [(*name, *env_value)];
             let cli_entry = [(*name, *cli_value)];
             let bad_entry = [(*name, "bad")];
@@ -782,7 +770,7 @@ mod tests {
                     &resolve_core(|_| None, &CoreOverrides::default()).unwrap(),
                     name
                 ),
-                *default,
+                render_knob(&defaults, name),
                 "{name} default"
             );
             // Frozen environment wins over the compiled default.

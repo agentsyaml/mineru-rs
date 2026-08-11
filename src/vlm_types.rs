@@ -1,3 +1,4 @@
+use crate::document_limits::GIB;
 use crate::{NormalizedBbox, Rotation, SamplingParams, VlmError, VlmResult};
 use bytes::Bytes;
 use futures_core::Stream;
@@ -47,7 +48,7 @@ impl Default for OfficialPdfOptions {
             render_workers: 3,
             processing_window_size: 64,
             render_timeout: Duration::from_secs(300),
-            max_pdf_bytes: 1024 * 1024 * 1024,
+            max_pdf_bytes: GIB as usize,
             max_pages: 10_000,
             max_page_pixels: 100_000_000,
             max_rendered_image_bytes: 64 * 1024 * 1024,
@@ -59,7 +60,7 @@ impl Default for OfficialPdfOptions {
             max_encoded_request_bytes: 16 * 1024 * 1024,
             max_encoded_batch_bytes: 64 * 1024 * 1024,
             max_encoded_document_bytes: 256 * 1024 * 1024,
-            max_total_asset_bytes: 1024 * 1024 * 1024,
+            max_total_asset_bytes: GIB as usize,
             max_staged_text_bytes: 256 * 1024 * 1024,
             total_deadline: Duration::from_secs(24 * 60 * 60),
         }

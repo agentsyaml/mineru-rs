@@ -74,6 +74,28 @@ fn protocol(operation: &'static str, message: impl Into<String>) -> VlmError {
         message: message.into(),
     }
 }
+fn check_lengths(
+    images: usize,
+    others: usize,
+    operation: &'static str,
+    message: &str,
+) -> Result<(), VlmError> {
+    if images != others {
+        return Err(protocol(operation, message));
+    }
+    Ok(())
+}
+fn cap_warning(
+    resource: &str,
+    bytes: usize,
+    cap: usize,
+    cap_kind: &str,
+    continuation: &str,
+) -> String {
+    format!(
+        "encoded {resource} request bytes ({bytes}) exceed the {cap_kind} cap {cap}; continuing with {continuation}"
+    )
+}
 fn to_vlm(block: ContentBlock) -> VlmLayoutBlock {
     VlmLayoutBlock {
         block_type: block.kind.as_str().into(),
@@ -732,86 +754,6 @@ impl MinerUVlmPreprocessor {
         }
         Ok(native.into_iter().map(to_vlm).collect())
     }
-    pub fn batch_prepare_for_layout(
-        &self,
-        images: Vec<DynamicImage>,
-    ) -> VlmResult<Vec<VlmPreparedLayout>> {
-        images
-            .into_iter()
-            .map(|x| self.prepare_for_layout(x))
-            .collect()
-    }
-    pub fn batch_parse_layout_output(
-        &self,
-        outputs: Vec<String>,
-    ) -> VlmResult<Vec<Vec<VlmLayoutBlock>>> {
-        outputs
-            .iter()
-            .map(|x| self.parse_layout_output(x))
-            .collect()
-    }
-    pub fn batch_prepare_for_extract(
-        &self,
-        images: &[DynamicImage],
-        blocks: &mut [Vec<VlmLayoutBlock>],
-        prompts: &[String],
-        image_analysis: Option<bool>,
-    ) -> VlmResult<Vec<VlmPreparedExtraction>> {
-        if images.len() != blocks.len() {
-            return Err(protocol("extract", "image/layout length mismatch"));
-        }
-        images
-            .iter()
-            .zip(blocks)
-            .map(|(i, b)| self.prepare_for_extract(i, b, prompts, image_analysis))
-            .collect()
-    }
-    pub fn batch_post_process(
-        &self,
-        blocks: Vec<Vec<VlmLayoutBlock>>,
-    ) -> VlmResult<Vec<Vec<VlmLayoutBlock>>> {
-        blocks.into_iter().map(|b| self.post_process(b)).collect()
-    }
-    pub async fn aio_prepare_for_layout(
-        &self,
-        image: DynamicImage,
-    ) -> VlmResult<VlmPreparedLayout> {
-        let preprocessor = self.clone();
-        tokio::task::spawn_blocking(move || preprocessor.prepare_for_layout(image))
-            .await
-            .map_err(|_| VlmError::Transport {
-                operation: "image",
-                message: "image worker failed".into(),
-            })?
-    }
-    pub async fn aio_parse_layout_output(&self, output: String) -> VlmResult<Vec<VlmLayoutBlock>> {
-        self.parse_layout_output(&output)
-    }
-    pub async fn aio_prepare_for_extract(
-        &self,
-        image: DynamicImage,
-        mut blocks: Vec<VlmLayoutBlock>,
-        prompts: Vec<String>,
-        image_analysis: Option<bool>,
-    ) -> VlmResult<(Vec<VlmLayoutBlock>, VlmPreparedExtraction)> {
-        let preprocessor = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let prepared =
-                preprocessor.prepare_for_extract(&image, &mut blocks, &prompts, image_analysis)?;
-            Ok((blocks, prepared))
-        })
-        .await
-        .map_err(|_| VlmError::Transport {
-            operation: "image",
-            message: "image worker failed".into(),
-        })?
-    }
-    pub async fn aio_post_process(
-        &self,
-        blocks: Vec<VlmLayoutBlock>,
-    ) -> VlmResult<Vec<VlmLayoutBlock>> {
-        self.post_process(blocks)
-    }
 }
 
 // Finite compatibility default for the client-created official page semaphore. This is a
@@ -1035,13 +977,21 @@ impl MinerUVlmClient {
         // the whole document. The document-level encoded budget charge below stays a hard error.
         let mut skip_layout_request = false;
         if layout_bytes > max_encoded_request_bytes {
-            warnings.push(format!(
-                "encoded layout request bytes ({layout_bytes}) exceed the per-request cap {max_encoded_request_bytes}; continuing with an empty layout"
+            warnings.push(cap_warning(
+                "layout",
+                layout_bytes,
+                max_encoded_request_bytes,
+                "per-request",
+                "an empty layout",
             ));
             skip_layout_request = true;
         } else if layout_bytes > max_encoded_batch_bytes {
-            warnings.push(format!(
-                "encoded layout request bytes ({layout_bytes}) exceed the batch cap {max_encoded_batch_bytes}; continuing with an empty layout"
+            warnings.push(cap_warning(
+                "layout",
+                layout_bytes,
+                max_encoded_batch_bytes,
+                "batch",
+                "an empty layout",
             ));
             skip_layout_request = true;
         }
@@ -1234,8 +1184,12 @@ impl MinerUVlmClient {
                         // A single block that encodes over the per-request cap degrades to empty
                         // content for this block only; sibling blocks and the page continue
                         // (mirrors the Protocol arm below).
-                        warnings.push(format!(
-                            "encoded semantic request bytes ({bytes}) exceed the per-request cap {max_encoded_request_bytes}; continuing with empty content"
+                        warnings.push(cap_warning(
+                            "semantic",
+                            bytes,
+                            max_encoded_request_bytes,
+                            "per-request",
+                            "empty content",
                         ));
                         replies[order] = Some((block_index, String::new()));
                         encoder = None;
@@ -1251,8 +1205,12 @@ impl MinerUVlmClient {
                         },
                     )?;
                     if resident_after > max_encoded_batch_bytes {
-                        warnings.push(format!(
-                            "encoded semantic request bytes ({bytes}) exceed the batch cap {max_encoded_batch_bytes}; continuing with empty content"
+                        warnings.push(cap_warning(
+                            "semantic",
+                            bytes,
+                            max_encoded_batch_bytes,
+                            "batch",
+                            "empty content",
                         ));
                         replies[order] = Some((block_index, String::new()));
                         encoder = None;
@@ -1724,7 +1682,7 @@ impl MinerUVlmClient {
             });
         }
         Err(VlmError::InvalidImageInput(
-            "semantic operations require an image".into(),
+            "semantic operations require a local image".into(),
         ))
     }
     pub async fn layout_detect(
@@ -1787,7 +1745,7 @@ impl MinerUVlmClient {
             ));
         }
         let image = self.decode_local_image(i).await?.ok_or_else(|| {
-            VlmError::InvalidImageInput("semantic operations require an image".into())
+            VlmError::InvalidImageInput("semantic operations require a local image".into())
         })?;
         let mut blocks = vec![VlmLayoutBlock {
             block_type: prompt,
@@ -1864,9 +1822,12 @@ impl MinerUVlmClient {
         prompts: Vec<String>,
         p: VlmBatchPriority,
     ) -> VlmResult<Vec<Option<String>>> {
-        if images.len() != prompts.len() {
-            return Err(protocol("content", "image/prompt length mismatch"));
-        }
+        check_lengths(
+            images.len(),
+            prompts.len(),
+            "content",
+            "image/prompt length mismatch",
+        )?;
         let ps = priority_for(
             images.len(),
             p,
@@ -1901,9 +1862,7 @@ impl MinerUVlmClient {
         p: VlmBatchPriority,
         sem: VlmSemaphore,
     ) -> VlmResult<Vec<Option<String>>> {
-        if i.len() != q.len() {
-            return Err(protocol("content", "image/prompt length mismatch"));
-        }
+        check_lengths(i.len(), q.len(), "content", "image/prompt length mismatch")?;
         let sem = sem.or_else(|| self.default_batch_semaphore());
         let ps = priority_for(i.len(), p, self.preprocessor.config.incremental_priority)?;
         try_join_all(
@@ -2037,18 +1996,6 @@ impl MinerUVlmClient {
         self.concurrent_two_step_extract(images, p, q, image_analysis)
             .await
     }
-    pub async fn aio_batch_two_step_extract(
-        &self,
-        i: Vec<VlmImageInput>,
-        p: VlmBatchPriority,
-        q: Vec<String>,
-        sem: VlmSemaphore,
-        image_analysis: Option<bool>,
-    ) -> VlmResult<Vec<VlmExtractResult>> {
-        let sem = sem.or_else(|| self.default_batch_semaphore());
-        self.aio_concurrent_two_step_extract(i, p, q, sem, image_analysis)
-            .await
-    }
     pub async fn extract_with_layout(
         &self,
         i: VlmImageInput,
@@ -2113,7 +2060,7 @@ impl MinerUVlmClient {
                 self.admit_semantic_image(image).await?
             };
             let image = self.decode_admitted_image(image).await?.ok_or_else(|| {
-                VlmError::InvalidImageInput("semantic operations require an image".into())
+                VlmError::InvalidImageInput("semantic operations require a local image".into())
             })?;
             let preprocessor = self.preprocessor.clone();
             let page_blocks = std::mem::take(blocks);
@@ -2180,9 +2127,12 @@ impl MinerUVlmClient {
         q: Vec<String>,
         image_analysis: Option<bool>,
     ) -> VlmResult<Vec<VlmExtractResult>> {
-        if images.len() != blocks.len() {
-            return Err(protocol("extract", "image/layout length mismatch"));
-        }
+        check_lengths(
+            images.len(),
+            blocks.len(),
+            "extract",
+            "image/layout length mismatch",
+        )?;
         let ps = priority_for(
             images.len(),
             p,
@@ -2217,24 +2167,6 @@ impl MinerUVlmClient {
             sem.or_else(|| self.default_batch_semaphore()),
         )
         .await
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub async fn aio_batch_extract_with_layout(
-        &self,
-        i: Vec<VlmImageInput>,
-        b: Vec<Vec<VlmLayoutBlock>>,
-        p: VlmBatchPriority,
-        sem: VlmSemaphore,
-        q: Vec<String>,
-        image_analysis: Option<bool>,
-    ) -> VlmResult<Vec<VlmExtractResult>> {
-        if i.len() != b.len() {
-            return Err(protocol("extract", "image/layout length mismatch"));
-        }
-        let sem = sem.or_else(|| self.default_batch_semaphore());
-        let ps = priority_for(i.len(), p, self.preprocessor.config.incremental_priority)?;
-        self.batch_extract_flat(i, b, ps, &q, image_analysis, sem)
-            .await
     }
 }
 

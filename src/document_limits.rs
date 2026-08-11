@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 
-const MIB: u64 = 1024 * 1024;
-const GIB: u64 = 1024 * MIB;
+pub(crate) const MIB: u64 = 1024 * 1024;
+pub(crate) const GIB: u64 = 1024 * MIB;
 pub const DEFAULT_MAX_INPUT_BYTES: u64 = 4_293_918_719;
 pub const DEFAULT_MAX_ENCODED_DOCUMENT_BYTES: u64 = 8 * GIB;
 pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 8 * GIB;

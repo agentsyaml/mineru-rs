@@ -196,9 +196,6 @@ impl VlmHttpClient {
             operation: "official PDF",
         })?
     }
-    pub async fn aio_predict(&self, request: VlmRequest) -> VlmResult<String> {
-        self.predict(request).await
-    }
     pub async fn batch_predict(&self, requests: Vec<VlmRequest>) -> VlmResult<Vec<String>> {
         self.aio_batch_predict(requests, None).await
     }
@@ -246,12 +243,6 @@ impl VlmHttpClient {
             }
         });
         Ok(s)
-    }
-    pub fn stream_test(&self, request: VlmRequest) -> VlmResult<()> {
-        for x in self.stream_predict(request)? {
-            x?;
-        }
-        Ok(())
     }
     pub async fn aio_batch_predict_as_iter(
         &self,
@@ -719,12 +710,22 @@ fn completion_text(
     if response.get("error").is_some()
         || response.get("object").and_then(Value::as_str) == Some("error")
     {
+        let server_message = response
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("no error message");
         if degrade {
-            warnings.push("VLM returned an error object in a successful chat response".into());
+            warnings.push(format!(
+                "VLM returned an error object in a successful chat response: {server_message}"
+            ));
             return Ok(String::new());
         }
         return Err(protocol("chat", "error object in successful response"));
     }
+    // Number of tokens the model generated (from the response `usage` block),
+    // surfaced in warnings when a reply is malformed or truncated.
+    let generated_tokens = completion_tokens(&response);
     let Some(choice) = response
         .get_mut("choices")
         .and_then(Value::as_array_mut)
@@ -741,14 +742,20 @@ fn completion_text(
         Some(finish) if finish == "length" && allow_truncated_content => {}
         Some(finish) => {
             if degrade {
-                warnings.push(format!("VLM chat finish reason is unexpected: {finish}"));
+                warnings.push(format!(
+                    "VLM chat finish reason is unexpected: {finish} (generated {generated_tokens} tokens); \
+                     a length-limited reply is truncated: raise the server max_tokens or check the model for repetitive output"
+                ));
             } else {
                 return Err(protocol("chat", "unexpected finish reason"));
             }
         }
         None => {
             if degrade {
-                warnings.push("VLM chat response is missing finish_reason".into());
+                warnings.push(format!(
+                    "VLM chat response is missing finish_reason (generated {generated_tokens} tokens); \
+                     the server did not return a standard OpenAI chat completion"
+                ));
             } else {
                 return Err(protocol("chat", "missing finish reason"));
             }
@@ -759,7 +766,9 @@ fn completion_text(
         .and_then(|message| message.get_mut("content"))
     else {
         if degrade {
-            warnings.push("VLM chat response has no content".into());
+            warnings.push(format!(
+                "VLM chat response has no content (generated {generated_tokens} tokens)"
+            ));
             return Ok(String::new());
         }
         return Err(protocol("chat", "missing string content"));
@@ -768,19 +777,32 @@ fn completion_text(
         Value::String(text) => Ok(strip_end(text, end_token)),
         Value::Null => {
             if degrade {
-                warnings.push("VLM chat response content is empty".into());
+                warnings.push(format!(
+                    "VLM chat response content is empty (generated {generated_tokens} tokens)"
+                ));
             }
             Ok(String::new())
         }
         _ => {
             if degrade {
-                warnings.push("VLM chat response content is not a string".into());
+                warnings.push(format!(
+                    "VLM chat response content is not a string (generated {generated_tokens} tokens)"
+                ));
                 Ok(String::new())
             } else {
                 Err(protocol("chat", "missing string content"))
             }
         }
     }
+}
+/// Extracts the number of generated tokens from an OpenAI chat completion
+/// response's `usage` block, for surfacing in truncation warnings.
+fn completion_tokens(response: &Value) -> u64 {
+    response
+        .get("usage")
+        .and_then(|usage| usage.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
 }
 fn strip_end(mut text: String, token: &str) -> String {
     if !token.is_empty() && text.ends_with(token) {
@@ -1377,21 +1399,26 @@ mod tests {
             let text = completion_text(value, allow, "", &mut warnings, true).unwrap();
             (text, warnings)
         };
-        // Error object: empty content, warning, no leak of crafted choices.
-        let (out, warnings) = text(serde_json::json!({"error": "boom"}), false);
+        // Error object: empty content, warning with the server message, no leak of crafted choices.
+        let (out, warnings) = text(
+            serde_json::json!({"error": {"message": "model overloaded"}}),
+            false,
+        );
         assert_eq!(out, "");
         assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("model overloaded"));
         // Missing choices.
         let (out, warnings) = text(serde_json::json!({"choices": []}), false);
         assert_eq!(out, "");
         assert!(warnings[0].contains("missing choices"));
-        // Missing finish_reason keeps available content plus a warning.
+        // Missing finish_reason keeps available content plus a warning with the token count.
         let (out, warnings) = text(
-            serde_json::json!({"choices": [{"message": {"content": "x"}}]}),
+            serde_json::json!({"choices": [{"message": {"content": "x"}}], "usage": {"completion_tokens": 7}}),
             false,
         );
         assert_eq!(out, "x");
         assert!(warnings[0].contains("finish_reason"));
+        assert!(warnings[0].contains("7"), "{}", warnings[0]);
         // Unexpected finish reason keeps the available (truncated) content.
         let (out, warnings) = text(
             serde_json::json!({"choices": [{"finish_reason": "content_filter", "message": {"content": "partial"}}]}),
@@ -1399,13 +1426,16 @@ mod tests {
         );
         assert_eq!(out, "partial");
         assert!(warnings[0].contains("content_filter"));
-        // length without allow_truncated_content keeps the truncated content with a warning...
+        // length without allow_truncated_content keeps the truncated content with a warning
+        // naming the token count and the remedy...
         let (out, warnings) = text(
-            serde_json::json!({"choices": [{"finish_reason": "length", "message": {"content": "cut"}}]}),
+            serde_json::json!({"choices": [{"finish_reason": "length", "message": {"content": "cut"}}], "usage": {"completion_tokens": 1234}}),
             false,
         );
         assert_eq!(out, "cut");
         assert!(warnings[0].contains("length"));
+        assert!(warnings[0].contains("1234"), "{}", warnings[0]);
+        assert!(warnings[0].contains("max_tokens"), "{}", warnings[0]);
         // ...whereas the allowed length+allow_truncated_content case stays warning-free.
         let mut warnings = Vec::new();
         assert_eq!(

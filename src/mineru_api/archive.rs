@@ -24,7 +24,7 @@ use zip::{
 
 use super::zip_scan::{ScanLimits, scan};
 
-const BODY_CAP: usize = 64 * 1024;
+const DIAG_BODY_CAP: usize = 64 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1021,7 +1021,7 @@ pub(super) async fn download(
     let limits = limits.validate()?;
     let task = sanitize_vlm_error_bytes(
         serde_json::to_string(task).unwrap_or_default().as_bytes(),
-        BODY_CAP,
+        DIAG_BODY_CAP,
     );
     let response = tokio::time::timeout(timeout, client.get(result_url).send())
         .await
@@ -1092,12 +1092,12 @@ async fn http_error(task: &str, response: Response, timeout: Duration) -> String
             Ok(chunk) => chunk,
             Err(_) => return format!("{task} result download body failed"),
         };
-        let remain = BODY_CAP.saturating_sub(body.len());
+        let remain = DIAG_BODY_CAP.saturating_sub(body.len());
         body.extend_from_slice(&chunk[..chunk.len().min(remain)]);
     }
     format!(
         "{task} result download HTTP {status}: {}",
-        sanitize_vlm_error_bytes(&body, BODY_CAP)
+        sanitize_vlm_error_bytes(&body, DIAG_BODY_CAP)
     )
 }
 

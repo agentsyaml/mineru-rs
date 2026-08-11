@@ -250,9 +250,9 @@ flow.
 | 本地驻留/解析上限 `max_pdf_bytes` | 1 GiB | `--max-pdf-bytes` | `MINERU_MAX_PDF_BYTES` | 文件读取与 PDF 本地解析（含办公室文档转换后 PDF） |
 | 输入传输上限 `max_input_bytes` | 4_293_918_719（≈4 GiB） | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | 输入摄取/传输 |
 | 输出上限 `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | 输出生成 |
-| OOXML 归档上限 | 512 MiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office 文档预检 |
+| OOXML 归档上限 | 1 GiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office 文档预检 |
 | Office 转换输入上限 | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | LibreOffice 转换 |
-| 服务器端文件上限（`--api-url` 模式） | 512 MiB | `--file-cap`（服务端 `mineru-api`） | `MINERU_API_FILE_CAP`（服务端） | 服务器上传 |
+| 服务器端文件上限（`--api-url` 模式） | 1 GiB | `--file-cap`（服务端 `mineru-api`） | `MINERU_API_FILE_CAP`（服务端） | 服务器上传 |
 
 Each limit can be raised independently via its flag or environment variable; see the [Chinese usage guide](docs/usage.md) or [English usage guide](docs/usage.en.md) for the full option tables.
 

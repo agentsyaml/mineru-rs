@@ -30,7 +30,7 @@ mod vlm_types;
 pub mod vlm_api;
 
 pub use command::{RunContext, RunError, RunOptions, RunReport, run, run_with_context};
-pub use config::{BearerToken, ClientConfig, Limits, Timeouts};
+pub use config::Limits;
 #[doc(hidden)]
 pub use document_limits::{DocumentLimitOverrides, DocumentLimitPolicy};
 pub use error::{Error, ErrorContext, Result, VlmError, VlmResult};

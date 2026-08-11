@@ -11,12 +11,10 @@
 //! structure, 255-byte components, process-reap mechanics) are not exposed here.
 
 use super::env::{positive_seconds, positive_u32, positive_u64, positive_usize, strict_bool};
+use crate::document_limits::{GIB, MIB};
 use crate::mineru_api::archive::ArchiveLimits;
 use crate::mineru_api::zip_scan::ScanLimits;
 use std::{ffi::OsString, time::Duration};
-
-const MIB: u64 = 1024 * 1024;
-const GIB: u64 = 1024 * MIB;
 
 // ---------------------------------------------------------------------------
 // Environment spellings (the parent->helper child contract uses the office names).
@@ -176,7 +174,7 @@ pub struct OoxmlLimits {
 impl OoxmlLimits {
     pub fn default_resolved() -> Self {
         Self {
-            archive_bytes: 512 * MIB,
+            archive_bytes: GIB,
             expanded_bytes: 256 * MIB,
             xml_entry_bytes: 8 * MIB,
             xml_total_bytes: 32 * MIB,
@@ -506,8 +504,8 @@ impl ServerLimits {
     pub fn default_resolved() -> Self {
         Self {
             record_cap: 32,
-            file_bytes: 512 * MIB,
-            body_bytes: (512 * MIB + MIB) as usize,
+            file_bytes: GIB,
+            body_bytes: (GIB + MIB) as usize,
             text_bytes: 64 * 1024,
             text_total_bytes: 256 * 1024,
             form_fields: 32,
@@ -861,38 +859,72 @@ pub fn resolve_service(
     }
 
     let scan = scan_limits(&merged)?;
+    let ooxml_defaults = OoxmlLimits::default_resolved();
     let ooxml = OoxmlLimits {
-        archive_bytes: merged.ooxml_archive_bytes.unwrap_or_else(default_archive),
-        expanded_bytes: merged.ooxml_expanded_bytes.unwrap_or_else(default_expanded),
+        archive_bytes: merged
+            .ooxml_archive_bytes
+            .unwrap_or(ooxml_defaults.archive_bytes),
+        expanded_bytes: merged
+            .ooxml_expanded_bytes
+            .unwrap_or(ooxml_defaults.expanded_bytes),
         xml_entry_bytes: merged
             .ooxml_xml_entry_bytes
-            .unwrap_or_else(default_xml_entry),
+            .unwrap_or(ooxml_defaults.xml_entry_bytes),
         xml_total_bytes: merged
             .ooxml_xml_total_bytes
-            .unwrap_or_else(default_xml_total),
-        ratio: merged.ooxml_ratio.unwrap_or(500),
-        xml_depth: merged.ooxml_xml_depth.unwrap_or(128),
-        xml_events: merged.ooxml_xml_events.unwrap_or(100_000),
-        xml_attributes: merged.ooxml_xml_attributes.unwrap_or(256),
-        xml_namespaces: merged.ooxml_xml_namespaces.unwrap_or(256),
+            .unwrap_or(ooxml_defaults.xml_total_bytes),
+        ratio: merged.ooxml_ratio.unwrap_or(ooxml_defaults.ratio),
+        xml_depth: merged.ooxml_xml_depth.unwrap_or(ooxml_defaults.xml_depth),
+        xml_events: merged.ooxml_xml_events.unwrap_or(ooxml_defaults.xml_events),
+        xml_attributes: merged
+            .ooxml_xml_attributes
+            .unwrap_or(ooxml_defaults.xml_attributes),
+        xml_namespaces: merged
+            .ooxml_xml_namespaces
+            .unwrap_or(ooxml_defaults.xml_namespaces),
         scan,
     }
     .validate()?;
 
     let archive = archive_limits(document_limits, &merged, scan)?;
+    let office_defaults = OfficeLimits::default();
     let office = OfficeLimits {
-        input_bytes: merged.office_input_bytes.unwrap_or(32 * MIB as usize),
-        output_bytes: merged.office_output_bytes.unwrap_or(64 * MIB as usize),
-        stderr_bytes: merged.office_stderr_bytes.unwrap_or(4096),
-        wall: Duration::from_secs(merged.office_wall_seconds.unwrap_or(180)),
-        cpu_seconds: merged.office_cpu_seconds.unwrap_or(120),
-        nofile: merged.office_nofile.unwrap_or(256),
-        address_space_bytes: merged.office_address_space_bytes.unwrap_or(GIB),
-        active_process_limit: merged.office_active_process_limit.unwrap_or(8),
-        process_memory_bytes: merged.office_process_memory_bytes.unwrap_or(GIB),
-        job_memory_bytes: merged.office_job_memory_bytes.unwrap_or(GIB),
-        process_time_seconds: merged.office_process_time_seconds.unwrap_or(120),
-        job_time_seconds: merged.office_job_time_seconds.unwrap_or(120),
+        input_bytes: merged
+            .office_input_bytes
+            .unwrap_or(office_defaults.input_bytes),
+        output_bytes: merged
+            .office_output_bytes
+            .unwrap_or(office_defaults.output_bytes),
+        stderr_bytes: merged
+            .office_stderr_bytes
+            .unwrap_or(office_defaults.stderr_bytes),
+        wall: Duration::from_secs(
+            merged
+                .office_wall_seconds
+                .unwrap_or(office_defaults.wall.as_secs()),
+        ),
+        cpu_seconds: merged
+            .office_cpu_seconds
+            .unwrap_or(office_defaults.cpu_seconds),
+        nofile: merged.office_nofile.unwrap_or(office_defaults.nofile),
+        address_space_bytes: merged
+            .office_address_space_bytes
+            .unwrap_or(office_defaults.address_space_bytes),
+        active_process_limit: merged
+            .office_active_process_limit
+            .unwrap_or(office_defaults.active_process_limit),
+        process_memory_bytes: merged
+            .office_process_memory_bytes
+            .unwrap_or(office_defaults.process_memory_bytes),
+        job_memory_bytes: merged
+            .office_job_memory_bytes
+            .unwrap_or(office_defaults.job_memory_bytes),
+        process_time_seconds: merged
+            .office_process_time_seconds
+            .unwrap_or(office_defaults.process_time_seconds),
+        job_time_seconds: merged
+            .office_job_time_seconds
+            .unwrap_or(office_defaults.job_time_seconds),
     }
     .validate()?;
 
@@ -918,37 +950,28 @@ pub fn resolve_service(
     })
 }
 
-const fn default_archive() -> u64 {
-    512 * MIB
-}
-const fn default_expanded() -> u64 {
-    256 * MIB
-}
-const fn default_xml_entry() -> u64 {
-    8 * MIB
-}
-const fn default_xml_total() -> u64 {
-    32 * MIB
-}
-
 fn archive_limits(
     policy: crate::DocumentLimitPolicy,
     merged: &ServiceOverrides,
     scan: ScanLimits,
 ) -> Result<ArchiveLimits, String> {
-    let entries = merged.archive_max_entries.unwrap_or(100_000);
-    let ratio = merged.archive_max_ratio.unwrap_or(1000);
+    let defaults = ArchiveLimits::default();
+    let entries = merged.archive_max_entries.unwrap_or(defaults.max_entries);
+    let ratio = merged.archive_max_ratio.unwrap_or(defaults.max_ratio);
     ArchiveLimits::from_document_limits_with_operator(policy, entries, ratio, scan)
 }
 
 fn scan_limits(merged: &ServiceOverrides) -> Result<ScanLimits, String> {
+    let defaults = ArchiveLimits::default().scan;
     ScanLimits::from_resolved(
-        merged.archive_max_entries.unwrap_or(100_000),
-        merged.zip_central_cap.unwrap_or(64 * MIB),
-        merged.zip_name_cap.unwrap_or(4 * 1024),
-        merged.zip_depth_cap.unwrap_or(64),
-        merged.zip_total_name_cap.unwrap_or(32 * MIB),
-        merged.zip_total_component_cap.unwrap_or(1_000_000),
+        merged.archive_max_entries.unwrap_or(defaults.max_entries),
+        merged.zip_central_cap.unwrap_or(defaults.central_cap),
+        merged.zip_name_cap.unwrap_or(defaults.name_cap),
+        merged.zip_depth_cap.unwrap_or(defaults.depth_cap),
+        merged.zip_total_name_cap.unwrap_or(defaults.total_name_cap),
+        merged
+            .zip_total_component_cap
+            .unwrap_or(defaults.total_component_cap),
     )
 }
 
@@ -1211,70 +1234,53 @@ mod tests {
     }
 
     /// Table-driven precedence proof: compiled default -> frozen environment -> explicit CLI,
-    /// with strict malformed-env rejection for every Phase-1B knob.
+    /// with strict malformed-env rejection for every Phase-1B knob. The expected default string
+    /// is rendered from the resolved no-config policy so the table cannot drift from the
+    /// compiled defaults.
     #[test]
     fn every_service_knob_obeys_default_env_cli_precedence_and_strictness() {
-        const TABLE: &[(&str, &str, &str, &str)] = &[
-            ("MINERU_API_MAX_CONCURRENT_REQUESTS", "3", "5", "7"),
-            ("MINERU_TASK_RESULT_TIMEOUT_SECONDS", "3600", "3601", "3602"),
-            (
-                "MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS",
-                "600",
-                "601",
-                "602",
-            ),
-            ("MINERU_API_CONNECT_TIMEOUT_SECONDS", "10", "11", "12"),
-            ("MINERU_API_ACQUISITION_TIMEOUT_SECONDS", "60", "61", "62"),
-            ("MINERU_API_SEND_TIMEOUT_SECONDS", "300", "301", "302"),
-            ("MINERU_API_POLL_INTERVAL_SECONDS", "1", "2", "3"),
-            (
-                "MINERU_API_TASK_RETENTION_SECONDS",
-                "86400",
-                "86401",
-                "86402",
-            ),
-            (
-                "MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS",
-                "300",
-                "301",
-                "302",
-            ),
-            ("MINERU_ARCHIVE_MAX_ENTRIES", "100000", "200", "300"),
-            ("MINERU_ARCHIVE_MAX_RATIO", "1000", "1001", "1002"),
-            ("MINERU_ZIP_SCAN_CENTRAL_CAP", "67108864", "401", "402"),
-            ("MINERU_ZIP_SCAN_NAME_CAP", "4096", "500", "600"),
-            ("MINERU_ZIP_SCAN_DEPTH_CAP", "64", "65", "66"),
-            ("MINERU_ZIP_SCAN_TOTAL_NAME_CAP", "33554432", "701", "702"),
-            (
-                "MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP",
-                "1000000",
-                "801",
-                "802",
-            ),
-            ("MINERU_OOXML_ARCHIVE_BYTES", "536870912", "901", "902"),
-            ("MINERU_OOXML_EXPANDED_BYTES", "268435456", "1001", "1002"),
-            ("MINERU_OOXML_XML_ENTRY_BYTES", "8388608", "1101", "1102"),
-            ("MINERU_OOXML_XML_TOTAL_BYTES", "33554432", "1201", "1202"),
-            ("MINERU_OOXML_RATIO", "500", "501", "502"),
-            ("MINERU_OOXML_XML_DEPTH", "128", "129", "130"),
-            ("MINERU_OOXML_XML_EVENTS", "100000", "131", "132"),
-            ("MINERU_OOXML_XML_ATTRIBUTES", "256", "133", "134"),
-            ("MINERU_OOXML_XML_NAMESPACES", "256", "135", "136"),
-            (OFFICE_INPUT_ENV, "33554432", "137", "138"),
-            (OFFICE_OUTPUT_ENV, "67108864", "139", "140"),
-            (OFFICE_STDERR_ENV, "4096", "4097", "4098"),
-            (OFFICE_WALL_ENV, "180", "181", "182"),
-            (OFFICE_CPU_ENV, "120", "121", "122"),
-            (OFFICE_NOFILE_ENV, "256", "257", "258"),
-            (OFFICE_ADDRESS_SPACE_ENV, "1073741824", "259", "260"),
-            (OFFICE_ACTIVE_PROCESS_ENV, "8", "9", "10"),
-            (OFFICE_PROCESS_MEMORY_ENV, "1073741824", "261", "262"),
-            (OFFICE_JOB_MEMORY_ENV, "1073741824", "263", "264"),
-            (OFFICE_PROCESS_TIME_ENV, "120", "265", "266"),
-            (OFFICE_JOB_TIME_ENV, "120", "267", "268"),
+        const TABLE: &[(&str, &str, &str)] = &[
+            ("MINERU_API_MAX_CONCURRENT_REQUESTS", "5", "7"),
+            ("MINERU_TASK_RESULT_TIMEOUT_SECONDS", "3601", "3602"),
+            ("MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS", "601", "602"),
+            ("MINERU_API_CONNECT_TIMEOUT_SECONDS", "11", "12"),
+            ("MINERU_API_ACQUISITION_TIMEOUT_SECONDS", "61", "62"),
+            ("MINERU_API_SEND_TIMEOUT_SECONDS", "301", "302"),
+            ("MINERU_API_POLL_INTERVAL_SECONDS", "2", "3"),
+            ("MINERU_API_TASK_RETENTION_SECONDS", "86401", "86402"),
+            ("MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS", "301", "302"),
+            ("MINERU_ARCHIVE_MAX_ENTRIES", "200", "300"),
+            ("MINERU_ARCHIVE_MAX_RATIO", "1001", "1002"),
+            ("MINERU_ZIP_SCAN_CENTRAL_CAP", "401", "402"),
+            ("MINERU_ZIP_SCAN_NAME_CAP", "500", "600"),
+            ("MINERU_ZIP_SCAN_DEPTH_CAP", "65", "66"),
+            ("MINERU_ZIP_SCAN_TOTAL_NAME_CAP", "701", "702"),
+            ("MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP", "801", "802"),
+            ("MINERU_OOXML_ARCHIVE_BYTES", "901", "902"),
+            ("MINERU_OOXML_EXPANDED_BYTES", "1001", "1002"),
+            ("MINERU_OOXML_XML_ENTRY_BYTES", "1101", "1102"),
+            ("MINERU_OOXML_XML_TOTAL_BYTES", "1201", "1202"),
+            ("MINERU_OOXML_RATIO", "501", "502"),
+            ("MINERU_OOXML_XML_DEPTH", "129", "130"),
+            ("MINERU_OOXML_XML_EVENTS", "131", "132"),
+            ("MINERU_OOXML_XML_ATTRIBUTES", "133", "134"),
+            ("MINERU_OOXML_XML_NAMESPACES", "135", "136"),
+            (OFFICE_INPUT_ENV, "137", "138"),
+            (OFFICE_OUTPUT_ENV, "139", "140"),
+            (OFFICE_STDERR_ENV, "4097", "4098"),
+            (OFFICE_WALL_ENV, "181", "182"),
+            (OFFICE_CPU_ENV, "121", "122"),
+            (OFFICE_NOFILE_ENV, "257", "258"),
+            (OFFICE_ADDRESS_SPACE_ENV, "259", "260"),
+            (OFFICE_ACTIVE_PROCESS_ENV, "9", "10"),
+            (OFFICE_PROCESS_MEMORY_ENV, "261", "262"),
+            (OFFICE_JOB_MEMORY_ENV, "263", "264"),
+            (OFFICE_PROCESS_TIME_ENV, "265", "266"),
+            (OFFICE_JOB_TIME_ENV, "267", "268"),
         ];
         let policy = crate::DocumentLimitPolicy::defaults();
-        for (name, default, env_value, cli_value) in TABLE {
+        let defaults = resolve_service(&|_| None, &ServiceOverrides::default(), policy).unwrap();
+        for (name, env_value, cli_value) in TABLE {
             let env_entry = [(*name, *env_value)];
             let cli_entry = [(*name, *cli_value)];
             let bad_entry = [(*name, "bad")];
@@ -1287,7 +1293,7 @@ mod tests {
                     &resolve_service(&|_| None, &ServiceOverrides::default(), policy).unwrap(),
                     name
                 ),
-                *default,
+                render(&defaults, name),
                 "{name} default"
             );
             // Frozen environment wins over the compiled default.
@@ -1403,7 +1409,7 @@ mod tests {
     fn server_limits_resolve_defaults_and_strictness() {
         let resolved = ServerLimits::resolve(&|_| None, &ServiceOverrides::default()).unwrap();
         assert_eq!(resolved.record_cap, 32);
-        assert_eq!(resolved.file_bytes, 512 * 1024 * 1024);
+        assert_eq!(resolved.file_bytes, 1024 * 1024 * 1024);
         assert!(
             ServerLimits::resolve(
                 &lookup_map(&[("MINERU_API_RECORD_CAP", "0")]),
