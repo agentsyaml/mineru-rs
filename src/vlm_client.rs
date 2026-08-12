@@ -2911,7 +2911,17 @@ mod tests {
             // the official path; a 5xx service failure would stay an error and abort instead.
             ([("content-type", "application/json")], "not-json-body").into_response()
         } else {
-            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":format!("reply-{index}")}}]})).into_response()
+            // Key the reply on the candidate crop's top-left pixel (like order_chat), so the
+            // content is bound to the candidate, not to the arrival order at this mock.
+            let data_url = request["messages"][1]["content"][0]["image_url"]["url"]
+                .as_str()
+                .unwrap();
+            let bytes = STANDARD
+                .decode(data_url.rsplit(',').next().unwrap())
+                .unwrap();
+            let page = image::load_from_memory(&bytes).unwrap().to_rgb8();
+            let pixel = page.get_pixel(0, 0)[0];
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"content":format!("reply-{pixel}")}}]})).into_response()
         }
     }
 
@@ -2998,7 +3008,7 @@ mod tests {
     )> {
         client
             .official_two_step_snapshot_window(
-                vec![Arc::new(RgbImage::new(32, 32))],
+                vec![gradient_page()],
                 false,
                 true,
                 true,
@@ -3247,7 +3257,7 @@ mod tests {
                 .into_iter()
                 .map(|block| block.content.unwrap())
                 .collect::<Vec<_>>(),
-            ["reply-0", "reply-1", "reply-2"]
+            ["reply-0", "reply-9", "reply-19"]
         );
     }
 
@@ -3315,7 +3325,7 @@ mod tests {
                 .into_iter()
                 .map(|block| block.content.unwrap())
                 .collect::<Vec<_>>(),
-            ["", "reply-1", "reply-2"]
+            ["", "reply-9", "reply-19"]
         );
         assert_eq!(
             timeout(Duration::from_secs(2), encoded_rx.recv())
