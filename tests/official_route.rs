@@ -1513,8 +1513,8 @@ async fn route_staging_overlaps_next_window_vlm() {
     assert_eq!(mock.requests.load(Ordering::SeqCst), 12);
     assert!(mock.peak.load(Ordering::SeqCst) <= 8, "HTTP high water");
     assert!(
-        mock.layout_peak.load(Ordering::SeqCst) <= 4,
-        "page/HTTP high water"
+        mock.layout_peak.load(Ordering::SeqCst) <= 8,
+        "layout HTTP high water"
     );
     assert!(
         mock.raw_response_bytes.load(Ordering::SeqCst) as u64
@@ -1764,7 +1764,7 @@ async fn route_overlap_keeps_raw_encoded_budget_high_water() {
     let peak = mock.peak.load(Ordering::SeqCst);
     let layout_peak = mock.layout_peak.load(Ordering::SeqCst);
     assert!(peak <= 8, "HTTP concurrency high water");
-    assert!(layout_peak <= 4, "page/HTTP concurrency high water");
+    assert!(layout_peak <= 8, "layout HTTP concurrency high water");
     assert!(raw > 0 && request_bytes > raw, "measured budgets are sane");
 
     // The exact raw allowance still succeeds and one byte below it fails: the raw document

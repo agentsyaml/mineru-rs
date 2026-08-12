@@ -699,6 +699,11 @@ fn remote_local_transport_error(
         core.page_concurrency.is_some(),
     );
     push(
+        "--concurrency-model",
+        "MINERU_OFFICIAL_CONCURRENCY_MODEL",
+        core.concurrency_model.is_some(),
+    );
+    push(
         "--processing-window-size",
         "MINERU_PROCESSING_WINDOW_SIZE",
         core.processing_window_size.is_some(),
@@ -1051,6 +1056,8 @@ pub struct Cli {
     processing_window_size: Option<String>,
     #[arg(long)]
     page_concurrency: Option<String>,
+    #[arg(long)]
+    concurrency_model: Option<String>,
     #[arg(long)]
     render_workers: Option<String>,
     #[arg(long)]
@@ -1438,6 +1445,7 @@ fn cli_core_overrides(cli: &Cli) -> Result<env::CoreOverrides, String> {
         let flag: Option<&str> = match name {
             "MINERU_PROCESSING_WINDOW_SIZE" => cli.processing_window_size.as_deref(),
             "MINERU_OFFICIAL_PAGE_CONCURRENCY" => cli.page_concurrency.as_deref(),
+            "MINERU_OFFICIAL_CONCURRENCY_MODEL" => cli.concurrency_model.as_deref(),
             "MINERU_PDF_RENDER_THREADS" => cli.render_workers.as_deref(),
             "MINERU_PDF_RENDER_TIMEOUT" => cli.render_timeout_seconds.as_deref(),
             "MINERU_MAX_PDF_BYTES" => cli.max_pdf_bytes.as_deref(),
@@ -1899,6 +1907,8 @@ mod tests {
             "32",
             "--page-concurrency",
             "12",
+            "--concurrency-model",
+            "classic",
             "--render-workers",
             "8",
             "--render-timeout-seconds",
@@ -1960,6 +1970,10 @@ mod tests {
         let core = cli_core_overrides(&cli).unwrap();
         assert_eq!(core.processing_window_size, Some(32));
         assert_eq!(core.page_concurrency, Some(12));
+        assert_eq!(
+            core.concurrency_model,
+            Some(crate::ConcurrencyModel::Classic)
+        );
         assert_eq!(core.render_workers, Some(8));
         assert_eq!(core.max_layout_blocks_per_page, Some(15));
         assert_eq!(core.max_semantic_requests_per_page, Some(16));
@@ -1970,6 +1984,21 @@ mod tests {
         // The batch flag genuinely feeds the inference admission field.
         let resolved = env::resolve_core(|_| None, &core).unwrap();
         assert_eq!(resolved.route.max_requests_per_batch, 17);
+        // The concurrency-model flag overrides the two-phase default and, when combined with the
+        // environment, the CLI wins over the environment (CLI > env > default).
+        assert_eq!(resolved.concurrency_model, crate::ConcurrencyModel::Classic);
+        let resolved = env::resolve_core(
+            |name| (name == "MINERU_OFFICIAL_CONCURRENCY_MODEL").then(|| OsString::from("classic")),
+            &env::CoreOverrides {
+                concurrency_model: Some(crate::ConcurrencyModel::TwoPhase),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.concurrency_model,
+            crate::ConcurrencyModel::TwoPhase
+        );
         // Malformed CLI values fail before any work.
         let cli = Cli::try_parse_from([
             "mineru",
@@ -1983,6 +2012,22 @@ mod tests {
         .unwrap();
         let error = cli_core_overrides(&cli).unwrap_err();
         assert!(error.contains("MINERU_PROCESSING_WINDOW_SIZE"), "{error}");
+        // The concurrency-model flag is strict: a value outside classic/two-phase fails.
+        let cli = Cli::try_parse_from([
+            "mineru",
+            "-p",
+            "a",
+            "-o",
+            "b",
+            "--concurrency-model",
+            "banana",
+        ])
+        .unwrap();
+        let error = cli_core_overrides(&cli).unwrap_err();
+        assert!(
+            error.contains("MINERU_OFFICIAL_CONCURRENCY_MODEL"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2223,6 +2268,11 @@ mod tests {
                 "--page-concurrency",
                 "MINERU_OFFICIAL_PAGE_CONCURRENCY",
                 |c| c.page_concurrency = Some(4),
+            ),
+            (
+                "--concurrency-model",
+                "MINERU_OFFICIAL_CONCURRENCY_MODEL",
+                |c| c.concurrency_model = Some(crate::ConcurrencyModel::Classic),
             ),
             (
                 "--processing-window-size",

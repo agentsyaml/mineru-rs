@@ -153,6 +153,18 @@ fn env_nonempty_with(get: &impl Fn(&str) -> Option<String>, name: &str) -> Optio
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty())
 }
+/// Request-level concurrency model for the official route. `Classic` is the long-standing
+/// single-encoder pipeline; `TwoPhase` splits each page's semantic work into an encode-all stage
+/// and a request-all stage, removing the CPU-encode serialization in front of request dispatch.
+/// `TwoPhase` is the default; `MINERU_OFFICIAL_CONCURRENCY_MODEL=classic` restores the old
+/// behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConcurrencyModel {
+    Classic,
+    #[default]
+    TwoPhase,
+}
+
 #[derive(Debug, Clone)]
 pub struct MinerUVlmConfig {
     pub prompts: std::collections::BTreeMap<String, String>,
@@ -168,6 +180,7 @@ pub struct MinerUVlmConfig {
     pub incremental_priority: bool,
     pub enable_table_formula_eq_wrap: bool,
     pub enable_cross_page_table_merge: bool,
+    pub concurrency_model: ConcurrencyModel,
 }
 impl Default for MinerUVlmConfig {
     fn default() -> Self {
@@ -231,6 +244,7 @@ impl Default for MinerUVlmConfig {
             incremental_priority: false,
             enable_table_formula_eq_wrap: false,
             enable_cross_page_table_merge: false,
+            concurrency_model: ConcurrencyModel::TwoPhase,
         }
     }
 }

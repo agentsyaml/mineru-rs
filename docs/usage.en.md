@@ -128,10 +128,11 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `--image-analysis <true\|false>` | `true` | Image analysis. Explicit boolean; precedence `CLI > MINERU_IMAGE_ANALYSIS_ENABLE > default`. |
 | `--log-level <level>` | `info` | Log verbosity: `trace`, `debug`, `info`, `success`, `warning`, `error`, `critical`. Overrides `MINERU_LOG_LEVEL`. |
 | `--processing-window-size <n>` | `64` | Page processing window. Overrides `MINERU_PROCESSING_WINDOW_SIZE`. |
-| `--page-concurrency <n>` | `4` | Official page admission concurrency (any positive value; still bounded below by the window and HTTP concurrency). Overrides `MINERU_OFFICIAL_PAGE_CONCURRENCY`. |
+| `--page-concurrency <n>` | `64` | Page-pipeline concurrency cap (any positive value); bounds only the number of simultaneously running page pipelines. Actual request-level concurrency is governed by `--http-max-concurrency`/`MINERU_VLM_HTTP_CONCURRENCY`. Overrides `MINERU_OFFICIAL_PAGE_CONCURRENCY`. |
+| `--concurrency-model <classic\|two-phase>` | `two-phase` | Concurrency model: `classic` (long-standing single-encoder pipeline) or `two-phase` (per-page semantic work split into encode-all → request-all stages; default). Overrides `MINERU_OFFICIAL_CONCURRENCY_MODEL`. |
 | `--render-workers <n>` | `3` | Rendering workers; effective count is capped by available parallelism and selected pages, not by 3. Overrides `MINERU_PDF_RENDER_THREADS`. |
 | `--render-timeout-seconds <n>` | `300` | Per-render timeout. Overrides `MINERU_PDF_RENDER_TIMEOUT`. |
-| `--batch-size <n>` | `32` | Per-page semantic inference request admission (inference batching), distinct from page concurrency and the processing window. Overrides `MINERU_BATCH_SIZE`. |
+| `--batch-size <n>` | `32` | Per-page semantic inference request admission (inference batching), distinct from page concurrency and the processing window; under two-phase it caps per-page request-stage concurrency (additionally bounded by the global request-level semaphore). Overrides `MINERU_BATCH_SIZE`. |
 | `--total-deadline-seconds <n>` | `86400` | Per-document total deadline. Overrides `MINERU_TOTAL_DEADLINE_SECONDS`. |
 | `--max-pdf-bytes <n>` | `1073741824` | Resident source-PDF cap. Overrides `MINERU_MAX_PDF_BYTES`. |
 | `--max-pages <n>` | `10000` | Maximum selected pages per document. Overrides `MINERU_MAX_PAGES`. |
@@ -152,7 +153,7 @@ VLM transport knobs (each also has an environment spelling):
 
 | Flag | Default | Overrides |
 | --- | ---: | --- |
-| `--http-max-concurrency <n>` | `100` | `MINERU_VLM_HTTP_CONCURRENCY` |
+| `--http-max-concurrency <n>` | `100` | Global request-level admission semaphore (shared by layout and semantic requests), governing the depth of in-flight requests at the server; consider ≤ the server's vLLM `max_num_seqs`. Overrides `MINERU_VLM_HTTP_CONCURRENCY`. |
 | `--http-timeout-seconds <n>` | `600` | `MINERU_VLM_HTTP_TIMEOUT` |
 | `--connect-timeout-seconds <n>` | `10` | `MINERU_VLM_CONNECT_TIMEOUT` |
 | `--http-max-keepalive-connections <n>` | `20` | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` |
@@ -170,7 +171,7 @@ Diagnostic/human-output truncation caps remain compiled and are not configurable
 
 In direct mode, non-default values for `--method`, `--effort`, and `--lang` produce a warning and are ignored. `--client-side-output-generation=true` is rejected in API mode.
 
-In API mode, the local VLM transport knobs (`--page-concurrency`, `--processing-window-size`, `--render-*`, `--batch-size`, all `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--vlm-debug` and their environment spellings) fail explicitly, because the remote server performs parsing and those controls would have no consumer; `MINERU_VL_SERVER` is submitted as the per-task `server_url` when `--url` is absent.
+In API mode, the local VLM transport knobs (`--page-concurrency`, `--concurrency-model`, `--processing-window-size`, `--render-*`, `--batch-size`, all `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--vlm-debug` and their environment spellings) fail explicitly, because the remote server performs parsing and those controls would have no consumer; `MINERU_VL_SERVER` is submitted as the per-task `server_url` when `--url` is absent.
 
 ---
 
@@ -265,14 +266,15 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_ZIP_SCAN_TOTAL_NAME_CAP` | `33554432` | ZIP aggregate entry-name byte cap (32 MiB). |
 | `MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP` | `1000000` | ZIP aggregate path-component cap. |
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
-| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | Official direct-route page concurrency; any positive value. |
+| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | Page-pipeline concurrency cap (any positive value), bounding only the number of simultaneously running page pipelines; request-level concurrency is governed by `MINERU_VLM_HTTP_CONCURRENCY`. |
+| `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `two-phase` | Concurrency model, one of `classic\|two-phase`. `classic`: the long-standing single-encoder pipeline (old behavior); `two-phase`: splits each page's semantic work into an encode-all → request-all two-stage flow, removing the CPU-encode serialization bottleneck in front of request dispatch for higher throughput under load (default). |
 | `MINERU_PDF_RENDER_THREADS` | `3` | Number of rendering workers. |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | Timeout in seconds for a single render. |
 | `MINERU_FORMULA_ENABLE` | On | Default for formula recognition (strict `true`/`false`, case-insensitive). |
 | `MINERU_TABLE_ENABLE` | On | Default for table recognition (strict `true`/`false`). |
 | `MINERU_IMAGE_ANALYSIS_ENABLE` | On | Default for image analysis (strict `true`/`false`). |
 | `MINERU_LOG_LEVEL` | `info` | Log verbosity; `critical` silences progress. |
-| `MINERU_BATCH_SIZE` | `32` | Per-page semantic inference request admission. |
+| `MINERU_BATCH_SIZE` | `32` | Per-page semantic inference request admission (per-page request-stage cap under two-phase). |
 | `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | Per-document total deadline. |
 | `MINERU_MAX_PDF_BYTES` | `1073741824` | Resident source-PDF cap. |
 | `MINERU_MAX_PAGES` | `10000` | Maximum selected pages per document. |
@@ -286,7 +288,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_MAX_ENCODED_BATCH_BYTES` | `67108864` | Encoded batch cap. |
 | `MINERU_MAX_TOTAL_ASSET_BYTES` | `1073741824` | Total asset cap. |
 | `MINERU_MAX_STAGED_TEXT_BYTES` | `268435456` | Staged text cap. |
-| `MINERU_VLM_HTTP_CONCURRENCY` | `100` | VLM HTTP concurrency. |
+| `MINERU_VLM_HTTP_CONCURRENCY` | `100` | Global request-level admission semaphore (shared by layout and semantic requests); consider ≤ the server's vLLM `max_num_seqs`. |
 | `MINERU_VLM_HTTP_TIMEOUT` | `600` | VLM HTTP request timeout in seconds. |
 | `MINERU_VLM_CONNECT_TIMEOUT` | `10` | Connect timeout in seconds. |
 | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` | `20` | Keepalive pool size. |

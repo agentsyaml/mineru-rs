@@ -20,6 +20,15 @@ struct SemanticCandidate {
     absorbed: Vec<ContentBlock>,
 }
 
+/// An encoded semantic candidate plus its table token map, as produced by the two-phase encoder.
+type EncodedCandidateWithTokens = (
+    VlmEncodedImage,
+    String,
+    Option<SamplingParams>,
+    usize,
+    Map<String, serde_json::Value>,
+);
+
 fn official_snapshot_block(block: VlmLayoutBlock) -> VlmResult<(ModelBlock, Option<String>)> {
     if block.block_type.is_empty() {
         return Err(protocol(
@@ -591,6 +600,25 @@ impl MinerUVlmPreprocessor {
         candidate: &SemanticCandidate,
         max_pixels: u64,
     ) -> VlmResult<(VlmEncodedImage, String, Option<SamplingParams>, usize)> {
+        let (image, prompt, sampling, original_index, tokens) =
+            self.encode_semantic_candidate_capped_with_tokens(page, candidate, max_pixels)?;
+        if !tokens.is_empty() {
+            blocks[original_index].metadata.insert(
+                "_table_image_token_map".into(),
+                serde_json::Value::Object(tokens),
+            );
+        }
+        Ok((image, prompt, sampling, original_index))
+    }
+    /// Two-phase variant of the candidate encoder: encodes without touching `blocks`. The table
+    /// token map is returned so the caller can backfill it once every parallel encode finished
+    /// (parallel writes into the shared block storage would race).
+    fn encode_semantic_candidate_capped_with_tokens(
+        &self,
+        page: &RgbImage,
+        candidate: &SemanticCandidate,
+        max_pixels: u64,
+    ) -> VlmResult<EncodedCandidateWithTokens> {
         image_pixel_limit(page.width(), page.height(), max_pixels)?;
         let kind = candidate.block.kind.as_str();
         let (crop, tokens) = if kind == BlockKind::TABLE {
@@ -611,12 +639,6 @@ impl MinerUVlmPreprocessor {
         let crop = self
             .resize_by_need_capped(DynamicImage::ImageRgb8(crop), max_pixels)?
             .to_rgb8();
-        if !tokens.is_empty() {
-            blocks[candidate.original_index].metadata.insert(
-                "_table_image_token_map".into(),
-                serde_json::Value::Object(tokens),
-            );
-        }
         let data = image_pipeline::png_bytes(&crop)
             .map_err(|e| protocol("extract image", e.to_string()))?;
         Ok((
@@ -629,6 +651,7 @@ impl MinerUVlmPreprocessor {
             self.prompt_for(kind),
             self.sampling_for(kind),
             candidate.original_index,
+            tokens,
         ))
     }
     pub fn post_process(&self, blocks: Vec<VlmLayoutBlock>) -> VlmResult<Vec<VlmLayoutBlock>> {
@@ -758,8 +781,10 @@ impl MinerUVlmPreprocessor {
 
 // Finite compatibility default for the client-created official page semaphore. This is a
 // default, not a clamp: commands pass their own resolved `OfficialPageConcurrency`, and
-// `MINERU_OFFICIAL_PAGE_CONCURRENCY`/`--page-concurrency` accept any positive value.
-const OFFICIAL_PAGE_CONCURRENCY: usize = 4;
+// `MINERU_OFFICIAL_PAGE_CONCURRENCY`/`--page-concurrency` accept any positive value. The page
+// semaphore bounds only how many page pipelines run at once; HTTP admission is the request-level
+// `layout_semaphore`'s job.
+const OFFICIAL_PAGE_CONCURRENCY: usize = 64;
 
 #[derive(Debug, Clone)]
 enum VlmBackend {
@@ -799,6 +824,11 @@ pub struct MinerUVlmClient {
     preprocessor: MinerUVlmPreprocessor,
     layout_semaphore: Arc<Semaphore>,
     official_page_semaphore: Arc<Semaphore>,
+    /// Request-level concurrency model selected by `MINERU_OFFICIAL_CONCURRENCY_MODEL`.
+    /// `Classic` runs the single-slot pipeline; `TwoPhase` runs encode-all then request-all.
+    concurrency_model: ConcurrencyModel,
+    /// Global CPU cap for parallel semantic-candidate encoding (two-phase model).
+    encode_cpu_semaphore: Arc<Semaphore>,
     #[cfg(test)]
     semantic_scheduler_hook: Option<SemanticSchedulerHook>,
 }
@@ -931,6 +961,9 @@ impl MinerUVlmClient {
         max_encoded_batch_bytes: usize,
         raw_budget: Arc<ByteBudget>,
         encoded_budget: Arc<ByteBudget>,
+        // Document-wide resident-encoded-bytes ledger created by the window function. Only the
+        // two-phase encode-all stage charges it; the classic path ignores it entirely.
+        resident_encoded_budget: Arc<ByteBudget>,
         deadline: Instant,
         page_semaphore: Arc<Semaphore>,
     ) -> VlmResult<(
@@ -1083,6 +1116,25 @@ impl MinerUVlmClient {
         }
         let block_count = blocks.len();
         let page = image;
+        if self.concurrency_model == ConcurrencyModel::TwoPhase {
+            return self
+                .official_two_step_semantic_two_phase(
+                    blocks,
+                    candidates,
+                    page,
+                    max_encoded_request_bytes,
+                    max_encoded_batch_bytes,
+                    max_requests_per_batch,
+                    raw_budget,
+                    encoded_budget,
+                    resident_encoded_budget,
+                    warnings,
+                    raw_bytes,
+                    encoded_bytes,
+                    deadline,
+                )
+                .await;
+        }
         type Encoder = Pin<
             Box<
                 dyn Future<
@@ -1280,7 +1332,34 @@ impl MinerUVlmClient {
                 }
             }
         }
-        let mut blocks = blocks.expect("encoder completed before semantic completion");
+        self.complete_official_semantic_page(
+            blocks.expect("encoder completed before semantic completion"),
+            replies,
+            warnings,
+            raw_bytes,
+            encoded_bytes,
+            deadline,
+        )
+        .await
+    }
+
+    /// Shared tail of the classic and two-phase semantic pipelines: fill reply content into the
+    /// layout blocks in source order, snapshot them, and run the shared cleaner.
+    async fn complete_official_semantic_page(
+        &self,
+        mut blocks: Vec<VlmLayoutBlock>,
+        replies: Vec<Option<(usize, String)>>,
+        mut warnings: Vec<String>,
+        raw_bytes: usize,
+        encoded_bytes: usize,
+        deadline: Instant,
+    ) -> VlmResult<(
+        Vec<ModelBlock>,
+        Vec<VlmLayoutBlock>,
+        usize,
+        usize,
+        Vec<String>,
+    )> {
         for reply in replies {
             let (index, reply) =
                 reply.ok_or_else(|| protocol("official PDF", "semantic reply missing"))?;
@@ -1312,6 +1391,275 @@ impl MinerUVlmClient {
             .await?;
         warnings.extend(snapshot_warnings);
         Ok((snapshot, cleaned, raw_bytes, encoded_bytes, warnings))
+    }
+
+    /// Two-phase semantic pipeline (encode-all, then request-all) used when
+    /// `MINERU_OFFICIAL_CONCURRENCY_MODEL=two-phase`. The branch gate in
+    /// `official_two_step_snapshot_page_core` sends the page here instead of the classic
+    /// single-slot pipeline; degradation, deadline, budget, order, and FailFast semantics match
+    /// the classic path, only the concurrency shape differs.
+    ///
+    /// Memory characteristic: encode-all accumulates every retained candidate's encoded image in
+    /// `results` until the request-all stage drains them, so a single page's encoded peak can
+    /// exceed `max_encoded_batch_bytes` (that cap only gates which requests are retained). This
+    /// is the deliberate two-phase trade-off — staging all encoded images first buys request
+    /// depth. The document-wide resident-bytes ledger (`resident_encoded_budget`) is a defensive
+    /// invariant sentinel that bounds cumulative retained bytes across the window (batch cap
+    /// times window page count), not a page-residency cap.
+    #[allow(clippy::too_many_arguments)]
+    async fn official_two_step_semantic_two_phase(
+        &self,
+        mut blocks: Vec<VlmLayoutBlock>,
+        candidates: Vec<SemanticCandidate>,
+        page: Arc<RgbImage>,
+        max_encoded_request_bytes: usize,
+        max_encoded_batch_bytes: usize,
+        max_requests_per_batch: usize,
+        raw_budget: Arc<ByteBudget>,
+        encoded_budget: Arc<ByteBudget>,
+        resident_encoded_budget: Arc<ByteBudget>,
+        mut warnings: Vec<String>,
+        mut raw_bytes: usize,
+        mut encoded_bytes: usize,
+        deadline: Instant,
+    ) -> VlmResult<(
+        Vec<ModelBlock>,
+        Vec<VlmLayoutBlock>,
+        usize,
+        usize,
+        Vec<String>,
+    )> {
+        let block_count = blocks.len();
+        let max_pixels = self.max_decoded_pixels;
+        let mut replies = vec![None; candidates.len()];
+        // Phase 1, encode-all: every candidate encodes in parallel, bounded by the global CPU
+        // semaphore. The encoders never touch `blocks`; each returns its table token map so the
+        // map is backfilled once, after every encode finished (parallel writes into shared
+        // storage would race).
+        type TwoPhaseEncoder =
+            Pin<Box<dyn Future<Output = VlmResult<(EncodedCandidateWithTokens, usize)>> + Send>>;
+        let mut results: Vec<Option<EncodedCandidateWithTokens>> =
+            (0..candidates.len()).map(|_| None).collect();
+        {
+            let mut encoders: FuturesUnordered<TwoPhaseEncoder> = FuturesUnordered::new();
+            let cpu_semaphore = self.encode_cpu_semaphore.clone();
+            for (order, candidate) in candidates.iter().enumerate() {
+                let candidate = candidate.clone();
+                let page = page.clone();
+                let client = self.clone();
+                let preprocessor = client.preprocessor.clone();
+                let semaphore = cpu_semaphore.clone();
+                #[cfg(test)]
+                let scheduler_hook = self.semantic_scheduler_hook.clone();
+                encoders.push(Box::pin(async move {
+                    let _permit =
+                        semaphore
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| VlmError::Transport {
+                                operation: "official PDF",
+                                message: "encode semaphore closed".into(),
+                            })?;
+                    client
+                        .official_blocking(deadline, move || {
+                            #[cfg(test)]
+                            if let Some(hook) = &scheduler_hook {
+                                (hook.before_encode)(order);
+                            }
+                            let prepared = preprocessor
+                                .encode_semantic_candidate_capped_with_tokens(
+                                    &page, &candidate, max_pixels,
+                                )?;
+                            #[cfg(test)]
+                            if let Some(hook) = &scheduler_hook {
+                                (hook.after_encode)(order);
+                            }
+                            Ok((
+                                (prepared.0, prepared.1, prepared.2, prepared.3, prepared.4),
+                                order,
+                            ))
+                        })
+                        .await
+                }));
+            }
+            while let Some(result) = encoders.next().await {
+                // FailFast: an encode failure is internal (never LLM malformation), so the first
+                // error aborts the page exactly like the classic single-slot encoder would.
+                let (encoded, order) = result?;
+                results[order] = Some(encoded);
+            }
+        }
+        // Page-local accounting with the classic degradation rules, then one token-map backfill
+        // and one document-resident-budget charge per retained candidate.
+        let mut resident_bytes = 0usize;
+        type TwoPhaseRequest = Pin<
+            Box<
+                dyn Future<Output = VlmResult<(usize, usize, String, usize, usize, Vec<String>)>>
+                    + Send,
+            >,
+        >;
+        let mut requests: FuturesUnordered<TwoPhaseRequest> = FuturesUnordered::new();
+        let backend = self.backend.clone();
+        let semaphore = self.layout_semaphore.clone();
+        // Per-page request admission: `max_requests_per_batch` bounds how many of this page's
+        // semantic requests may be in flight at once (the `--batch-size` knob's two-phase
+        // semantics), nested under the global request-level `layout_semaphore`. Zero is rejected
+        // by the page core before we get here; `.max(1)` guards the semaphore constructor.
+        let batch_semaphore = Arc::new(Semaphore::new(max_requests_per_batch.max(1)));
+        let max_response_bytes = self.image_config.max_response_bytes;
+        for order in 0..candidates.len() {
+            let (image, prompt, sampling, original_index, tokens) = results[order]
+                .take()
+                .expect("two-phase encode result present");
+            let bytes = image.data.len();
+            if order >= replies.len() || original_index >= block_count {
+                return Err(protocol("official PDF", "semantic reply index is invalid"));
+            }
+            if !tokens.is_empty() {
+                blocks[original_index].metadata.insert(
+                    "_table_image_token_map".into(),
+                    serde_json::Value::Object(tokens),
+                );
+            }
+            if bytes > max_encoded_request_bytes {
+                // A single block that encodes over the per-request cap degrades to empty content
+                // for this block only; sibling blocks and the page continue (mirrors the classic
+                // Protocol arm).
+                warnings.push(cap_warning(
+                    "semantic",
+                    bytes,
+                    max_encoded_request_bytes,
+                    "per-request",
+                    "empty content",
+                ));
+                replies[order] = Some((original_index, String::new()));
+                continue;
+            }
+            // Overflow in the resident-bytes ledger is an internal invariant break, never
+            // degrade: keep it fatal (the tolerance arms only ever see LLM malformation).
+            let resident_after =
+                resident_bytes
+                    .checked_add(bytes)
+                    .ok_or(VlmError::LimitExceeded {
+                        resource: "encoded batch bytes",
+                        limit: max_encoded_batch_bytes as u64,
+                        actual: u64::MAX,
+                    })?;
+            if resident_after > max_encoded_batch_bytes {
+                warnings.push(cap_warning(
+                    "semantic",
+                    bytes,
+                    max_encoded_batch_bytes,
+                    "batch",
+                    "empty content",
+                ));
+                replies[order] = Some((original_index, String::new()));
+                continue;
+            }
+            resident_bytes = resident_after;
+            // The document-level encoded budget and the returned encoded-bytes accounting count
+            // only the retained candidates: the bytes of per-request- or batch-degraded
+            // candidates never reach the server, so charging them could only push the document
+            // over its budget and fail the whole page — the failure mode classic avoids by never
+            // encoding admission-gated candidates. (Classic still charges per-request-degraded
+            // candidates as a historical quirk; two-phase is deliberately stricter and counts
+            // only what is actually requested.)
+            encoded_budget.charge(bytes as u64, "encoded document bytes")?;
+            encoded_bytes = encoded_bytes.saturating_add(bytes);
+            // Document-wide resident-encoded-bytes ledger created by the window function. It is
+            // a defensive invariant sentinel, not a binding control: per-page retained bytes
+            // stay <= the batch cap and every page in the window charges once, so the cumulative
+            // bound is batch x window pages and it can only trip on broken accounting — when it
+            // does, it fails the document exactly like the encoded budget.
+            resident_encoded_budget.charge(bytes as u64, "encoded resident bytes")?;
+            let request = self.request(
+                VlmImageInput::Bytes {
+                    data: image.data,
+                    media_type: Some(image.media_type),
+                },
+                prompt,
+                sampling,
+                None,
+            );
+            let backend = backend.clone();
+            let semaphore = semaphore.clone();
+            let batch_semaphore = batch_semaphore.clone();
+            let raw_budget = raw_budget.clone();
+            requests.push(Box::pin(async move {
+                let _batch_permit =
+                    batch_semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| VlmError::Transport {
+                            operation: "official PDF",
+                            message: "semantic batch semaphore closed".into(),
+                        })?;
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| VlmError::Transport {
+                        operation: "official PDF",
+                        message: "layout semaphore closed".into(),
+                    })?;
+                match backend
+                    .predict_official_budgeted(
+                        request,
+                        max_response_bytes,
+                        Some(raw_budget),
+                        tokio::time::Instant::from_std(deadline),
+                    )
+                    .await
+                {
+                    // Only parse-class (Protocol) malformation of the LLM reply degrades to empty
+                    // content for this block. Resource/configuration failures and service
+                    // failures (Http/Transport/Timeout) stay fatal so a wrong key or dead server
+                    // is never masked as an empty successful document — same as classic.
+                    Ok((reply, raw_bytes, warnings)) => {
+                        Ok((order, original_index, reply, raw_bytes, bytes, warnings))
+                    }
+                    Err(error @ VlmError::Protocol { .. }) => Ok((
+                        order,
+                        original_index,
+                        String::new(),
+                        0,
+                        bytes,
+                        vec![format!(
+                            "semantic request failed: {error}; continuing with empty content"
+                        )],
+                    )),
+                    Err(error) => Err(error),
+                }
+            }));
+        }
+        // Phase 2, request-all: every retained candidate's HTTP request runs concurrently under
+        // the request-level semaphore; replies are backfilled by order.
+        while !requests.is_empty() {
+            let (order, block_index, reply, bytes, lease, request_warnings) =
+                requests.next().await.expect("nonempty request queue")?;
+            warnings.extend(request_warnings);
+            resident_bytes = resident_bytes
+                .checked_sub(lease)
+                .expect("request lease held");
+            if order >= replies.len() || block_index >= block_count {
+                return Err(protocol("official PDF", "semantic reply index is invalid"));
+            }
+            raw_bytes = raw_bytes.saturating_add(bytes);
+            replies[order] = Some((block_index, reply));
+            #[cfg(test)]
+            if let Some(hook) = &self.semantic_scheduler_hook {
+                (hook.completed)(order);
+                (hook.state)(resident_bytes, 0, requests.len());
+            }
+        }
+        self.complete_official_semantic_page(
+            blocks,
+            replies,
+            warnings,
+            raw_bytes,
+            encoded_bytes,
+            deadline,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -1424,6 +1772,16 @@ impl MinerUVlmClient {
             Vec<String>,
         )>,
     > {
+        // Document-wide resident-encoded-bytes ledger for the two-phase model: a defensive
+        // invariant sentinel, not a binding control. Each page's encode-all stage holds up to
+        // `max_encoded_batch_bytes` of encoded images while its request-all stage drains, every
+        // page in this window charges the ledger once, so the cumulative bound is the batch cap
+        // times the window's page count and it can only trip on broken accounting. Classic pages
+        // receive the same Arc but never charge it, so the classic path is unchanged.
+        let image_count = images.len().max(1);
+        let resident_encoded_budget = Arc::new(ByteBudget::new(
+            (max_encoded_batch_bytes as u64).saturating_mul(image_count as u64),
+        ));
         try_join_all(images.into_iter().map(|image| {
             self.official_two_step_snapshot_page_core(
                 image,
@@ -1437,6 +1795,7 @@ impl MinerUVlmClient {
                 max_encoded_batch_bytes,
                 raw_budget.clone(),
                 encoded_budget.clone(),
+                resident_encoded_budget.clone(),
                 deadline,
                 page_semaphore.clone(),
             )
@@ -1464,6 +1823,15 @@ impl MinerUVlmClient {
         let official_page_semaphore = Arc::new(Semaphore::new(OFFICIAL_PAGE_CONCURRENCY));
         let layout_semaphore = Arc::new(Semaphore::new(http.max_concurrency));
         let max_decoded_pixels = http.max_decoded_pixels;
+        let concurrency_model = config.concurrency_model;
+        // Two-phase encode-all parallelizes PNG encoding across candidates within a page. A
+        // global CPU semaphore keeps CPU-bound encoding at the machine's real parallelism
+        // instead of the one-slot-at-a-time classic encoder. Classic never acquires it.
+        let encode_cpu_semaphore = Arc::new(Semaphore::new(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
+        ));
         let image_config = Arc::new(http.clone());
         Ok(Self {
             backend: VlmBackend::Http(
@@ -1475,6 +1843,8 @@ impl MinerUVlmClient {
             preprocessor: MinerUVlmPreprocessor { config },
             layout_semaphore,
             official_page_semaphore,
+            concurrency_model,
+            encode_cpu_semaphore,
             #[cfg(test)]
             semantic_scheduler_hook: None,
         })
@@ -2553,6 +2923,18 @@ mod tests {
         PipelineState,
         mpsc::UnboundedReceiver<usize>,
     ) {
+        pipeline_client_with_model(hold, fail, ConcurrencyModel::Classic).await
+    }
+
+    async fn pipeline_client_with_model(
+        hold: &[usize],
+        fail: Option<usize>,
+        concurrency_model: ConcurrencyModel,
+    ) -> (
+        MinerUVlmClient,
+        PipelineState,
+        mpsc::UnboundedReceiver<usize>,
+    ) {
         let (arrivals, receiver) = mpsc::unbounded_channel();
         let state = PipelineState {
             arrivals,
@@ -2578,7 +2960,10 @@ mod tests {
                 max_concurrency: 2,
                 ..Default::default()
             },
-            MinerUVlmConfig::default(),
+            MinerUVlmConfig {
+                concurrency_model,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -2596,6 +2981,21 @@ mod tests {
         usize,
         Vec<String>,
     )> {
+        pipeline_page_capped(client, 3, count, batch_bytes).await
+    }
+
+    async fn pipeline_page_capped(
+        client: MinerUVlmClient,
+        semantic_cap: usize,
+        count: usize,
+        batch_bytes: usize,
+    ) -> VlmResult<(
+        Vec<ModelBlock>,
+        Vec<VlmLayoutBlock>,
+        usize,
+        usize,
+        Vec<String>,
+    )> {
         client
             .official_two_step_snapshot_window(
                 vec![Arc::new(RgbImage::new(32, 32))],
@@ -2603,7 +3003,7 @@ mod tests {
                 true,
                 true,
                 8,
-                3,
+                semantic_cap,
                 count,
                 1 << 20,
                 batch_bytes,
@@ -2930,6 +3330,717 @@ mod tests {
             Some(1)
         );
         assert_eq!(state.active.load(Ordering::SeqCst), 0);
+    }
+
+    // Deterministic two-phase mock: semantic replies are keyed by the decoded crop's top-left
+    // pixel, so reply content identifies the candidate regardless of request arrival order.
+    #[derive(Clone)]
+    struct OrderState {
+        semantic: Arc<AtomicUsize>,
+    }
+
+    async fn order_chat(
+        State(state): State<OrderState>,
+        Json(request): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        let layout = request.to_string().contains("Layout Detection");
+        let content = if layout {
+            "<|box_start|>0 0 300 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|><|box_start|>300 0 600 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|><|box_start|>600 0 1000 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>".into()
+        } else {
+            state.semantic.fetch_add(1, Ordering::SeqCst);
+            let data_url = request["messages"][1]["content"][0]["image_url"]["url"]
+                .as_str()
+                .unwrap();
+            let bytes = STANDARD
+                .decode(data_url.rsplit(',').next().unwrap())
+                .unwrap();
+            let page = image::load_from_memory(&bytes).unwrap().to_rgb8();
+            format!("reply-{}", page.get_pixel(0, 0)[0])
+        };
+        Json(json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]}))
+    }
+
+    async fn order_client_with_model(
+        concurrency_model: ConcurrencyModel,
+    ) -> (MinerUVlmClient, Arc<AtomicUsize>) {
+        let state = OrderState {
+            semantic: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(order_chat))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 2,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                concurrency_model,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        (client, state.semantic)
+    }
+
+    fn gradient_page() -> Arc<RgbImage> {
+        // Horizontal gradient: the three 300/1000-wide crops land on x = 0, 9, 19, so every
+        // candidate's top-left pixel is distinct and rotation-independent (`rotate_up` is Deg0).
+        Arc::new(RgbImage::from_fn(32, 32, |x, _| {
+            image::Rgb([x as u8, 0, 0])
+        }))
+    }
+
+    async fn order_page(
+        client: MinerUVlmClient,
+    ) -> VlmResult<(
+        Vec<ModelBlock>,
+        Vec<VlmLayoutBlock>,
+        usize,
+        usize,
+        Vec<String>,
+    )> {
+        client
+            .official_two_step_snapshot_window(
+                vec![gradient_page()],
+                false,
+                true,
+                true,
+                8,
+                3,
+                3,
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .await
+            .map(|mut pages| pages.remove(0))
+    }
+
+    #[tokio::test]
+    async fn two_phase_holds_all_requests_until_every_encode_finishes_and_backfills_by_order() {
+        let (mut client, semantic) = order_client_with_model(ConcurrencyModel::TwoPhase).await;
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (release_encoder_tx, release_encoder_rx) = std_mpsc::channel();
+        let release_encoder_rx = Arc::new(std::sync::Mutex::new(Some(release_encoder_rx)));
+        client.set_semantic_scheduler_hook(SemanticSchedulerHook {
+            before_encode: Arc::new(move |order| {
+                if order == 1 {
+                    let _ = started_tx.send(order);
+                    release_encoder_rx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .recv()
+                        .unwrap();
+                }
+            }),
+            after_encode: Arc::new(|_| {}),
+            state: Arc::new(|_, _, _| {}),
+            completed: Arc::new(|_| {}),
+        });
+        let task = tokio::spawn(order_page(client));
+        assert_eq!(
+            timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        // The two-phase pipeline sends no semantic request while any encode is still running
+        // (the classic pipeline would already have sent candidate 0's request here).
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(semantic.load(Ordering::SeqCst), 0);
+        release_encoder_tx.send(()).unwrap();
+        let (snapshot, _, _, _, warnings) = timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(semantic.load(Ordering::SeqCst), 3);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            snapshot
+                .into_iter()
+                .map(|block| block.content.unwrap())
+                .collect::<Vec<_>>(),
+            ["reply-0", "reply-9", "reply-19"]
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_and_classic_produce_identical_snapshots() {
+        let (classic, _) = order_client_with_model(ConcurrencyModel::Classic).await;
+        let (two_phase, _) = order_client_with_model(ConcurrencyModel::TwoPhase).await;
+        let classic = order_page(classic).await.unwrap();
+        let two_phase = order_page(two_phase).await.unwrap();
+        assert_eq!(
+            classic
+                .0
+                .iter()
+                .map(|block| (block.block_type.clone(), block.content.clone()))
+                .collect::<Vec<_>>(),
+            two_phase
+                .0
+                .iter()
+                .map(|block| (block.block_type.clone(), block.content.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            classic
+                .1
+                .iter()
+                .map(|block| (block.block_type.clone(), block.content.clone()))
+                .collect::<Vec<_>>(),
+            two_phase
+                .1
+                .iter()
+                .map(|block| (block.block_type.clone(), block.content.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(classic.2, two_phase.2);
+        assert_eq!(classic.3, two_phase.3);
+        assert_eq!(classic.4, two_phase.4);
+    }
+
+    #[tokio::test]
+    async fn two_phase_degrades_candidates_over_the_batch_cap_like_classic() {
+        // The pipeline mock served by a tiny-layout client: layout bytes stay negligible while
+        // the noisy full-size crops encode far more, so the batch cap is the binding constraint.
+        let (arrivals, _receiver) = mpsc::unbounded_channel();
+        let state = PipelineState {
+            arrivals,
+            semantic: Arc::new(AtomicUsize::new(0)),
+            release: (0..16).map(|_| Arc::new(Notify::new())).collect(),
+            hold: vec![false; 16],
+            fail: None,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(pipeline_chat))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 2,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                concurrency_model: ConcurrencyModel::TwoPhase,
+                layout_image_size: (11, 10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let image = Arc::new(RgbImage::from_fn(600, 600, |x, y| {
+            image::Rgb([
+                ((x * 31 + y * 17) % 4) as u8,
+                ((x * 17 + y * 31) % 4) as u8,
+                ((x + y) % 4) as u8,
+            ])
+        }));
+        // Deterministic mock crops let us derive each candidate's encoded size from probe runs,
+        // then set a batch cap that admits exactly the first candidate.
+        let page = |semantic_cap: usize, batch: usize| {
+            let client = client.clone();
+            let image = Arc::clone(&image);
+            async move {
+                client
+                    .official_two_step_snapshot_window(
+                        vec![image],
+                        false,
+                        true,
+                        true,
+                        8,
+                        semantic_cap,
+                        3,
+                        batch,
+                        batch,
+                        1 << 20,
+                        1 << 20,
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                    .await
+                    .map(|mut pages| pages.remove(0))
+            }
+        };
+        let layout_only = page(0, 1 << 20).await.unwrap();
+        let one = page(1, 1 << 20).await.unwrap();
+        let two = page(2, 1 << 20).await.unwrap();
+        let first = one.3 - layout_only.3;
+        let second = two.3 - one.3;
+        // Both caps equal `first + second - 1`: the first candidate fits, the second pushes the
+        // resident ledger over the batch cap and degrades to empty content, exactly like classic.
+        let (snapshot, _, _, _, warnings) = page(2, first + second - 1).await.unwrap();
+        // Only candidate 0's request is ever sent (its reply text is probe-count dependent, but
+        // non-empty); candidate 1 degrades to empty content; the third layout block has no
+        // candidate at the cap of two and stays content-less.
+        assert!(
+            snapshot[0]
+                .content
+                .as_deref()
+                .is_some_and(|content| !content.is_empty())
+        );
+        assert_eq!(snapshot[1].content.as_deref(), Some(""));
+        assert_eq!(snapshot[2].content.as_deref(), None);
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.contains("exceed the batch cap"))
+                .count(),
+            1,
+            "{warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_batch_degraded_candidates_do_not_charge_document_encoded_budget() {
+        // Same tiny-layout client as the degrade test: layout bytes stay negligible while the
+        // noisy full-size crops encode far more.
+        let (arrivals, _receiver) = mpsc::unbounded_channel();
+        let state = PipelineState {
+            arrivals,
+            semantic: Arc::new(AtomicUsize::new(0)),
+            release: (0..16).map(|_| Arc::new(Notify::new())).collect(),
+            hold: vec![false; 16],
+            fail: None,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(pipeline_chat))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 8,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                concurrency_model: ConcurrencyModel::TwoPhase,
+                layout_image_size: (11, 10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let image = Arc::new(RgbImage::from_fn(600, 600, |x, y| {
+            image::Rgb([
+                ((x * 31 + y * 17) % 4) as u8,
+                ((x * 17 + y * 31) % 4) as u8,
+                ((x + y) % 4) as u8,
+            ])
+        }));
+        let run = |semantic_cap: usize, batch: usize, encoded_budget: u64| {
+            let client = client.clone();
+            let image = Arc::clone(&image);
+            async move {
+                client
+                    .official_two_step_snapshot_window_with_budgets(
+                        vec![image],
+                        false,
+                        true,
+                        true,
+                        8,
+                        semantic_cap,
+                        3,
+                        batch,
+                        batch,
+                        Arc::new(ByteBudget::new(encoded_budget)),
+                        Arc::new(ByteBudget::new(1 << 20)),
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                    .await
+                    .map(|mut pages| pages.remove(0))
+            }
+        };
+        let layout_only = run(0, 1 << 20, 1 << 20).await.unwrap();
+        let one = run(1, 1 << 20, 1 << 20).await.unwrap();
+        let two = run(2, 1 << 20, 1 << 20).await.unwrap();
+        let layout = layout_only.3;
+        let first = one.3 - layout_only.3;
+        let second = two.3 - one.3;
+        assert!(first > 0 && second > 0, "probe sizes must be nonzero");
+        // A batch cap admitting exactly the first candidate batch-degrades the second. The
+        // document encoded budget fits the retained bytes (layout + first) but not the bytes of
+        // the encoded-then-degraded second candidate: degraded candidates never reach the
+        // server, so they must not count against the document budget or fail the page.
+        let batch = first + second - 1;
+        let (snapshot, _, _, _, warnings) = run(2, batch, (layout + first) as u64)
+            .await
+            .expect("batch-degraded candidates must not fail the document encoded budget");
+        assert!(
+            snapshot[0]
+                .content
+                .as_deref()
+                .is_some_and(|content| !content.is_empty())
+        );
+        assert_eq!(snapshot[1].content.as_deref(), Some(""));
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.contains("exceed the batch cap"))
+                .count(),
+            1,
+            "{warnings:?}"
+        );
+        // The counter-case: retained candidates over the document budget still fail hard.
+        let result = run(2, batch, (layout + first - 1) as u64).await;
+        assert!(
+            matches!(
+                &result,
+                Err(VlmError::LimitExceeded {
+                    resource: "encoded document bytes",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_document_resident_budget_fails_hard() {
+        let (client, _state, _arrivals) =
+            pipeline_client_with_model(&[], None, ConcurrencyModel::TwoPhase).await;
+        let layout_only = pipeline_page_capped(client.clone(), 0, 3, 1 << 20)
+            .await
+            .unwrap();
+        let one = pipeline_page_capped(client.clone(), 1, 3, 1 << 20)
+            .await
+            .unwrap();
+        let first = one.3 - layout_only.3;
+        // A document-resident budget that holds a single candidate: the second retained candidate
+        // trips the ledger and fails the whole page — a hard error like the encoded budget.
+        let result = client
+            .official_two_step_snapshot_page_core(
+                Arc::new(RgbImage::new(32, 32)),
+                false,
+                true,
+                true,
+                8,
+                3,
+                3,
+                1 << 20,
+                1 << 20,
+                Arc::new(ByteBudget::new(1 << 20)),
+                Arc::new(ByteBudget::new(1 << 20)),
+                Arc::new(ByteBudget::new(first as u64)),
+                Instant::now() + Duration::from_secs(10),
+                client.official_page_semaphore.clone(),
+            )
+            .await;
+        assert!(
+            matches!(
+                &result,
+                Err(VlmError::LimitExceeded {
+                    resource: "encoded resident bytes",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_window_resident_budget_scales_with_window_pages_not_page_concurrency() {
+        // A tiny-layout client keeps the layout image negligible so the per-page batch cap can be
+        // tightened down to the retained candidate bytes without skipping the layout request.
+        let (arrivals, _receiver) = mpsc::unbounded_channel();
+        let state = PipelineState {
+            arrivals,
+            semantic: Arc::new(AtomicUsize::new(0)),
+            release: (0..16).map(|_| Arc::new(Notify::new())).collect(),
+            hold: vec![false; 16],
+            fail: None,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(pipeline_chat))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 8,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                concurrency_model: ConcurrencyModel::TwoPhase,
+                layout_image_size: (11, 10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let image = Arc::new(RgbImage::from_fn(600, 600, |x, y| {
+            image::Rgb([
+                ((x * 31 + y * 17) % 4) as u8,
+                ((x * 17 + y * 31) % 4) as u8,
+                ((x + y) % 4) as u8,
+            ])
+        }));
+        let probe = |semantic_cap: usize| {
+            let client = client.clone();
+            let image = Arc::clone(&image);
+            async move {
+                client
+                    .official_two_step_snapshot_window(
+                        vec![image],
+                        false,
+                        true,
+                        true,
+                        8,
+                        semantic_cap,
+                        3,
+                        1 << 20,
+                        1 << 20,
+                        1 << 20,
+                        1 << 20,
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                    .await
+                    .map(|mut pages| pages.remove(0))
+            }
+        };
+        let layout_only = probe(0).await.unwrap();
+        let all = probe(3).await.unwrap();
+        // Each page's retained encoded bytes; charged once per page against the window's
+        // document-wide resident ledger.
+        let page_charge = all.3 - layout_only.3;
+        assert!(page_charge > 0, "probe pages must retain encoded bytes");
+        assert!(
+            layout_only.3 <= page_charge,
+            "layout bytes ({}) must fit under the per-page batch cap so the layout request survives",
+            layout_only.3
+        );
+        // A two-permit page semaphore with a four-page window: the resident cap must cover the
+        // window's four cumulative page charges, not just the two pages running at once. A batch
+        // cap of one page's charge leaves the old (permit-scaled) formula at 2x the window total.
+        let permits = Arc::new(Semaphore::new(2));
+        let result = client
+            .official_two_step_snapshot_window_with_budgets_and_page_semaphore(
+                (0..4).map(|_| Arc::clone(&image)).collect(),
+                false,
+                true,
+                true,
+                8,
+                3,
+                3,
+                page_charge,
+                page_charge,
+                Arc::new(ByteBudget::new(1 << 22)),
+                Arc::new(ByteBudget::new(1 << 22)),
+                Instant::now() + Duration::from_secs(10),
+                permits,
+            )
+            .await;
+        let pages = result.expect("a four-page window must not trip the resident ledger");
+        assert_eq!(pages.len(), 4);
+        // The semantic phase really ran on every page (three blocks with content each).
+        assert!(
+            pages
+                .iter()
+                .all(|page| page.0.len() == 3 && page.0.iter().all(|block| block.content.is_some())),
+            "{pages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_backfills_table_token_map_after_all_encodes() {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|Json(request): Json<serde_json::Value>| async move {
+                let content = if request.to_string().contains("Layout Detection") {
+                    "<|box_start|>0 0 1000 1000<|box_end|><|ref_start|>table<|ref_end|><|box_start|>100 100 200 200<|box_end|><|ref_start|>image<|ref_end|>"
+                } else {
+                    // [AAAA] is the token `mask_and_encode_table_image` inserts for the first
+                    // absorbed image; the cleaner only resolves it when the map was backfilled.
+                    "[AAAA]"
+                };
+                Json(json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]}))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                concurrency_model: ConcurrencyModel::TwoPhase,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (_, cleaned, _, _, _) = client
+            .official_two_step_snapshot_window(
+                vec![Arc::new(RgbImage::new(32, 32))],
+                false,
+                true,
+                true,
+                8,
+                2,
+                2,
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                1 << 20,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        // post_process strips the map key itself after cleaning, so the map's effect is observed
+        // through the resolved data URL in the table content.
+        assert_eq!(cleaned[0].block_type, BlockKind::TABLE);
+        assert!(
+            cleaned[0]
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("data:image/jpeg")),
+            "{:?}",
+            cleaned[0].content
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_limits_per_page_in_flight_semantic_requests_to_batch_cap() {
+        // HTTP concurrency 8, batch cap 2, three retained candidates: without the per-page batch
+        // semaphore all three requests would be dispatched at once; with it the third stays
+        // parked until one of the first two completes.
+        let (arrivals, mut receiver) = mpsc::unbounded_channel();
+        let state = PipelineState {
+            arrivals,
+            semantic: Arc::new(AtomicUsize::new(0)),
+            release: (0..3).map(|_| Arc::new(Notify::new())).collect(),
+            hold: vec![true, true, true],
+            fail: None,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(pipeline_chat))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 8,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                concurrency_model: ConcurrencyModel::TwoPhase,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let image = Arc::new(RgbImage::new(32, 32));
+        let task = tokio::spawn({
+            let client = client.clone();
+            let image = Arc::clone(&image);
+            async move {
+                client
+                    .official_two_step_snapshot_window(
+                        vec![image],
+                        false,
+                        true,
+                        true,
+                        8,
+                        3,
+                        2,
+                        1 << 20,
+                        1 << 20,
+                        1 << 20,
+                        1 << 20,
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                    .await
+                    .map(|mut pages| pages.remove(0))
+            }
+        });
+        // The two batch permits are taken: the first two semantic requests arrive and park at
+        // the server; the third stays parked on the per-page batch semaphore.
+        assert_eq!(
+            timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert!(
+            timeout(Duration::from_millis(300), receiver.recv())
+                .await
+                .is_err(),
+            "third semantic request dispatched while two are in flight"
+        );
+        assert!(state.peak.load(Ordering::SeqCst) <= 2);
+        // Release the first request; the third acquires the freed batch permit and arrives.
+        state.release[0].notify_waiters();
+        assert_eq!(
+            timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        state.release[1].notify_waiters();
+        state.release[2].notify_waiters();
+        timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            state.peak.load(Ordering::SeqCst) <= 2,
+            "per-page batch cap of 2 exceeded"
+        );
     }
 
     fn image_input() -> VlmImageInput {
@@ -4132,6 +5243,7 @@ mod tests {
                 1 << 20,
                 Arc::new(ByteBudget::new(1 << 20)),
                 Arc::new(ByteBudget::new(1 << 20)),
+                Arc::new(ByteBudget::new(1 << 20)),
                 Instant::now() + Duration::from_millis(20),
                 client.official_page_semaphore.clone(),
             ),
@@ -4515,6 +5627,7 @@ mod tests {
                     1 << 20,
                     raw.clone(),
                     encoded.clone(),
+                    Arc::new(ByteBudget::new(1 << 20)),
                     Instant::now() + Duration::from_secs(10),
                     client.official_page_semaphore.clone(),
                 )
@@ -4608,6 +5721,7 @@ mod tests {
                 1,
                 Arc::new(ByteBudget::new(1 << 20)),
                 Arc::new(ByteBudget::new(1 << 20)),
+                Arc::new(ByteBudget::new(1 << 20)),
                 deadline,
                 client.official_page_semaphore.clone(),
             )
@@ -4624,6 +5738,7 @@ mod tests {
                 1,
                 2,
                 1,
+                Arc::new(ByteBudget::new(1 << 20)),
                 Arc::new(ByteBudget::new(1 << 20)),
                 Arc::new(ByteBudget::new(1 << 20)),
                 deadline,

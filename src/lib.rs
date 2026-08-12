@@ -56,7 +56,7 @@ pub use types::{
     PageRange, PageResult, ParseOptions, PdfInput, Rotation,
 };
 pub use vlm_client::{MinerUVlmClient, MinerUVlmPreprocessor};
-pub use vlm_config::{MinerUVlmConfig, SamplingParams, VlmHeader, VlmHttpConfig};
+pub use vlm_config::{ConcurrencyModel, MinerUVlmConfig, SamplingParams, VlmHeader, VlmHttpConfig};
 pub use vlm_http::VlmHttpClient;
 pub use vlm_types::{
     ModelBlock, ModelOutput, OfficialOutputManifest, OfficialPdfOptions, VlmBatchCompletionStream,

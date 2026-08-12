@@ -741,10 +741,16 @@ async fn run_inner(
     let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
         resolved.page_concurrency,
         route.processing_window_size,
-        http.max_concurrency,
     )
     .map_err(|error| err(error.to_string()))?;
-    let client = MinerUVlmClient::connect(http, MinerUVlmConfig::default()).await?;
+    let client = MinerUVlmClient::connect(
+        http,
+        MinerUVlmConfig {
+            concurrency_model: resolved.concurrency_model,
+            ..Default::default()
+        },
+    )
+    .await?;
     for (candidate_id, path, kind, stem) in &candidates {
         if doomed.contains(path) {
             continue;

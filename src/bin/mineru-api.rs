@@ -152,6 +152,7 @@ fn main() -> ExitCode {
             env.table,
         )?
         .official_page_concurrency(env.official_page_concurrency)?
+        .concurrency_model(env.concurrency_model)
         .document_limits(env.document_limits)
         .http_config(env.http)
         .image_analysis(env.image_analysis)
@@ -243,6 +244,7 @@ struct StartupEnv {
     output_root: PathBuf,
     concurrency: usize,
     official_page_concurrency: usize,
+    concurrency_model: mineru::ConcurrencyModel,
     public_bind_exposed: bool,
     allow_public_http_client: bool,
     shutdown_on_stdin_eof: bool,
@@ -259,13 +261,14 @@ struct StartupEnv {
 /// timing, API transport timing, result-archive entries/ratio) are not read here; no worker may
 /// re-read a drifting process environment after startup. The VLM transport identity names are
 /// consumed as the frozen base `VlmHttpConfig` resolved at startup.
-const CONSUMED_NAMES: [&str; 84] = [
+const CONSUMED_NAMES: [&str; 85] = [
     "MINERU_API_OUTPUT_ROOT",
     "MINERU_API_MAX_CONCURRENT_REQUESTS",
     "MINERU_API_PUBLIC_BIND_EXPOSED",
     "MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT",
     "MINERU_API_SHUTDOWN_ON_STDIN_EOF",
     "MINERU_OFFICIAL_PAGE_CONCURRENCY",
+    "MINERU_OFFICIAL_CONCURRENCY_MODEL",
     "MINERU_PROCESSING_WINDOW_SIZE",
     "MINERU_PDF_RENDER_THREADS",
     "MINERU_PDF_RENDER_TIMEOUT",
@@ -400,6 +403,7 @@ fn startup_config(args: &Args) -> Result<StartupEnv, String> {
             .unwrap_or_else(|| PathBuf::from("./output")),
         concurrency: service.remote_concurrency,
         official_page_concurrency: core.page_concurrency,
+        concurrency_model: core.concurrency_model,
         public_bind_exposed: args
             .public_bind_exposed
             .or_else(|| {
@@ -795,7 +799,8 @@ mod tests {
         let env = configured(&[], &args(&[])).unwrap();
         assert_eq!(env.output_root, PathBuf::from("./output"));
         assert_eq!(env.concurrency, 3);
-        assert_eq!(env.official_page_concurrency, 4);
+        assert_eq!(env.official_page_concurrency, 64);
+        assert_eq!(env.concurrency_model, mineru::ConcurrencyModel::TwoPhase);
         assert_eq!(env.service.task_retention, Duration::from_secs(86400));
         assert_eq!(env.service.task_cleanup_interval, Duration::from_secs(300));
         assert_eq!(env.service.server.record_cap, 32);
@@ -810,6 +815,7 @@ mod tests {
                 ("MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT", "on"),
                 ("MINERU_API_SHUTDOWN_ON_STDIN_EOF", "1"),
                 ("MINERU_OFFICIAL_PAGE_CONCURRENCY", "9"),
+                ("MINERU_OFFICIAL_CONCURRENCY_MODEL", "classic"),
                 ("MINERU_PROCESSING_WINDOW_SIZE", "7"),
                 ("MINERU_PDF_RENDER_THREADS", "8"),
                 ("MINERU_PDF_RENDER_TIMEOUT", "9"),
@@ -824,6 +830,7 @@ mod tests {
         assert_eq!(env.concurrency, 1024);
         // Explicit page concurrency above the removed 1..=8 ceiling is accepted.
         assert_eq!(env.official_page_concurrency, 9);
+        assert_eq!(env.concurrency_model, mineru::ConcurrencyModel::Classic);
         assert_eq!(env.service.server.record_cap, 40);
         assert!(
             env.public_bind_exposed && env.allow_public_http_client && env.shutdown_on_stdin_eof
@@ -898,6 +905,24 @@ mod tests {
     }
 
     #[test]
+    fn official_concurrency_model_env_reaches_startup_config() {
+        // Explicit classic restores the single-encoder pipeline on the API-server path too,
+        // mirroring the direct CLI's `parse_model` semantics (case-insensitive classic|two-phase).
+        let env = configured(
+            &[("MINERU_OFFICIAL_CONCURRENCY_MODEL", "classic")],
+            &args(&[]),
+        )
+        .unwrap();
+        assert_eq!(env.concurrency_model, mineru::ConcurrencyModel::Classic);
+        let env = configured(
+            &[("MINERU_OFFICIAL_CONCURRENCY_MODEL", "Two-Phase")],
+            &args(&[]),
+        )
+        .unwrap();
+        assert_eq!(env.concurrency_model, mineru::ConcurrencyModel::TwoPhase);
+    }
+
+    #[test]
     fn malformed_startup_values_fail_strictly() {
         for (name, value) in [
             ("MINERU_API_MAX_CONCURRENT_REQUESTS", "bad"),
@@ -906,6 +931,8 @@ mod tests {
             ("MINERU_OFFICE_WALL_SECONDS", "0"),
             ("MINERU_OOXML_XML_DEPTH", "0"),
             ("MINERU_FORMULA_ENABLE", "yes"),
+            ("MINERU_OFFICIAL_CONCURRENCY_MODEL", "banana"),
+            ("MINERU_OFFICIAL_CONCURRENCY_MODEL", "1"),
         ] {
             let result = configured(&[(name, value)], &args(&[]));
             assert!(result.is_err(), "{name}={value}");

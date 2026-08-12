@@ -1,7 +1,7 @@
 //! Deliberately small protocol-2 task service.
 use crate::{
-    MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialOutputManifest, OfficialPdfOptions,
-    ProgressCallback, ProgressEvent, VlmHttpConfig,
+    ConcurrencyModel, MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialOutputManifest,
+    OfficialPdfOptions, ProgressCallback, ProgressEvent, VlmHttpConfig,
     input_prepare::{DocumentKind, RasterWorkers, prepare_with_warning_and_ooxml},
 };
 use axum::{
@@ -70,6 +70,7 @@ struct App {
     env_image_analysis: Option<bool>,
     concurrency: usize,
     official_page_concurrency: usize,
+    concurrency_model: ConcurrencyModel,
     retention: Duration,
     cleanup_interval: Duration,
     workers: Arc<Mutex<Option<WorkerRegistry>>>,
@@ -260,6 +261,7 @@ struct WorkerContext {
     env_table: Option<bool>,
     env_image_analysis: Option<bool>,
     official_page_concurrency: usize,
+    concurrency_model: ConcurrencyModel,
     office_workers: OfficeWorkers,
     raster_workers: RasterWorkers,
     events: Option<ProgressCallback>,
@@ -286,6 +288,7 @@ pub struct ServiceConfig {
     pub table: Option<bool>,
     image_analysis: Option<bool>,
     official_page_concurrency: usize,
+    concurrency_model: ConcurrencyModel,
     public_bind_exposed: bool,
     allow_public_http_client: bool,
     retention: Duration,
@@ -330,7 +333,8 @@ impl ServiceConfig {
                 formula,
                 table,
                 image_analysis: None,
-                official_page_concurrency: 4,
+                official_page_concurrency: 64,
+                concurrency_model: ConcurrencyModel::TwoPhase,
                 public_bind_exposed: false,
                 allow_public_http_client: false,
                 retention: Duration::from_secs(24 * 60 * 60),
@@ -371,6 +375,11 @@ impl ServiceConfig {
         }
         self.official_page_concurrency = concurrency;
         Ok(self)
+    }
+    #[doc(hidden)]
+    pub fn concurrency_model(mut self, model: ConcurrencyModel) -> Self {
+        self.concurrency_model = model;
+        self
     }
     #[doc(hidden)]
     pub fn public_policy(mut self, exposed: bool, allow_http_client: bool) -> Self {
@@ -607,6 +616,7 @@ pub async fn serve(
         env_table: config.table,
         env_image_analysis: config.image_analysis,
         official_page_concurrency: config.official_page_concurrency,
+        concurrency_model: config.concurrency_model,
         concurrency: config.concurrency,
         retention: config.retention,
         cleanup_interval: config.cleanup_interval,
@@ -1278,6 +1288,7 @@ fn worker_context(app: &App) -> WorkerContext {
         env_table: app.env_table,
         env_image_analysis: app.env_image_analysis,
         official_page_concurrency: app.official_page_concurrency,
+        concurrency_model: app.concurrency_model,
         office_workers: app.office_workers.clone(),
         raster_workers: app.raster_workers.clone(),
         events: app.events.clone(),
@@ -1657,14 +1668,16 @@ async fn run_task(
     let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
         app.official_page_concurrency,
         app.route.processing_window_size,
-        config.max_concurrency,
     )
     .map_err(|error| format!("page concurrency: {error}"))?;
     let client = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         MinerUVlmClient::connect_for_task(
             config,
-            MinerUVlmConfig::default(),
+            MinerUVlmConfig {
+                concurrency_model: app.concurrency_model,
+                ..Default::default()
+            },
             task_work_lease.clone(),
         ),
     )
@@ -3237,6 +3250,7 @@ mod tests {
             env_table: None,
             env_image_analysis: None,
             official_page_concurrency: 4,
+            concurrency_model: ConcurrencyModel::Classic,
             office_workers: OfficeWorkers::new().unwrap(),
             raster_workers: RasterWorkers::default(),
             events: None,
@@ -4079,6 +4093,7 @@ mod tests {
             env_table: None,
             env_image_analysis: None,
             official_page_concurrency: 4,
+            concurrency_model: ConcurrencyModel::Classic,
             concurrency: 1,
             retention: RETENTION,
             cleanup_interval: CLEANUP_INTERVAL,
@@ -4308,6 +4323,7 @@ mod tests {
                 env_table: None,
                 env_image_analysis: None,
                 official_page_concurrency: 4,
+                concurrency_model: ConcurrencyModel::Classic,
                 office_workers: OfficeWorkers::new().unwrap(),
                 raster_workers: RasterWorkers::default(),
                 events: Some(callback.clone()),
@@ -4559,6 +4575,7 @@ mod tests {
             env_table: None,
             env_image_analysis: None,
             official_page_concurrency: 4,
+            concurrency_model: ConcurrencyModel::Classic,
             office_workers: OfficeWorkers::new().unwrap(),
             raster_workers: RasterWorkers::default(),
             events: None,
@@ -5212,7 +5229,6 @@ mod tests {
             crate::official_route::effective_page_concurrency(
                 configured.official_page_concurrency,
                 configured.route.processing_window_size,
-                8,
             ),
             7
         );
@@ -5220,7 +5236,7 @@ mod tests {
             ServiceConfig::new(1, PathBuf::new(), OfficialPdfOptions::default(), None, None)
                 .unwrap()
                 .official_page_concurrency,
-            4
+            64
         );
         // Zero and values above the tokio semaphore capacity are rejected; the removed 1..=8
         // ceiling no longer clamps explicit values.

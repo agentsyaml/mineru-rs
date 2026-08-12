@@ -125,10 +125,11 @@ export MINERU_VL_API_KEY="<your-key>"
 | `--image-analysis <true\|false>` | `true` | 图像分析。显式布尔值，优先级 `CLI > MINERU_IMAGE_ANALYSIS_ENABLE > 默认值`。 |
 | `--log-level <级别>` | `info` | 日志级别：`trace`、`debug`、`info`、`success`、`warning`、`error`、`critical`。覆盖 `MINERU_LOG_LEVEL`。 |
 | `--processing-window-size <n>` | `64` | 页处理窗口。覆盖 `MINERU_PROCESSING_WINDOW_SIZE`。 |
-| `--page-concurrency <n>` | `4` | 官方页准入并发（任意正整数；仍受窗口与 HTTP 并发下限约束）。覆盖 `MINERU_OFFICIAL_PAGE_CONCURRENCY`。 |
+| `--page-concurrency <n>` | `64` | 页管线并发上限（任意正整数），仅约束同时运行的页管线数；实际请求级并发由 `--http-max-concurrency`/`MINERU_VLM_HTTP_CONCURRENCY` 决定。覆盖 `MINERU_OFFICIAL_PAGE_CONCURRENCY`。 |
+| `--concurrency-model <classic\|two-phase>` | `two-phase` | 并发模型：`classic` 经典单编码器流水；`two-phase` 将页内语义处理拆为 encode-all → request-all 两阶段（默认）。覆盖 `MINERU_OFFICIAL_CONCURRENCY_MODEL`。 |
 | `--render-workers <n>` | `3` | 渲染 worker 数；实际值受可用并行度与所选页数约束，不再被 3 封顶。覆盖 `MINERU_PDF_RENDER_THREADS`。 |
 | `--render-timeout-seconds <n>` | `300` | 单次渲染超时。覆盖 `MINERU_PDF_RENDER_TIMEOUT`。 |
-| `--batch-size <n>` | `32` | 每页语义推理请求准入（推理批大小），区别于页并发与处理窗口。覆盖 `MINERU_BATCH_SIZE`。 |
+| `--batch-size <n>` | `32` | 每页语义推理请求准入（推理批大小），区别于页并发与处理窗口；two-phase 模型下为每页请求阶段并发上限（受全局请求级信号量二次约束）。覆盖 `MINERU_BATCH_SIZE`。 |
 | `--total-deadline-seconds <n>` | `86400` | 单文档总 deadline。覆盖 `MINERU_TOTAL_DEADLINE_SECONDS`。 |
 | `--max-pdf-bytes <n>` | `1073741824` | 常驻源 PDF 上限。覆盖 `MINERU_MAX_PDF_BYTES`。 |
 | `--max-pages <n>` | `10000` | 每文档最大选中页数。覆盖 `MINERU_MAX_PAGES`。 |
@@ -149,7 +150,7 @@ VLM 传输旋钮（每个都有对应的环境拼写）：
 
 | Flag | 默认值 | 覆盖 |
 | --- | ---: | --- |
-| `--http-max-concurrency <n>` | `100` | `MINERU_VLM_HTTP_CONCURRENCY` |
+| `--http-max-concurrency <n>` | `100` | 全局请求级准入信号量（layout 与语义请求共用），决定服务端在途请求深度；建议 ≤ 服务端 vLLM `max_num_seqs`。覆盖 `MINERU_VLM_HTTP_CONCURRENCY`。 |
 | `--http-timeout-seconds <n>` | `600` | `MINERU_VLM_HTTP_TIMEOUT` |
 | `--connect-timeout-seconds <n>` | `10` | `MINERU_VLM_CONNECT_TIMEOUT` |
 | `--http-max-keepalive-connections <n>` | `20` | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` |
@@ -167,7 +168,7 @@ VLM 传输旋钮（每个都有对应的环境拼写）：
 
 直接模式下 `--method`、`--effort`、`--lang` 的非默认值会产生警告并被忽略。`--client-side-output-generation=true` 在 API 模式下会被拒绝。
 
-API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--processing-window-size`、`--render-*`、`--batch-size`、全部 `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--vlm-debug` 及其环境拼写）会显式报错，因为远程服务器执行解析、这些配置不会有任何消费者；`MINERU_VL_SERVER` 在未传 `--url` 时作为任务级 `server_url` 提交。
+API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--concurrency-model`、`--processing-window-size`、`--render-*`、`--batch-size`、全部 `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--vlm-debug` 及其环境拼写）会显式报错，因为远程服务器执行解析、这些配置不会有任何消费者；`MINERU_VL_SERVER` 在未传 `--url` 时作为任务级 `server_url` 提交。
 
 ---
 
@@ -261,14 +262,15 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_ZIP_SCAN_TOTAL_NAME_CAP` | `33554432` | ZIP 条目名合计字节上限（32 MiB）。 |
 | `MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP` | `1000000` | ZIP 路径组件合计上限。 |
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
-| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `4` | 官方页准入并发（任意正整数）。 |
+| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | 页管线并发上限（任意正整数），仅约束同时运行的页管线数；请求级并发由 `MINERU_VLM_HTTP_CONCURRENCY` 决定。 |
+| `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `two-phase` | 并发模型，取值 `classic\|two-phase`。`classic`：经典单编码器流水（旧行为）；`two-phase`：将页内语义处理拆为 encode-all → request-all 两阶段，解除 CPU 编码对请求派发的串行瓶颈，提升高并发下吞吐（默认）。 |
 | `MINERU_PDF_RENDER_THREADS` | `3` | 渲染 worker 数。 |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
 | `MINERU_FORMULA_ENABLE` | 开启 | 公式识别默认值（严格 `true`/`false`，不区分大小写）。 |
 | `MINERU_TABLE_ENABLE` | 开启 | 表格识别默认值（严格 `true`/`false`）。 |
 | `MINERU_IMAGE_ANALYSIS_ENABLE` | 开启 | 图像分析默认值（严格 `true`/`false`）。 |
 | `MINERU_LOG_LEVEL` | `info` | 日志级别；`critical` 静默进度输出。 |
-| `MINERU_BATCH_SIZE` | `32` | 每页语义推理请求准入。 |
+| `MINERU_BATCH_SIZE` | `32` | 每页语义推理请求准入（two-phase 下为每页请求阶段并发上限）。 |
 | `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | 单文档总 deadline。 |
 | `MINERU_MAX_PDF_BYTES` | `1073741824` | 常驻源 PDF 上限。 |
 | `MINERU_MAX_PAGES` | `10000` | 每文档最大选中页数。 |
@@ -282,7 +284,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_MAX_ENCODED_BATCH_BYTES` | `67108864` | 编码批上限。 |
 | `MINERU_MAX_TOTAL_ASSET_BYTES` | `1073741824` | 全部资产上限。 |
 | `MINERU_MAX_STAGED_TEXT_BYTES` | `268435456` | 暂存文本上限。 |
-| `MINERU_VLM_HTTP_CONCURRENCY` | `100` | VLM HTTP 并发。 |
+| `MINERU_VLM_HTTP_CONCURRENCY` | `100` | 全局请求级准入信号量（layout 与语义请求共用）；建议 ≤ 服务端 vLLM `max_num_seqs`。 |
 | `MINERU_VLM_HTTP_TIMEOUT` | `600` | VLM HTTP 请求超时秒数。 |
 | `MINERU_VLM_CONNECT_TIMEOUT` | `10` | 连接超时秒数。 |
 | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` | `20` | keepalive 连接池大小。 |

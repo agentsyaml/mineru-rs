@@ -18,7 +18,7 @@ use tokio::sync::Semaphore;
 pub(crate) struct OfficialPageConcurrency(Arc<Semaphore>);
 
 impl OfficialPageConcurrency {
-    pub(crate) fn new(configured: usize, window: usize, http: usize) -> VlmResult<Self> {
+    pub(crate) fn new(configured: usize, window: usize) -> VlmResult<Self> {
         // The tokio capacity is a legitimate representability bound; an explicit value above it
         // fails here instead of being silently reduced.
         if configured > Semaphore::MAX_PERMITS {
@@ -27,7 +27,7 @@ impl OfficialPageConcurrency {
             ));
         }
         Ok(Self(Arc::new(Semaphore::new(effective_page_concurrency(
-            configured, window, http,
+            configured, window,
         )))))
     }
 
@@ -40,11 +40,13 @@ impl OfficialPageConcurrency {
     }
 }
 
-pub(crate) fn effective_page_concurrency(configured: usize, window: usize, http: usize) -> usize {
-    // Runtime-derived minima express actual downstream capacity and remain. The lower bound of
-    // one keeps a degenerate derived input from creating a zero-permit semaphore; the
-    // `Semaphore::MAX_PERMITS` representability guard lives in `OfficialPageConcurrency::new`.
-    configured.min(window).min(http).max(1)
+pub(crate) fn effective_page_concurrency(configured: usize, window: usize) -> usize {
+    // The page semaphore now bounds only how many page pipelines run at once; HTTP admission is
+    // the request-level `layout_semaphore`'s job, so `http.max_concurrency` no longer enters the
+    // derivation. The lower bound of one keeps a degenerate derived input from creating a
+    // zero-permit semaphore; the `Semaphore::MAX_PERMITS` representability guard lives in
+    // `OfficialPageConcurrency::new`.
+    configured.min(window).max(1)
 }
 
 fn effective_render_workers(
@@ -2539,22 +2541,22 @@ mod tests {
     }
 
     #[test]
-    fn page_concurrency_obeys_window_and_http_bounds_and_rejects_unrepresentable() {
-        assert_eq!(effective_page_concurrency(4, 2, 8), 2);
-        assert_eq!(effective_page_concurrency(4, 8, 3), 3);
-        assert_eq!(effective_page_concurrency(4, 8, 8), 4);
+    fn page_concurrency_obeys_window_bound_and_rejects_unrepresentable() {
+        assert_eq!(effective_page_concurrency(4, 2), 2);
+        // HTTP concurrency no longer participates: a low http cap does not clamp the page cap.
+        assert_eq!(effective_page_concurrency(4, 8), 4);
+        assert_eq!(effective_page_concurrency(16, 8), 8);
+        assert_eq!(effective_page_concurrency(16, 3), 3);
         // Values above the removed 1..=8 ceiling flow through and meet actual capacities.
-        assert_eq!(effective_page_concurrency(16, 8, 8), 8);
+        assert_eq!(effective_page_concurrency(64, 64), 64);
         // No silent clamp: the pure derivation is min(...), and the tokio-capacity guard lives
         // in `OfficialPageConcurrency::new`, where explicit values fail.
         assert_eq!(
-            effective_page_concurrency(usize::MAX, usize::MAX, usize::MAX),
+            effective_page_concurrency(usize::MAX, usize::MAX),
             usize::MAX
         );
-        assert!(OfficialPageConcurrency::new(usize::MAX, usize::MAX, usize::MAX).is_err());
-        assert!(
-            OfficialPageConcurrency::new(Semaphore::MAX_PERMITS, usize::MAX, usize::MAX).is_ok()
-        );
+        assert!(OfficialPageConcurrency::new(usize::MAX, usize::MAX).is_err());
+        assert!(OfficialPageConcurrency::new(Semaphore::MAX_PERMITS, usize::MAX).is_ok());
     }
 
     #[tokio::test]

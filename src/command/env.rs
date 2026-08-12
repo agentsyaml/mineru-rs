@@ -1,8 +1,10 @@
-use crate::{OfficialPdfOptions, VlmHttpConfig};
+use crate::{ConcurrencyModel, OfficialPdfOptions, VlmHttpConfig};
 use std::{ffi::OsString, time::Duration};
 
-/// Canonical default for the official page-admission semaphore.
-const DEFAULT_PAGE_CONCURRENCY: usize = 4;
+/// Canonical default for the official page-admission semaphore. The page semaphore bounds only
+/// how many page pipelines run at once; HTTP admission is the request-level `layout_semaphore`'s
+/// job, so this no longer needs to stay near the HTTP concurrency.
+const DEFAULT_PAGE_CONCURRENCY: usize = 64;
 
 /// Typed, crate-private CLI/environment override set for core operational policy.
 ///
@@ -13,6 +15,7 @@ const DEFAULT_PAGE_CONCURRENCY: usize = 4;
 pub struct CoreOverrides {
     pub processing_window_size: Option<usize>,
     pub page_concurrency: Option<usize>,
+    pub concurrency_model: Option<ConcurrencyModel>,
     pub render_workers: Option<usize>,
     pub render_timeout: Option<Duration>,
     pub max_pdf_bytes: Option<usize>,
@@ -52,6 +55,7 @@ pub struct CoreOverrides {
 pub struct ResolvedCore {
     pub route: OfficialPdfOptions,
     pub page_concurrency: usize,
+    pub concurrency_model: ConcurrencyModel,
     pub http: VlmHttpConfig,
 }
 
@@ -67,6 +71,10 @@ pub fn parse_core_overrides(
         page_concurrency: positive_usize(
             lookup("MINERU_OFFICIAL_PAGE_CONCURRENCY"),
             "MINERU_OFFICIAL_PAGE_CONCURRENCY",
+        )?,
+        concurrency_model: parse_model(
+            lookup("MINERU_OFFICIAL_CONCURRENCY_MODEL"),
+            "MINERU_OFFICIAL_CONCURRENCY_MODEL",
         )?,
         render_workers: positive_usize(
             lookup("MINERU_PDF_RENDER_THREADS"),
@@ -189,13 +197,27 @@ pub fn resolve_core(
     let environment = parse_core_overrides(&lookup)?;
     let mut route = OfficialPdfOptions::default();
     let mut page_concurrency = DEFAULT_PAGE_CONCURRENCY;
+    let mut concurrency_model = ConcurrencyModel::default();
     let mut http =
         VlmHttpConfig::from_env(|name| lookup(name).and_then(|value| value.into_string().ok()));
-    apply_core(&environment, &mut route, &mut page_concurrency, &mut http)?;
-    apply_core(cli, &mut route, &mut page_concurrency, &mut http)?;
+    apply_core(
+        &environment,
+        &mut route,
+        &mut page_concurrency,
+        &mut concurrency_model,
+        &mut http,
+    )?;
+    apply_core(
+        cli,
+        &mut route,
+        &mut page_concurrency,
+        &mut concurrency_model,
+        &mut http,
+    )?;
     Ok(ResolvedCore {
         route,
         page_concurrency,
+        concurrency_model,
         http,
     })
 }
@@ -204,6 +226,7 @@ fn apply_core(
     overrides: &CoreOverrides,
     route: &mut OfficialPdfOptions,
     page_concurrency: &mut usize,
+    concurrency_model: &mut ConcurrencyModel,
     http: &mut VlmHttpConfig,
 ) -> Result<(), String> {
     if let Some(value) = overrides.processing_window_size {
@@ -214,6 +237,9 @@ fn apply_core(
             return Err("page concurrency exceeds the tokio semaphore capacity".into());
         }
         *page_concurrency = value;
+    }
+    if let Some(value) = overrides.concurrency_model {
+        *concurrency_model = value;
     }
     if let Some(value) = overrides.render_workers {
         route.render_workers = value;
@@ -412,6 +438,24 @@ pub(crate) fn strict_bool(value: Option<OsString>, name: &str) -> Result<Option<
     }
 }
 
+/// Strict concurrency-model lexer: case-insensitive `classic`/`two-phase` (trimmed). Every other
+/// value, including empty, `1`, or non-UTF-8, fails rather than silently falling back.
+pub(crate) fn parse_model(
+    value: Option<OsString>,
+    name: &str,
+) -> Result<Option<ConcurrencyModel>, String> {
+    let Some(value) = value else { return Ok(None) };
+    let text = value
+        .to_str()
+        .ok_or_else(|| format!("{name} must be classic or two-phase"))?
+        .trim();
+    match text.to_ascii_lowercase().as_str() {
+        "classic" => Ok(Some(ConcurrencyModel::Classic)),
+        "two-phase" => Ok(Some(ConcurrencyModel::TwoPhase)),
+        _ => Err(format!("{name} must be classic or two-phase")),
+    }
+}
+
 pub(crate) fn nonnegative_usize(
     value: Option<OsString>,
     name: &str,
@@ -491,6 +535,7 @@ mod tests {
         let lookup = lookup_map(&[
             ("MINERU_PROCESSING_WINDOW_SIZE", "1_024"),
             ("MINERU_OFFICIAL_PAGE_CONCURRENCY", "9"),
+            ("MINERU_OFFICIAL_CONCURRENCY_MODEL", "two-phase"),
             ("MINERU_PDF_RENDER_THREADS", "16"),
             ("MINERU_PDF_RENDER_TIMEOUT", "600"),
             ("MINERU_MAX_PDF_BYTES", "18446744073709551615"),
@@ -527,6 +572,10 @@ mod tests {
         let overrides = parse_core_overrides(&lookup).unwrap();
         assert_eq!(overrides.processing_window_size, Some(1024));
         assert_eq!(overrides.page_concurrency, Some(9));
+        assert_eq!(
+            overrides.concurrency_model,
+            Some(ConcurrencyModel::TwoPhase)
+        );
         assert_eq!(overrides.render_workers, Some(16));
         assert_eq!(overrides.render_timeout, Some(Duration::from_secs(600)));
         assert_eq!(overrides.max_pdf_bytes, Some(usize::MAX));
@@ -569,6 +618,8 @@ mod tests {
         for (name, value) in [
             ("MINERU_PROCESSING_WINDOW_SIZE", "0"),
             ("MINERU_OFFICIAL_PAGE_CONCURRENCY", "bad"),
+            ("MINERU_OFFICIAL_CONCURRENCY_MODEL", "banana"),
+            ("MINERU_OFFICIAL_CONCURRENCY_MODEL", "1"),
             ("MINERU_PDF_RENDER_THREADS", "-1"),
             ("MINERU_PDF_RENDER_TIMEOUT", "1e3"),
             ("MINERU_MAX_PDF_BYTES", "18446744073709551616"),
@@ -619,6 +670,7 @@ mod tests {
             "MINERU_MAX_PAGES",
             "MINERU_FORMULA_ENABLE",
             "MINERU_VL_DEBUG_ENABLE",
+            "MINERU_OFFICIAL_CONCURRENCY_MODEL",
         ] {
             let lookup =
                 |candidate: &str| (candidate == name).then(|| OsString::from_vec(vec![0xff]));
@@ -659,10 +711,25 @@ mod tests {
         assert_eq!(resolved.http.max_concurrency, 64);
         assert_eq!(resolved.http.http_timeout, Duration::from_secs(180));
         assert_eq!(resolved.http.retry_backoff_factor, 0.125);
+        // Neither the environment nor the CLI configured a model: the default is two-phase.
+        assert_eq!(resolved.concurrency_model, ConcurrencyModel::TwoPhase);
         // Environment still feeds the knobs the CLI did not configure.
         assert_eq!(resolved.route.max_layout_blocks_per_page, 300);
         assert_eq!(resolved.http.max_keepalive_connections, 20);
         assert_eq!(resolved.route.max_pdf_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn resolve_core_explicit_classic_override_still_wins_over_the_two_phase_default() {
+        let env = lookup_map(&[("MINERU_OFFICIAL_CONCURRENCY_MODEL", "classic")]);
+        let resolved = resolve_core(&env, &CoreOverrides::default()).unwrap();
+        assert_eq!(resolved.concurrency_model, ConcurrencyModel::Classic);
+        let cli = CoreOverrides {
+            concurrency_model: Some(ConcurrencyModel::Classic),
+            ..Default::default()
+        };
+        let resolved = resolve_core(|_| None, &cli).unwrap();
+        assert_eq!(resolved.concurrency_model, ConcurrencyModel::Classic);
     }
 
     #[test]
@@ -678,6 +745,10 @@ mod tests {
         match name {
             "MINERU_PROCESSING_WINDOW_SIZE" => route.processing_window_size.to_string(),
             "MINERU_OFFICIAL_PAGE_CONCURRENCY" => resolved.page_concurrency.to_string(),
+            "MINERU_OFFICIAL_CONCURRENCY_MODEL" => match resolved.concurrency_model {
+                ConcurrencyModel::Classic => "classic".to_owned(),
+                ConcurrencyModel::TwoPhase => "two-phase".to_owned(),
+            },
             "MINERU_PDF_RENDER_THREADS" => route.render_workers.to_string(),
             "MINERU_PDF_RENDER_TIMEOUT" => route.render_timeout.as_secs().to_string(),
             "MINERU_MAX_PDF_BYTES" => route.max_pdf_bytes.to_string(),
@@ -727,6 +798,7 @@ mod tests {
         const TABLE: &[(&str, &str, &str)] = &[
             ("MINERU_PROCESSING_WINDOW_SIZE", "8", "16"),
             ("MINERU_OFFICIAL_PAGE_CONCURRENCY", "9", "24"),
+            ("MINERU_OFFICIAL_CONCURRENCY_MODEL", "two-phase", "classic"),
             ("MINERU_PDF_RENDER_THREADS", "5", "6"),
             ("MINERU_PDF_RENDER_TIMEOUT", "120", "240"),
             ("MINERU_MAX_PDF_BYTES", "700", "900"),
