@@ -829,6 +829,9 @@ pub struct MinerUVlmClient {
     concurrency_model: ConcurrencyModel,
     /// Global CPU cap for parallel semantic-candidate encoding (two-phase model).
     encode_cpu_semaphore: Arc<Semaphore>,
+    /// Chunk size for the two-phase encode-all stage: equals the encode CPU semaphore's
+    /// capacity so one chunk's encoders run fully in parallel without internal queueing.
+    encode_cpu_parallelism: usize,
     #[cfg(test)]
     semantic_scheduler_hook: Option<SemanticSchedulerHook>,
 }
@@ -1399,13 +1402,12 @@ impl MinerUVlmClient {
     /// single-slot pipeline; degradation, deadline, budget, order, and FailFast semantics match
     /// the classic path, only the concurrency shape differs.
     ///
-    /// Memory characteristic: encode-all accumulates every retained candidate's encoded image in
-    /// `results` until the request-all stage drains them, so a single page's encoded peak can
-    /// exceed `max_encoded_batch_bytes` (that cap only gates which requests are retained). This
-    /// is the deliberate two-phase trade-off — staging all encoded images first buys request
-    /// depth. The document-wide resident-bytes ledger (`resident_encoded_budget`) is a defensive
-    /// invariant sentinel that bounds cumulative retained bytes across the window (batch cap
-    /// times window page count), not a page-residency cap.
+    /// Memory characteristic: encode-all stages candidates in chunks of `encode_cpu_parallelism`
+    /// (the encode CPU semaphore's capacity), retaining or degrading each chunk's results before
+    /// the next chunk encodes, so a single page's encoded peak stays at `max_encoded_batch_bytes`
+    /// plus one chunk. The document-wide resident-bytes ledger (`resident_encoded_budget`) is a
+    /// defensive invariant sentinel that bounds cumulative retained bytes across the window
+    /// (batch cap times window page count), not a page-residency cap.
     #[allow(clippy::too_many_arguments)]
     async fn official_two_step_semantic_two_phase(
         &self,
@@ -1432,66 +1434,158 @@ impl MinerUVlmClient {
         let block_count = blocks.len();
         let max_pixels = self.max_decoded_pixels;
         let mut replies = vec![None; candidates.len()];
-        // Phase 1, encode-all: every candidate encodes in parallel, bounded by the global CPU
-        // semaphore. The encoders never touch `blocks`; each returns its table token map so the
-        // map is backfilled once, after every encode finished (parallel writes into shared
-        // storage would race).
+        // Phase 1, encode-all in chunks: candidates encode in chunks of the encode CPU
+        // semaphore's capacity so one chunk runs fully in parallel, then each chunk's results
+        // are immediately retained or degraded (classic rules) before the next chunk encodes.
+        // Peak residency is therefore <= max_encoded_batch_bytes plus one chunk. The encoders
+        // never touch `blocks`; each returns its table token map so the map is backfilled
+        // between chunks (no encoder runs concurrently with a backfill).
+        //
+        // Note: accounting timing differs slightly from classic — chunks before a later encode
+        // failure may already have been charged to the document budgets, but the page returns
+        // Err and the whole document aborts, so those charges are unobservable. Deliberately
+        // accepted.
         type TwoPhaseEncoder =
             Pin<Box<dyn Future<Output = VlmResult<(EncodedCandidateWithTokens, usize)>> + Send>>;
-        let mut results: Vec<Option<EncodedCandidateWithTokens>> =
-            (0..candidates.len()).map(|_| None).collect();
+        let chunk = self.encode_cpu_parallelism.max(1);
+        let mut resident_bytes = 0usize;
+        // Retained candidates in source order, drained by the request-all stage.
+        let mut retained: Vec<(
+            usize,
+            VlmEncodedImage,
+            String,
+            Option<SamplingParams>,
+            usize,
+        )> = Vec::new();
         {
-            let mut encoders: FuturesUnordered<TwoPhaseEncoder> = FuturesUnordered::new();
             let cpu_semaphore = self.encode_cpu_semaphore.clone();
-            for (order, candidate) in candidates.iter().enumerate() {
-                let candidate = candidate.clone();
-                let page = page.clone();
-                let client = self.clone();
-                let preprocessor = client.preprocessor.clone();
-                let semaphore = cpu_semaphore.clone();
-                #[cfg(test)]
-                let scheduler_hook = self.semantic_scheduler_hook.clone();
-                encoders.push(Box::pin(async move {
-                    let _permit =
-                        semaphore
-                            .acquire_owned()
+            let mut chunk_start = 0;
+            while chunk_start < candidates.len() {
+                let chunk_end = (chunk_start + chunk).min(candidates.len());
+                let mut encoders: FuturesUnordered<TwoPhaseEncoder> = FuturesUnordered::new();
+                for (local_idx, candidate) in candidates[chunk_start..chunk_end].iter().enumerate()
+                {
+                    let order = chunk_start + local_idx;
+                    let candidate = candidate.clone();
+                    let page = page.clone();
+                    let client = self.clone();
+                    let preprocessor = client.preprocessor.clone();
+                    let semaphore = cpu_semaphore.clone();
+                    #[cfg(test)]
+                    let scheduler_hook = self.semantic_scheduler_hook.clone();
+                    encoders.push(Box::pin(async move {
+                        let _permit =
+                            semaphore
+                                .acquire_owned()
+                                .await
+                                .map_err(|_| VlmError::Transport {
+                                    operation: "official PDF",
+                                    message: "encode semaphore closed".into(),
+                                })?;
+                        client
+                            .official_blocking(deadline, move || {
+                                #[cfg(test)]
+                                if let Some(hook) = &scheduler_hook {
+                                    (hook.before_encode)(order);
+                                }
+                                let prepared = preprocessor
+                                    .encode_semantic_candidate_capped_with_tokens(
+                                        &page, &candidate, max_pixels,
+                                    )?;
+                                #[cfg(test)]
+                                if let Some(hook) = &scheduler_hook {
+                                    (hook.after_encode)(order);
+                                }
+                                Ok((
+                                    (prepared.0, prepared.1, prepared.2, prepared.3, prepared.4),
+                                    order,
+                                ))
+                            })
                             .await
-                            .map_err(|_| VlmError::Transport {
-                                operation: "official PDF",
-                                message: "encode semaphore closed".into(),
+                    }));
+                }
+                let mut chunk_results: Vec<Option<EncodedCandidateWithTokens>> =
+                    (0..(chunk_end - chunk_start)).map(|_| None).collect();
+                while let Some(result) = encoders.next().await {
+                    // FailFast: an encode failure is internal (never LLM malformation), so the
+                    // first error aborts the page exactly like the classic single-slot encoder.
+                    let (encoded, order) = result?;
+                    chunk_results[order - chunk_start] = Some(encoded);
+                }
+                // Retain or degrade this chunk in source order with the classic page-local
+                // accounting rules (order, token-map backfill, and warning text unchanged).
+                for (local_idx, chunk_result) in chunk_results.into_iter().enumerate() {
+                    let order = chunk_start + local_idx;
+                    let (image, prompt, sampling, original_index, tokens) =
+                        chunk_result.expect("two-phase chunk encode result present");
+                    let bytes = image.data.len();
+                    if order >= replies.len() || original_index >= block_count {
+                        return Err(protocol("official PDF", "semantic reply index is invalid"));
+                    }
+                    if !tokens.is_empty() {
+                        blocks[original_index].metadata.insert(
+                            "_table_image_token_map".into(),
+                            serde_json::Value::Object(tokens),
+                        );
+                    }
+                    if bytes > max_encoded_request_bytes {
+                        // A single block that encodes over the per-request cap degrades to empty
+                        // content for this block only; sibling blocks and the page continue
+                        // (mirrors the classic Protocol arm).
+                        warnings.push(cap_warning(
+                            "semantic",
+                            bytes,
+                            max_encoded_request_bytes,
+                            "per-request",
+                            "empty content",
+                        ));
+                        replies[order] = Some((original_index, String::new()));
+                        continue;
+                    }
+                    // Overflow in the resident-bytes ledger is an internal invariant break, never
+                    // degrade: keep it fatal (the tolerance arms only ever see LLM malformation).
+                    let resident_after =
+                        resident_bytes
+                            .checked_add(bytes)
+                            .ok_or(VlmError::LimitExceeded {
+                                resource: "encoded batch bytes",
+                                limit: max_encoded_batch_bytes as u64,
+                                actual: u64::MAX,
                             })?;
-                    client
-                        .official_blocking(deadline, move || {
-                            #[cfg(test)]
-                            if let Some(hook) = &scheduler_hook {
-                                (hook.before_encode)(order);
-                            }
-                            let prepared = preprocessor
-                                .encode_semantic_candidate_capped_with_tokens(
-                                    &page, &candidate, max_pixels,
-                                )?;
-                            #[cfg(test)]
-                            if let Some(hook) = &scheduler_hook {
-                                (hook.after_encode)(order);
-                            }
-                            Ok((
-                                (prepared.0, prepared.1, prepared.2, prepared.3, prepared.4),
-                                order,
-                            ))
-                        })
-                        .await
-                }));
-            }
-            while let Some(result) = encoders.next().await {
-                // FailFast: an encode failure is internal (never LLM malformation), so the first
-                // error aborts the page exactly like the classic single-slot encoder would.
-                let (encoded, order) = result?;
-                results[order] = Some(encoded);
+                    if resident_after > max_encoded_batch_bytes {
+                        warnings.push(cap_warning(
+                            "semantic",
+                            bytes,
+                            max_encoded_batch_bytes,
+                            "batch",
+                            "empty content",
+                        ));
+                        replies[order] = Some((original_index, String::new()));
+                        continue;
+                    }
+                    resident_bytes = resident_after;
+                    // The document-level encoded budget and the returned encoded-bytes accounting
+                    // count only the retained candidates: the bytes of per-request- or
+                    // batch-degraded candidates never reach the server, so charging them could
+                    // only push the document over its budget and fail the whole page — the
+                    // failure mode classic avoids by never encoding admission-gated candidates.
+                    // (Classic still charges per-request-degraded candidates as a historical
+                    // quirk; two-phase is deliberately stricter and counts only what is actually
+                    // requested.)
+                    encoded_budget.charge(bytes as u64, "encoded document bytes")?;
+                    encoded_bytes = encoded_bytes.saturating_add(bytes);
+                    // Document-wide resident-encoded-bytes ledger created by the window function.
+                    // It is a defensive invariant sentinel, not a binding control: per-page
+                    // retained bytes stay <= the batch cap and every page in the window charges
+                    // once, so the cumulative bound is batch x window pages and it can only trip
+                    // on broken accounting — when it does, it fails the document exactly like the
+                    // encoded budget.
+                    resident_encoded_budget.charge(bytes as u64, "encoded resident bytes")?;
+                    retained.push((order, image, prompt, sampling, original_index));
+                }
+                chunk_start = chunk_end;
             }
         }
-        // Page-local accounting with the classic degradation rules, then one token-map backfill
-        // and one document-resident-budget charge per retained candidate.
-        let mut resident_bytes = 0usize;
         type TwoPhaseRequest = Pin<
             Box<
                 dyn Future<Output = VlmResult<(usize, usize, String, usize, usize, Vec<String>)>>
@@ -1507,71 +1601,8 @@ impl MinerUVlmClient {
         // by the page core before we get here; `.max(1)` guards the semaphore constructor.
         let batch_semaphore = Arc::new(Semaphore::new(max_requests_per_batch.max(1)));
         let max_response_bytes = self.image_config.max_response_bytes;
-        for order in 0..candidates.len() {
-            let (image, prompt, sampling, original_index, tokens) = results[order]
-                .take()
-                .expect("two-phase encode result present");
+        for (order, image, prompt, sampling, original_index) in retained {
             let bytes = image.data.len();
-            if order >= replies.len() || original_index >= block_count {
-                return Err(protocol("official PDF", "semantic reply index is invalid"));
-            }
-            if !tokens.is_empty() {
-                blocks[original_index].metadata.insert(
-                    "_table_image_token_map".into(),
-                    serde_json::Value::Object(tokens),
-                );
-            }
-            if bytes > max_encoded_request_bytes {
-                // A single block that encodes over the per-request cap degrades to empty content
-                // for this block only; sibling blocks and the page continue (mirrors the classic
-                // Protocol arm).
-                warnings.push(cap_warning(
-                    "semantic",
-                    bytes,
-                    max_encoded_request_bytes,
-                    "per-request",
-                    "empty content",
-                ));
-                replies[order] = Some((original_index, String::new()));
-                continue;
-            }
-            // Overflow in the resident-bytes ledger is an internal invariant break, never
-            // degrade: keep it fatal (the tolerance arms only ever see LLM malformation).
-            let resident_after =
-                resident_bytes
-                    .checked_add(bytes)
-                    .ok_or(VlmError::LimitExceeded {
-                        resource: "encoded batch bytes",
-                        limit: max_encoded_batch_bytes as u64,
-                        actual: u64::MAX,
-                    })?;
-            if resident_after > max_encoded_batch_bytes {
-                warnings.push(cap_warning(
-                    "semantic",
-                    bytes,
-                    max_encoded_batch_bytes,
-                    "batch",
-                    "empty content",
-                ));
-                replies[order] = Some((original_index, String::new()));
-                continue;
-            }
-            resident_bytes = resident_after;
-            // The document-level encoded budget and the returned encoded-bytes accounting count
-            // only the retained candidates: the bytes of per-request- or batch-degraded
-            // candidates never reach the server, so charging them could only push the document
-            // over its budget and fail the whole page — the failure mode classic avoids by never
-            // encoding admission-gated candidates. (Classic still charges per-request-degraded
-            // candidates as a historical quirk; two-phase is deliberately stricter and counts
-            // only what is actually requested.)
-            encoded_budget.charge(bytes as u64, "encoded document bytes")?;
-            encoded_bytes = encoded_bytes.saturating_add(bytes);
-            // Document-wide resident-encoded-bytes ledger created by the window function. It is
-            // a defensive invariant sentinel, not a binding control: per-page retained bytes
-            // stay <= the batch cap and every page in the window charges once, so the cumulative
-            // bound is batch x window pages and it can only trip on broken accounting — when it
-            // does, it fails the document exactly like the encoded budget.
-            resident_encoded_budget.charge(bytes as u64, "encoded resident bytes")?;
             let request = self.request(
                 VlmImageInput::Bytes {
                     data: image.data,
@@ -1827,11 +1858,10 @@ impl MinerUVlmClient {
         // Two-phase encode-all parallelizes PNG encoding across candidates within a page. A
         // global CPU semaphore keeps CPU-bound encoding at the machine's real parallelism
         // instead of the one-slot-at-a-time classic encoder. Classic never acquires it.
-        let encode_cpu_semaphore = Arc::new(Semaphore::new(
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4),
-        ));
+        let encode_cpu_parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let encode_cpu_semaphore = Arc::new(Semaphore::new(encode_cpu_parallelism));
         let image_config = Arc::new(http.clone());
         Ok(Self {
             backend: VlmBackend::Http(
@@ -1845,6 +1875,7 @@ impl MinerUVlmClient {
             official_page_semaphore,
             concurrency_model,
             encode_cpu_semaphore,
+            encode_cpu_parallelism,
             #[cfg(test)]
             semantic_scheduler_hook: None,
         })
@@ -1852,6 +1883,10 @@ impl MinerUVlmClient {
     #[cfg(test)]
     fn set_semantic_scheduler_hook(&mut self, hook: SemanticSchedulerHook) {
         self.semantic_scheduler_hook = Some(hook);
+    }
+    #[cfg(test)]
+    fn set_encode_cpu_parallelism(&mut self, parallelism: usize) {
+        self.encode_cpu_parallelism = parallelism.max(1);
     }
     pub(crate) fn task_work_lease(&self) -> TaskWorkLease {
         self.task_work_lease.clone()
@@ -4051,6 +4086,172 @@ mod tests {
             state.peak.load(Ordering::SeqCst) <= 2,
             "per-page batch cap of 2 exceeded"
         );
+    }
+
+    /// Tiny-layout two-phase client whose chunk size is fixed by the test. The tiny layout
+    /// keeps layout bytes negligible so the per-page batch cap binds on candidate bytes only.
+    async fn chunked_two_phase_client(chunk: usize) -> MinerUVlmClient {
+        let (arrivals, _receiver) = mpsc::unbounded_channel();
+        let state = PipelineState {
+            arrivals,
+            semantic: Arc::new(AtomicUsize::new(0)),
+            release: (0..16).map(|_| Arc::new(Notify::new())).collect(),
+            hold: vec![false; 16],
+            fail: None,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(pipeline_chat))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut client = MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 8,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                concurrency_model: ConcurrencyModel::TwoPhase,
+                layout_image_size: (11, 10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        client.set_encode_cpu_parallelism(chunk);
+        client
+    }
+
+    #[tokio::test]
+    async fn two_phase_chunked_encoding_holds_residency_at_the_batch_cap() {
+        // Chunk size 1 with three candidates spans three chunks. A batch cap admitting only the
+        // first candidate must still degrade the later chunks' candidates to empty content with
+        // one batch-cap warning each — the chunked retain/degrade is the unchunked drain split
+        // across chunk boundaries, so the resident ledger never accumulates past the cap.
+        let client = chunked_two_phase_client(1).await;
+        let image = Arc::new(RgbImage::from_fn(600, 600, |x, y| {
+            image::Rgb([
+                ((x * 31 + y * 17) % 4) as u8,
+                ((x * 17 + y * 31) % 4) as u8,
+                ((x + y) % 4) as u8,
+            ])
+        }));
+        let page = |semantic_cap: usize, batch: usize| {
+            let client = client.clone();
+            let image = Arc::clone(&image);
+            async move {
+                client
+                    .official_two_step_snapshot_window(
+                        vec![image],
+                        false,
+                        true,
+                        true,
+                        8,
+                        semantic_cap,
+                        3,
+                        batch,
+                        batch,
+                        1 << 20,
+                        1 << 20,
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                    .await
+                    .map(|mut pages| pages.remove(0))
+            }
+        };
+        let layout_only = page(0, 1 << 20).await.unwrap();
+        let one = page(1, 1 << 20).await.unwrap();
+        let two = page(2, 1 << 20).await.unwrap();
+        let three = page(3, 1 << 20).await.unwrap();
+        let first = one.3 - layout_only.3;
+        let second = two.3 - one.3;
+        let third = three.3 - two.3;
+        assert!(
+            first > 0 && second > 0 && third > 0,
+            "probe sizes must be nonzero"
+        );
+        // Batch cap admits exactly the first candidate (>= every single candidate's bytes, so
+        // the per-request check passes) but not the first two combined: the second and third
+        // candidates (later chunks) degrade to empty content via the batch cap, one
+        // "exceed the batch cap" warning each.
+        let (snapshot, _, _, _, warnings) = page(3, second.max(third)).await.unwrap();
+        assert!(
+            snapshot[0]
+                .content
+                .as_deref()
+                .is_some_and(|content| !content.is_empty())
+        );
+        assert_eq!(snapshot[1].content.as_deref(), Some(""));
+        assert_eq!(snapshot[2].content.as_deref(), Some(""));
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.contains("exceed the batch cap"))
+                .count(),
+            2,
+            "{warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_chunk_boundary_accumulates_resident_bytes_identically() {
+        // Same three candidates and a batch cap admitting all of them: chunk size 1 (three
+        // chunks, resident_bytes carries across chunk boundaries) must yield results identical
+        // to a single unchunked run (chunk size 3). This pins the cross-chunk resident_bytes
+        // accumulation — no double-counting, no missed count, identical degradation.
+        let run = |chunk: usize, semantic_cap: usize| {
+            let client = chunked_two_phase_client(chunk);
+            let image = Arc::new(RgbImage::from_fn(600, 600, |x, y| {
+                image::Rgb([
+                    ((x * 31 + y * 17) % 4) as u8,
+                    ((x * 17 + y * 31) % 4) as u8,
+                    ((x + y) % 4) as u8,
+                ])
+            }));
+            async move {
+                let client = client.await;
+                client
+                    .official_two_step_snapshot_window(
+                        vec![image],
+                        false,
+                        true,
+                        true,
+                        8,
+                        semantic_cap,
+                        3,
+                        1 << 20,
+                        1 << 20,
+                        1 << 20,
+                        1 << 20,
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                    .await
+                    .map(|mut pages| pages.remove(0))
+            }
+        };
+        let chunked = run(1, 3).await.unwrap();
+        let unchunked = run(3, 3).await.unwrap();
+        assert_eq!(
+            chunked
+                .0
+                .iter()
+                .map(|block| (block.block_type.clone(), block.content.clone()))
+                .collect::<Vec<_>>(),
+            unchunked
+                .0
+                .iter()
+                .map(|block| (block.block_type.clone(), block.content.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(chunked.2, unchunked.2, "raw bytes must match");
+        assert_eq!(chunked.3, unchunked.3, "encoded bytes must match");
+        assert_eq!(chunked.4, unchunked.4, "warnings must match");
     }
 
     fn image_input() -> VlmImageInput {

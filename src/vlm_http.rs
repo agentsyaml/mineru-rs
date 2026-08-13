@@ -882,7 +882,13 @@ fn build_body(
     images: Vec<(Bytes, String)>,
 ) -> Value {
     let images = images.into_iter().map(|(bytes, media)| {
-        json!({"type":"image_url","image_url":{"url":format!("data:{media};base64,{}", STANDARD.encode(bytes))}})
+        let mut url =
+            String::with_capacity("data:;base64,".len() + media.len() + bytes.len() * 4 / 3 + 3);
+        url.push_str("data:");
+        url.push_str(&media);
+        url.push_str(";base64,");
+        STANDARD.encode_string(&bytes, &mut url);
+        json!({"type":"image_url","image_url":{"url":url}})
     });
     let prompt = prompt
         .filter(|text| !text.is_empty())

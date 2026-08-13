@@ -103,7 +103,10 @@ pub(crate) fn jpeg_data_url(image: &RgbImage) -> Result<String> {
             ExtendedColorType::Rgb8,
         )
         .map_err(|e| Error::Image(e.to_string()))?;
-    Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes)))
+    let mut url = String::with_capacity("data:image/jpeg;base64,".len() + bytes.len() * 4 / 3 + 3);
+    url.push_str("data:image/jpeg;base64,");
+    STANDARD.encode_string(&bytes, &mut url);
+    Ok(url)
 }
 
 pub(crate) const TABLE_IMAGE_TOKEN_LETTERS: &str = "ACDGHKTWXYZ";
@@ -188,7 +191,7 @@ pub(crate) fn mask_and_encode_table_image(
         }
         let mut sum = [0u64; 3];
         let mut count = 0u64;
-        for p in raw_crop(page, image.bbox, None).pixels() {
+        for p in source.pixels() {
             for (c, value) in sum.iter_mut().enumerate() {
                 *value += p[c] as u64;
             }
