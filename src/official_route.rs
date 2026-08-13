@@ -902,6 +902,74 @@ pub(crate) async fn parse_and_write_prepared_with_events(
     .await
 }
 
+/// Owned bundle of the scalar option/budget/limits arguments for one window's VLM task, so
+/// `window_vlm` stays within clippy's argument-count limit.
+struct WindowVlmArgs {
+    image_analysis: bool,
+    formula_enable: bool,
+    table_enable: bool,
+    max_layout_blocks: usize,
+    max_semantic_requests: usize,
+    max_requests_per_batch: usize,
+    max_encoded_request_bytes: usize,
+    max_encoded_batch_bytes: usize,
+    encoded_budget: Arc<crate::vlm_http::ByteBudget>,
+    raw_budget: Arc<crate::vlm_http::ByteBudget>,
+    deadline_instant: Instant,
+    page_semaphore: Arc<Semaphore>,
+}
+impl WindowVlmArgs {
+    fn new(
+        options: &OfficialPdfOptions,
+        encoded_budget: Arc<crate::vlm_http::ByteBudget>,
+        raw_budget: Arc<crate::vlm_http::ByteBudget>,
+        deadline: RouteDeadline,
+        page_concurrency: &OfficialPageConcurrency,
+    ) -> Self {
+        Self {
+            image_analysis: options.image_analysis,
+            formula_enable: options.formula_enable,
+            table_enable: options.table_enable,
+            max_layout_blocks: options.max_layout_blocks_per_page,
+            max_semantic_requests: options.max_semantic_requests_per_page,
+            max_requests_per_batch: options.max_requests_per_batch,
+            max_encoded_request_bytes: options.max_encoded_request_bytes,
+            max_encoded_batch_bytes: options.max_encoded_batch_bytes,
+            encoded_budget,
+            raw_budget,
+            deadline_instant: deadline.instant(),
+            page_semaphore: page_concurrency.semaphore(),
+        }
+    }
+}
+
+/// One window's VLM inference as a self-contained future: window RGB in, snapshots out. Spawned
+/// on a tokio task so consecutive windows' VLM streams overlap (dual-slot overlap); it owns every
+/// argument, so the spawned task is `'static` and `Send`.
+async fn window_vlm(
+    client: MinerUVlmClient,
+    images: Vec<Arc<image::RgbImage>>,
+    args: WindowVlmArgs,
+) -> VlmResult<WindowSnapshots> {
+    client
+        .official_two_step_snapshot_window_with_budgets_and_page_semaphore(
+            images,
+            args.image_analysis,
+            args.formula_enable,
+            args.table_enable,
+            args.max_layout_blocks,
+            args.max_semantic_requests,
+            args.max_requests_per_batch,
+            args.max_encoded_request_bytes,
+            args.max_encoded_batch_bytes,
+            args.encoded_budget,
+            args.raw_budget,
+            args.deadline_instant,
+            args.page_semaphore,
+        )
+        .await
+}
+
 async fn parse_and_write_to(
     client: &MinerUVlmClient,
     input: PdfInput,
@@ -994,20 +1062,31 @@ async fn parse_and_write_to(
     let mut prefetch: Option<PrefetchState> = None;
     // Snapshots produced by phase B for the window held in `prefetch` as `Rendered`.
     let mut next_snapshots: Option<WindowSnapshots> = None;
+    // In-flight VLM task for the window held in `prefetch` as `Rendered`: spawning (not
+    // awaiting) it lets consecutive windows' VLM streams overlap the current staging loop.
+    let mut vlm_task: Option<tokio::task::JoinHandle<VlmResult<WindowSnapshots>>> = None;
 
-    while cursor < indexes.len() || prefetch.is_some() {
+    while cursor < indexes.len() || prefetch.is_some() || vlm_task.is_some() {
         if let Err(error) = deadline.check() {
             return Err(dispose_stage(stage, error).await);
         }
         let (current, pending_snapshots) = match prefetch.take() {
-            Some(PrefetchState::Rendered(current)) => (
-                current,
-                Some(
-                    next_snapshots
-                        .take()
-                        .expect("a rendered prefetch always carries its phase-B snapshots"),
-                ),
-            ),
+            Some(PrefetchState::Rendered(current)) => {
+                let snaps = match vlm_task.take() {
+                    Some(task) => Some(
+                        deadline
+                            .future(async {
+                                task.await.map_err(|error| VlmError::Io {
+                                    operation: "official PDF",
+                                    message: format!("window VLM task join failed: {error}"),
+                                })
+                            })
+                            .await??,
+                    ),
+                    None => next_snapshots.take(),
+                };
+                (current, snaps)
+            }
             Some(PrefetchState::PendingFallback((plan, plan_warnings))) => {
                 match render_route_window(
                     RenderRole::Fallback,
@@ -1094,7 +1173,7 @@ async fn parse_and_write_to(
         };
 
         let mut pending_fallback = None;
-        let next = if overlap_enabled
+        let mut next = if overlap_enabled
             && current.plan.mode == WindowPlanMode::Slot
             && cursor < indexes.len()
         {
@@ -1127,44 +1206,56 @@ async fn parse_and_write_to(
             None
         };
 
-        // Phase A: remaining VLM(current) || render(next). A prefetched current already has its
-        // snapshots from the previous phase-B overlap, so only the next render remains here.
-        let snapshots = if let Some((next, next_warnings)) = next {
-            if current
+        // Phase A: the first/fallback window's VLM runs here, concurrently with the next render;
+        // a prefetched current carries its snapshots from the previous phase-B task, so steady
+        // state only plans the next window — its render moves into phase B's 3-way region.
+        if let Some((next, _)) = &next
+            && current
                 .plan
                 .bytes
                 .checked_add(next.bytes)
                 .is_none_or(|bytes| bytes > options.max_in_flight_image_bytes)
-            {
-                return Err(dispose_stage(
-                    stage,
-                    in_flight_image_limit(options.max_in_flight_image_bytes, usize::MAX),
-                )
-                .await);
-            }
-            let render = render_route_window(
-                RenderRole::Prefetch,
-                deadline,
-                options.render_timeout,
-                parsed.clone(),
-                next,
-                next_warnings,
-                render_limits.clone(),
-                render_workers,
-                task_work_lease.clone(),
-            );
-            match pending_snapshots {
-                Some(snapshots) => match render.await {
-                    Ok(prefetched) => {
-                        prefetch = Some(PrefetchState::Rendered(prefetched));
-                        next_slot = 1 - next_slot;
-                        Ok(snapshots)
-                    }
-                    Err(error) => Err(error),
-                },
-                None => {
+        {
+            return Err(dispose_stage(
+                stage,
+                in_flight_image_limit(options.max_in_flight_image_bytes, usize::MAX),
+            )
+            .await);
+        }
+        let snapshots = match pending_snapshots {
+            // The first/fallback window consumes the planned next here; steady state leaves
+            // `next` in place for phase B's 3-way render region.
+            None => match next.take() {
+                Some((next, next_warnings)) => {
+                    let render = render_route_window(
+                        RenderRole::Prefetch,
+                        deadline,
+                        options.render_timeout,
+                        parsed.clone(),
+                        next,
+                        next_warnings,
+                        render_limits.clone(),
+                        render_workers,
+                        task_work_lease.clone(),
+                    );
                     match tokio::try_join!(deadline.future(vlm.expect("vlm pending")), render) {
                         Ok((snapshots, prefetched)) => {
+                            let images: Vec<_> = prefetched
+                                .rendered
+                                .iter()
+                                .map(|page| Arc::clone(&page.image))
+                                .collect();
+                            vlm_task = Some(tokio::spawn(window_vlm(
+                                client.clone(),
+                                images,
+                                WindowVlmArgs::new(
+                                    &options,
+                                    Arc::clone(&encoded_budget),
+                                    Arc::clone(&raw_budget),
+                                    deadline,
+                                    &page_concurrency,
+                                ),
+                            )));
                             prefetch = Some(PrefetchState::Rendered(prefetched));
                             next_slot = 1 - next_slot;
                             Ok(snapshots)
@@ -1172,12 +1263,9 @@ async fn parse_and_write_to(
                         Err(error) => Err(error),
                     }
                 }
-            }
-        } else {
-            match pending_snapshots {
-                Some(snapshots) => Ok(snapshots),
                 None => deadline.future(vlm.expect("vlm pending")).await,
-            }
+            },
+            Some(snapshots) => Ok(snapshots),
         };
         let snapshots = match snapshots {
             Ok(snapshots) if snapshots.len() == current.rendered.len() => snapshots,
@@ -1191,35 +1279,20 @@ async fn parse_and_write_to(
             Err(error) => return Err(dispose_stage(stage, error).await),
         };
 
-        // Phase B: stage(current) || deadline-wrapped VLM(next). Staging/publication stays source
-        // ordered; the prefetched next window keeps the engine supplied for the whole staging
-        // loop, so the staging-time inference bubble is gone. A staging failure disposes the stage
-        // and drops the next-window VLM future; a VLM failure drops the staging future (the owned
-        // stage's capability-only Drop schedules cleanup) and rolls back.
+        // Phase B: stage(current) || (render(next), then spawn its VLM task). The first window
+        // already rendered its next in phase A, so here it only stages. In steady state the next
+        // render overlaps staging, and the spawned task overlaps the current window's staging
+        // tail (and is awaited at the top of the next iteration). Staging/publication stays source
+        // ordered; a staging failure disposes the stage and drops the sibling future; a sibling
+        // VLM failure drops the staging future (the owned stage's capability-only Drop schedules
+        // cleanup) and rolls back.
         let phase_b = match prefetch.take() {
             Some(PrefetchState::Rendered(next_window)) => {
-                let next_images: Vec<_> = next_window
-                    .rendered
-                    .iter()
-                    .map(|page| Arc::clone(&page.image))
-                    .collect();
-                let vlm_next = client
-                    .official_two_step_snapshot_window_with_budgets_and_page_semaphore(
-                        next_images,
-                        options.image_analysis,
-                        options.formula_enable,
-                        options.table_enable,
-                        options.max_layout_blocks_per_page,
-                        options.max_semantic_requests_per_page,
-                        options.max_requests_per_batch,
-                        options.max_encoded_request_bytes,
-                        options.max_encoded_batch_bytes,
-                        Arc::clone(&encoded_budget),
-                        Arc::clone(&raw_budget),
-                        deadline.instant(),
-                        page_concurrency.semaphore(),
-                    );
-                let staging = stage_window(
+                // First window: the next window was rendered and its VLM task spawned during
+                // phase A; phase B stages the current window while that task runs, then carries
+                // the rendered window forward (the next iteration awaits its VLM task for the
+                // snapshots).
+                let staged = stage_window(
                     stage,
                     deadline,
                     &task_work_lease,
@@ -1229,15 +1302,10 @@ async fn parse_and_write_to(
                     current,
                     snapshots,
                     completed,
-                );
-                match tokio::try_join!(staging, deadline.future(vlm_next)) {
-                    Ok((staged, next_window_snapshots)) => {
-                        if next_window_snapshots.len() != next_window.rendered.len() {
-                            let error =
-                                VlmError::Pdf("VLM returned an unexpected page count".into());
-                            return Err(dispose_stage(staged.stage, error).await);
-                        }
-                        next_snapshots = Some(next_window_snapshots);
+                )
+                .await;
+                match staged {
+                    Ok(staged) => {
                         prefetch = Some(PrefetchState::Rendered(next_window));
                         Ok(staged)
                     }
@@ -1253,18 +1321,74 @@ async fn parse_and_write_to(
                 .await);
             }
             None => {
-                stage_window(
-                    stage,
-                    deadline,
-                    &task_work_lease,
-                    &events,
-                    &stem,
-                    total,
-                    current,
-                    snapshots,
-                    completed,
-                )
-                .await
+                // Steady state: render the planned next window while staging the current one,
+                // then spawn (not await) its VLM task so the next window's inference overlaps the
+                // current window's staging tail.
+                if let Some((next, next_warnings)) = next {
+                    let staging = stage_window(
+                        stage,
+                        deadline,
+                        &task_work_lease,
+                        &events,
+                        &stem,
+                        total,
+                        current,
+                        snapshots,
+                        completed,
+                    );
+                    let render_and_spawn = async {
+                        let prefetched = render_route_window(
+                            RenderRole::Prefetch,
+                            deadline,
+                            options.render_timeout,
+                            parsed.clone(),
+                            next,
+                            next_warnings,
+                            render_limits.clone(),
+                            render_workers,
+                            task_work_lease.clone(),
+                        )
+                        .await?;
+                        let images: Vec<_> = prefetched
+                            .rendered
+                            .iter()
+                            .map(|page| Arc::clone(&page.image))
+                            .collect();
+                        vlm_task = Some(tokio::spawn(window_vlm(
+                            client.clone(),
+                            images,
+                            WindowVlmArgs::new(
+                                &options,
+                                Arc::clone(&encoded_budget),
+                                Arc::clone(&raw_budget),
+                                deadline,
+                                &page_concurrency,
+                            ),
+                        )));
+                        Ok::<_, VlmError>(prefetched)
+                    };
+                    match tokio::try_join!(staging, render_and_spawn) {
+                        Ok((staged, rendered_next)) => {
+                            prefetch = Some(PrefetchState::Rendered(rendered_next));
+                            next_slot = 1 - next_slot;
+                            Ok(staged)
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    stage_window(
+                        stage,
+                        deadline,
+                        &task_work_lease,
+                        &events,
+                        &stem,
+                        total,
+                        current,
+                        snapshots,
+                        completed,
+                    )
+                    .await
+                }
             }
         };
         match phase_b {
