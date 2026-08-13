@@ -138,7 +138,7 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `--max-pages <n>` | `10000` | Maximum selected pages per document. Overrides `MINERU_MAX_PAGES`. |
 | `--max-page-pixels <n>` | `100000000` | Per-page pixel cap. Overrides `MINERU_MAX_PAGE_PIXELS`. |
 | `--max-rendered-image-bytes <n>` | `67108864` | Per-render RGB cap. Overrides `MINERU_MAX_RENDERED_IMAGE_BYTES`. |
-| `--max-in-flight-image-bytes <n>` | `1073741824` | In-flight RGB budget. Overrides `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`. |
+| `--max-in-flight-image-bytes <n>` | `536870912` | In-flight RGB budget. Overrides `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`. |
 | `--max-raw-output-bytes <n>` | `134217728` | Per-document raw output budget. Overrides `MINERU_MAX_RAW_OUTPUT_BYTES`. |
 | `--max-layout-blocks-per-page <n>` | `256` | Layout block cap per page. Overrides `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE`. |
 | `--max-semantic-requests-per-page <n>` | `128` | Semantic request cap per page. Overrides `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE`. |
@@ -280,7 +280,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_MAX_PAGES` | `10000` | Maximum selected pages per document. |
 | `MINERU_MAX_PAGE_PIXELS` | `100000000` | Per-page pixel cap. |
 | `MINERU_MAX_RENDERED_IMAGE_BYTES` | `67108864` | Per-render RGB cap. |
-| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `1073741824` | In-flight RGB budget. |
+| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `536870912` | In-flight RGB budget. |
 | `MINERU_MAX_RAW_OUTPUT_BYTES` | `134217728` | Per-document raw output budget. |
 | `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE` | `256` | Layout block cap per page. |
 | `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE` | `128` | Semantic request cap per page. |
@@ -520,12 +520,12 @@ These are disk/document totals, not resident allocations: parsed PDFs and the cu
 | Response body / all assets | 10 MiB / 1 GiB |
 | Layout blocks per page / page window | 256 / 64 pages |
 | Semantic requests per page / inference batch | 128 / 64 |
-| Concurrent in-flight rendered images | 1 GiB |
+| Concurrent in-flight rendered images | 512 MiB |
 | Request concurrency / rendering workers | 100 / min(cpu, 8) (overrides are still bounded by CPU and selected pages) |
 | Official page admission concurrency | 64 (no fixed ceiling) |
 | Connection / per-request / total parsing timeout | 10 seconds / 600 seconds / 24 hours |
 
-Memory usage scales with the in-flight image budget: an A4 document at the default 1 GiB budget measures roughly 4-5 GB RSS, dominated by rendered page RGB windows and the resident parsed PDF (larger documents lean higher). In API-server mode, each concurrent task carries this budget, so `MINERU_API_MAX_CONCURRENT_REQUESTS` (default 3) multiplies the footprint; reduce the in-flight budget (`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`) on memory-constrained hosts.
+Memory usage scales with the in-flight image budget: an A4 document at the default 512 MiB budget measures roughly 2.5 GB RSS, dominated by the resident parsed PDF and per-window rendered RGB; raising the budget toward 1 GiB adds roughly 1.5 GB RSS for about a 10% wall-time gain on large documents. In API-server mode, each concurrent task carries this budget, so `MINERU_API_MAX_CONCURRENT_REQUESTS` (default 3) multiplies the footprint; reduce the in-flight budget (`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`) on memory-constrained hosts.
 
 ### Sources of defaults and capacity
 

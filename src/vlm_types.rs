@@ -55,7 +55,7 @@ impl Default for OfficialPdfOptions {
             max_pages: 10_000,
             max_page_pixels: 100_000_000,
             max_rendered_image_bytes: 64 * 1024 * 1024,
-            max_in_flight_image_bytes: 1024 * 1024 * 1024,
+            max_in_flight_image_bytes: 512 * 1024 * 1024,
             max_raw_output_bytes: 128 * 1024 * 1024,
             max_layout_blocks_per_page: 256,
             max_semantic_requests_per_page: 128,

@@ -135,7 +135,7 @@ export MINERU_VL_API_KEY="<your-key>"
 | `--max-pages <n>` | `10000` | 每文档最大选中页数。覆盖 `MINERU_MAX_PAGES`。 |
 | `--max-page-pixels <n>` | `100000000` | 单页像素上限。覆盖 `MINERU_MAX_PAGE_PIXELS`。 |
 | `--max-rendered-image-bytes <n>` | `67108864` | 单次渲染 RGB 上限。覆盖 `MINERU_MAX_RENDERED_IMAGE_BYTES`。 |
-| `--max-in-flight-image-bytes <n>` | `1073741824` | 在途 RGB 预算。覆盖 `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`。 |
+| `--max-in-flight-image-bytes <n>` | `536870912` | 在途 RGB 预算。覆盖 `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`。 |
 | `--max-raw-output-bytes <n>` | `134217728` | 单文档原始输出预算。覆盖 `MINERU_MAX_RAW_OUTPUT_BYTES`。 |
 | `--max-layout-blocks-per-page <n>` | `256` | 单页版面块上限。覆盖 `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE`。 |
 | `--max-semantic-requests-per-page <n>` | `128` | 单页语义请求上限。覆盖 `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE`。 |
@@ -276,7 +276,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_MAX_PAGES` | `10000` | 每文档最大选中页数。 |
 | `MINERU_MAX_PAGE_PIXELS` | `100000000` | 单页像素上限。 |
 | `MINERU_MAX_RENDERED_IMAGE_BYTES` | `67108864` | 单次渲染 RGB 上限。 |
-| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `1073741824` | 在途 RGB 预算。 |
+| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `536870912` | 在途 RGB 预算。 |
 | `MINERU_MAX_RAW_OUTPUT_BYTES` | `134217728` | 单文档原始输出预算。 |
 | `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE` | `256` | 单页版面块上限。 |
 | `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE` | `128` | 单页语义请求上限。 |
@@ -495,12 +495,12 @@ if (warnings.length) console.warn(warnings)
 | 响应体 / 全部资产 | 10 MiB / 1 GiB |
 | 单页版面块数 / 页窗口 | 256 / 64 页 |
 | 单页语义请求数 / 推理批 | 128 / 64 |
-| 同时在途渲染图像 | 1 GiB |
+| 同时在途渲染图像 | 512 MiB |
 | 请求并发 / 渲染 worker | 100 / min(cpu, 8)（覆盖值仍受 CPU 与所选页数约束） |
 | 官方页准入并发 | 64（无固定上限） |
 | 连接 / 单请求 / 总解析超时 | 10 秒 / 600 秒 / 24 小时 |
 
-内存占用随在途图像预算缩放：A4 文档在默认 1 GiB 预算下实测约 4-5 GB RSS，主要由渲染页 RGB 窗口与常驻解析后的 PDF 构成（文档越大越接近上限）。API 服务模式下每个并发任务都携带该预算，`MINERU_API_MAX_CONCURRENT_REQUESTS`（默认 3）会成倍放大内存占用；内存受限主机请调低在途预算（`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`）。
+内存占用随在途图像预算缩放：A4 文档在默认 512 MiB 预算下实测约 2.5 GB RSS，主要由常驻解析后的 PDF 与每窗口渲染 RGB 构成；将预算提高到 1 GiB 会增加约 1.5 GB RSS，仅换来大文档约 10% 的墙钟时间收益。API 服务模式下每个并发任务都携带该预算，`MINERU_API_MAX_CONCURRENT_REQUESTS`（默认 3）会成倍放大内存占用；内存受限主机请调低在途预算（`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`）。
 
 ### 默认值来源与容量
 
