@@ -500,7 +500,7 @@ if (warnings.length) console.warn(warnings)
 | 官方页准入并发 | 64（无固定上限） |
 | 连接 / 单请求 / 总解析超时 | 10 秒 / 600 秒 / 24 小时 |
 
-内存占用随在途图像预算缩放：A4 文档在默认 512 MiB 预算下实测约 2.5 GB RSS，主要由常驻解析后的 PDF 与每窗口渲染 RGB 构成；将预算提高到 1 GiB 会增加约 1.5 GB RSS，仅换来大文档约 10% 的墙钟时间收益。API 服务模式下每个并发任务都携带该预算，`MINERU_API_MAX_CONCURRENT_REQUESTS`（默认 3）会成倍放大内存占用；内存受限主机请调低在途预算（`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`）。
+内存占用随在途图像预算缩放：A4 文档在默认 512 MiB 预算下实测约 2.4-2.5 GB RSS，主要由常驻解析后的 PDF 与每窗口渲染 RGB 构成（文档越大越接近上限）。提高预算以内存换速度：1 GiB 约需 4-5 GB RSS，仅换来大文档约 10% 的墙钟时间收益。API 服务模式下每个并发任务都携带该预算，`MINERU_API_MAX_CONCURRENT_REQUESTS`（默认 3）会成倍放大内存占用；内存受限主机请调低在途预算（`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`）。
 
 ### 默认值来源与容量
 

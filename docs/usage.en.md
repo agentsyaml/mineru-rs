@@ -525,7 +525,7 @@ These are disk/document totals, not resident allocations: parsed PDFs and the cu
 | Official page admission concurrency | 64 (no fixed ceiling) |
 | Connection / per-request / total parsing timeout | 10 seconds / 600 seconds / 24 hours |
 
-Memory usage scales with the in-flight image budget: an A4 document at the default 512 MiB budget measures roughly 2.5 GB RSS, dominated by the resident parsed PDF and per-window rendered RGB; raising the budget toward 1 GiB adds roughly 1.5 GB RSS for about a 10% wall-time gain on large documents. In API-server mode, each concurrent task carries this budget, so `MINERU_API_MAX_CONCURRENT_REQUESTS` (default 3) multiplies the footprint; reduce the in-flight budget (`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`) on memory-constrained hosts.
+Memory usage scales with the in-flight image budget: an A4 document at the default 512 MiB budget measures roughly 2.4-2.5 GB RSS, dominated by the resident parsed PDF and per-window rendered RGB (larger documents lean higher). Raising the budget trades memory for speed: 1 GiB costs roughly 4-5 GB RSS for about 10% faster wall time on large documents. In API-server mode, each concurrent task carries this budget, so `MINERU_API_MAX_CONCURRENT_REQUESTS` (default 3) multiplies the footprint; reduce the in-flight budget (`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`) on memory-constrained hosts.
 
 ### Sources of defaults and capacity
 
