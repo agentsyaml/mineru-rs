@@ -1984,8 +1984,8 @@ mod tests {
         // The batch flag genuinely feeds the inference admission field.
         let resolved = env::resolve_core(|_| None, &core).unwrap();
         assert_eq!(resolved.route.max_requests_per_batch, 17);
-        // The concurrency-model flag overrides the two-phase default and, when combined with the
-        // environment, the CLI wins over the environment (CLI > env > default).
+        // The concurrency-model flag is honored and, when combined with the environment, the CLI
+        // wins over the environment (CLI > env > default).
         assert_eq!(resolved.concurrency_model, crate::ConcurrencyModel::Classic);
         let resolved = env::resolve_core(
             |name| (name == "MINERU_OFFICIAL_CONCURRENCY_MODEL").then(|| OsString::from("classic")),

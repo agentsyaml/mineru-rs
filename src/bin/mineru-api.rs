@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(env.output_root, PathBuf::from("./output"));
         assert_eq!(env.concurrency, 3);
         assert_eq!(env.official_page_concurrency, 64);
-        assert_eq!(env.concurrency_model, mineru::ConcurrencyModel::TwoPhase);
+        assert_eq!(env.concurrency_model, mineru::ConcurrencyModel::Classic);
         assert_eq!(env.service.task_retention, Duration::from_secs(86400));
         assert_eq!(env.service.task_cleanup_interval, Duration::from_secs(300));
         assert_eq!(env.service.server.record_cap, 32);

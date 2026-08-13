@@ -334,7 +334,7 @@ impl ServiceConfig {
                 table,
                 image_analysis: None,
                 official_page_concurrency: 64,
-                concurrency_model: ConcurrencyModel::TwoPhase,
+                concurrency_model: ConcurrencyModel::Classic,
                 public_bind_exposed: false,
                 allow_public_http_client: false,
                 retention: Duration::from_secs(24 * 60 * 60),

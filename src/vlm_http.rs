@@ -1167,8 +1167,22 @@ fn retry_backoff(attempt: usize, f: f32) -> Duration {
         Duration::MAX
     }
 }
+static RETRY_JITTER_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Deterministic jitter multiplier in [0.5, 1.0). Every retry consumes a step of a global
+/// counter, so requests failing in lockstep do not all sleep the same backoff duration.
+fn retry_jitter() -> f32 {
+    let step = RETRY_JITTER_COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Scramble the counter so early lockstep retries spread immediately instead of by ~0.1%.
+    let spread = step.wrapping_mul(2654435761).rotate_left(17) % 500;
+    (500 + spread) as f32 / 1000.0
+}
 async fn retry_wait(attempt: usize, f: f32, hint: Option<Duration>) {
-    tokio::time::sleep(hint.unwrap_or_else(|| retry_backoff(attempt, f))).await
+    let backoff = match hint {
+        // Server-provided `Retry-After` hints are already per-request and need no jitter.
+        Some(wait) => wait,
+        None => retry_backoff(attempt, f).mul_f32(retry_jitter()),
+    };
+    tokio::time::sleep(backoff).await
 }
 async fn read_limited(
     mut r: reqwest::Response,

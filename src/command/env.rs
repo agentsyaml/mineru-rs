@@ -711,8 +711,8 @@ mod tests {
         assert_eq!(resolved.http.max_concurrency, 64);
         assert_eq!(resolved.http.http_timeout, Duration::from_secs(180));
         assert_eq!(resolved.http.retry_backoff_factor, 0.125);
-        // Neither the environment nor the CLI configured a model: the default is two-phase.
-        assert_eq!(resolved.concurrency_model, ConcurrencyModel::TwoPhase);
+        // Neither the environment nor the CLI configured a model: the default is classic.
+        assert_eq!(resolved.concurrency_model, ConcurrencyModel::Classic);
         // Environment still feeds the knobs the CLI did not configure.
         assert_eq!(resolved.route.max_layout_blocks_per_page, 300);
         assert_eq!(resolved.http.max_keepalive_connections, 20);
@@ -720,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_core_explicit_classic_override_still_wins_over_the_two_phase_default() {
+    fn resolve_core_explicit_classic_override_resolves_classic() {
         let env = lookup_map(&[("MINERU_OFFICIAL_CONCURRENCY_MODEL", "classic")]);
         let resolved = resolve_core(&env, &CoreOverrides::default()).unwrap();
         assert_eq!(resolved.concurrency_model, ConcurrencyModel::Classic);

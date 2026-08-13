@@ -121,7 +121,7 @@ impl VlmHttpConfig {
             http_timeout: Duration::from_secs(600),
             connect_timeout: Duration::from_secs(10),
             max_keepalive_connections: 20,
-            keepalive_expiry: Duration::from_secs(5),
+            keepalive_expiry: Duration::from_secs(30),
             // The debug knob resolves strictly through `CoreOverrides.vlm_debug` in the
             // resolve_core path; the lenient env read was removed with the lenient parser.
             debug: false,
@@ -154,14 +154,13 @@ fn env_nonempty_with(get: &impl Fn(&str) -> Option<String>, name: &str) -> Optio
         .filter(|v| !v.is_empty())
 }
 /// Request-level concurrency model for the official route. `Classic` is the long-standing
-/// single-encoder pipeline; `TwoPhase` splits each page's semantic work into an encode-all stage
-/// and a request-all stage, removing the CPU-encode serialization in front of request dispatch.
-/// `TwoPhase` is the default; `MINERU_OFFICIAL_CONCURRENCY_MODEL=classic` restores the old
-/// behavior.
+/// single-encoder pipeline and the default; `TwoPhase` splits each page's semantic work into an
+/// encode-all stage and a request-all stage, removing the CPU-encode serialization in front of
+/// request dispatch. `MINERU_OFFICIAL_CONCURRENCY_MODEL=two-phase` opts in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConcurrencyModel {
-    Classic,
     #[default]
+    Classic,
     TwoPhase,
 }
 
@@ -244,7 +243,7 @@ impl Default for MinerUVlmConfig {
             incremental_priority: false,
             enable_table_formula_eq_wrap: false,
             enable_cross_page_table_merge: false,
-            concurrency_model: ConcurrencyModel::TwoPhase,
+            concurrency_model: ConcurrencyModel::Classic,
         }
     }
 }

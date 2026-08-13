@@ -1178,6 +1178,7 @@ impl MinerUVlmClient {
                 resident_bytes += encoder_reservation;
                 let client = self.clone();
                 let page = page.clone();
+                let cpu_semaphore = self.encode_cpu_semaphore.clone();
                 let blocks_for_encode = blocks.take().expect("encoder owns blocks exclusively");
                 let max_pixels = self.max_decoded_pixels;
                 let preprocessor = client.preprocessor.clone();
@@ -1192,6 +1193,13 @@ impl MinerUVlmClient {
                     );
                 }
                 encoder = Some(Box::pin(async move {
+                    let _permit = cpu_semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| VlmError::Transport {
+                            operation: "official PDF",
+                            message: "encode semaphore closed".into(),
+                        })?;
                     client
                         .official_blocking(deadline, move || {
                             #[cfg(test)]
@@ -1228,10 +1236,6 @@ impl MinerUVlmClient {
                     resident_bytes = resident_bytes.checked_sub(encoder_reservation).expect("encoder reservation held");
                     encoder_reservation = 0;
                     let bytes = image.data.len();
-                    // The document-level encoded budget stays a hard error: the bytes were encoded
-                    // even when this block's request is skipped below.
-                    encoded_budget.charge(bytes as u64, "encoded document bytes")?;
-                    encoded_bytes = encoded_bytes.saturating_add(bytes);
                     if order >= replies.len() || block_index >= block_count {
                         return Err(protocol("official PDF", "semantic reply index is invalid"));
                     }
@@ -1272,6 +1276,12 @@ impl MinerUVlmClient {
                         continue;
                     }
                     resident_bytes = resident_after;
+                    // The document-level encoded budget and the returned encoded-bytes accounting
+                    // count only the retained candidates: per-request- or batch-degraded
+                    // candidates never reach the server, so charging them could only push the
+                    // document over its budget (mirrors the two-phase accounting).
+                    encoded_budget.charge(bytes as u64, "encoded document bytes")?;
+                    encoded_bytes = encoded_bytes.saturating_add(bytes);
                     let request = self.request(VlmImageInput::Bytes { data: image.data, media_type: Some(image.media_type) }, prompt, sampling, None);
                     let backend = self.backend.clone();
                     let max_response_bytes = self.image_config.max_response_bytes;
@@ -1855,13 +1865,14 @@ impl MinerUVlmClient {
         let layout_semaphore = Arc::new(Semaphore::new(http.max_concurrency));
         let max_decoded_pixels = http.max_decoded_pixels;
         let concurrency_model = config.concurrency_model;
-        // Two-phase encode-all parallelizes PNG encoding across candidates within a page. A
-        // global CPU semaphore keeps CPU-bound encoding at the machine's real parallelism
-        // instead of the one-slot-at-a-time classic encoder. Classic never acquires it.
-        let encode_cpu_parallelism = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let encode_cpu_semaphore = Arc::new(Semaphore::new(encode_cpu_parallelism));
+        // Both pipelines serialize CPU-bound encoding behind a global semaphore sized to the
+        // machine's real parallelism: classic acquires one permit per encode, two-phase holds
+        // one permit per in-flight encoder in its encode-all stage.
+        let encode_cpu_semaphore = Arc::new(Semaphore::new(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
+        ));
         let image_config = Arc::new(http.clone());
         Ok(Self {
             backend: VlmBackend::Http(
