@@ -126,16 +126,16 @@ export MINERU_VL_API_KEY="<your-key>"
 | `--log-level <级别>` | `info` | 日志级别：`trace`、`debug`、`info`、`success`、`warning`、`error`、`critical`。覆盖 `MINERU_LOG_LEVEL`。 |
 | `--processing-window-size <n>` | `64` | 页处理窗口。覆盖 `MINERU_PROCESSING_WINDOW_SIZE`。 |
 | `--page-concurrency <n>` | `64` | 页管线并发上限（任意正整数），仅约束同时运行的页管线数；实际请求级并发由 `--http-max-concurrency`/`MINERU_VLM_HTTP_CONCURRENCY` 决定。覆盖 `MINERU_OFFICIAL_PAGE_CONCURRENCY`。 |
-| `--concurrency-model <classic\|two-phase>` | `two-phase` | 并发模型：`classic` 经典单编码器流水；`two-phase` 将页内语义处理拆为 encode-all → request-all 两阶段（默认）。覆盖 `MINERU_OFFICIAL_CONCURRENCY_MODEL`。 |
-| `--render-workers <n>` | `3` | 渲染 worker 数；实际值受可用并行度与所选页数约束，不再被 3 封顶。覆盖 `MINERU_PDF_RENDER_THREADS`。 |
+| `--concurrency-model <classic\|two-phase>` | `classic` | 并发模型：`classic` 经典单编码器流水（默认）；`two-phase` 将页内语义处理拆为 encode-all → request-all 两阶段（可选）。覆盖 `MINERU_OFFICIAL_CONCURRENCY_MODEL`。 |
+| `--render-workers <n>` | `min(cpu, 8)` | 渲染 worker 数；实际值还受所选页数约束。覆盖 `MINERU_PDF_RENDER_THREADS`。 |
 | `--render-timeout-seconds <n>` | `300` | 单次渲染超时。覆盖 `MINERU_PDF_RENDER_TIMEOUT`。 |
-| `--batch-size <n>` | `32` | 每页语义推理请求准入（推理批大小），区别于页并发与处理窗口；two-phase 模型下为每页请求阶段并发上限（受全局请求级信号量二次约束）。覆盖 `MINERU_BATCH_SIZE`。 |
+| `--batch-size <n>` | `64` | 每页语义推理请求准入（推理批大小），区别于页并发与处理窗口；two-phase 模型下为每页请求阶段并发上限（受全局请求级信号量二次约束）。覆盖 `MINERU_BATCH_SIZE`。 |
 | `--total-deadline-seconds <n>` | `86400` | 单文档总 deadline。覆盖 `MINERU_TOTAL_DEADLINE_SECONDS`。 |
 | `--max-pdf-bytes <n>` | `1073741824` | 常驻源 PDF 上限。覆盖 `MINERU_MAX_PDF_BYTES`。 |
 | `--max-pages <n>` | `10000` | 每文档最大选中页数。覆盖 `MINERU_MAX_PAGES`。 |
 | `--max-page-pixels <n>` | `100000000` | 单页像素上限。覆盖 `MINERU_MAX_PAGE_PIXELS`。 |
 | `--max-rendered-image-bytes <n>` | `67108864` | 单次渲染 RGB 上限。覆盖 `MINERU_MAX_RENDERED_IMAGE_BYTES`。 |
-| `--max-in-flight-image-bytes <n>` | `134217728` | 在途 RGB 预算。覆盖 `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`。 |
+| `--max-in-flight-image-bytes <n>` | `1073741824` | 在途 RGB 预算。覆盖 `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`。 |
 | `--max-raw-output-bytes <n>` | `134217728` | 单文档原始输出预算。覆盖 `MINERU_MAX_RAW_OUTPUT_BYTES`。 |
 | `--max-layout-blocks-per-page <n>` | `256` | 单页版面块上限。覆盖 `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE`。 |
 | `--max-semantic-requests-per-page <n>` | `128` | 单页语义请求上限。覆盖 `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE`。 |
@@ -263,20 +263,20 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP` | `1000000` | ZIP 路径组件合计上限。 |
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | 页管线并发上限（任意正整数），仅约束同时运行的页管线数；请求级并发由 `MINERU_VLM_HTTP_CONCURRENCY` 决定。 |
-| `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `two-phase` | 并发模型，取值 `classic\|two-phase`。`classic`：经典单编码器流水（旧行为）；`two-phase`：将页内语义处理拆为 encode-all → request-all 两阶段，解除 CPU 编码对请求派发的串行瓶颈，提升高并发下吞吐（默认）。 |
-| `MINERU_PDF_RENDER_THREADS` | `3` | 渲染 worker 数。 |
+| `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | 并发模型，取值 `classic\|two-phase`。`classic`：经典单编码器流水（默认）；`two-phase`：将页内语义处理拆为 encode-all → request-all 两阶段，解除 CPU 编码对请求派发的串行瓶颈（可选启用）。 |
+| `MINERU_PDF_RENDER_THREADS` | `min(cpu, 8)` | 渲染 worker 数。 |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
 | `MINERU_FORMULA_ENABLE` | 开启 | 公式识别默认值（严格 `true`/`false`，不区分大小写）。 |
 | `MINERU_TABLE_ENABLE` | 开启 | 表格识别默认值（严格 `true`/`false`）。 |
 | `MINERU_IMAGE_ANALYSIS_ENABLE` | 开启 | 图像分析默认值（严格 `true`/`false`）。 |
 | `MINERU_LOG_LEVEL` | `info` | 日志级别；`critical` 静默进度输出。 |
-| `MINERU_BATCH_SIZE` | `32` | 每页语义推理请求准入（two-phase 下为每页请求阶段并发上限）。 |
+| `MINERU_BATCH_SIZE` | `64` | 每页语义推理请求准入（two-phase 下为每页请求阶段并发上限）。 |
 | `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | 单文档总 deadline。 |
 | `MINERU_MAX_PDF_BYTES` | `1073741824` | 常驻源 PDF 上限。 |
 | `MINERU_MAX_PAGES` | `10000` | 每文档最大选中页数。 |
 | `MINERU_MAX_PAGE_PIXELS` | `100000000` | 单页像素上限。 |
 | `MINERU_MAX_RENDERED_IMAGE_BYTES` | `67108864` | 单次渲染 RGB 上限。 |
-| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `134217728` | 在途 RGB 预算。 |
+| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `1073741824` | 在途 RGB 预算。 |
 | `MINERU_MAX_RAW_OUTPUT_BYTES` | `134217728` | 单文档原始输出预算。 |
 | `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE` | `256` | 单页版面块上限。 |
 | `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE` | `128` | 单页语义请求上限。 |
@@ -494,15 +494,17 @@ if (warnings.length) console.warn(warnings)
 | 单页像素 / 渲染 RGB 图像 | 100,000,000 / 64 MiB |
 | 响应体 / 全部资产 | 10 MiB / 1 GiB |
 | 单页版面块数 / 页窗口 | 256 / 64 页 |
-| 单页语义请求数 / 推理批 | 128 / 32 |
-| 同时在途渲染图像 | 128 MiB |
-| 请求并发 / 渲染 worker | 100 / 3（worker 还受 CPU 与所选页数约束，不再封顶 3） |
-| 官方页准入并发 | 4（无固定上限） |
+| 单页语义请求数 / 推理批 | 128 / 64 |
+| 同时在途渲染图像 | 1 GiB |
+| 请求并发 / 渲染 worker | 100 / min(cpu, 8)（覆盖值仍受 CPU 与所选页数约束） |
+| 官方页准入并发 | 64（无固定上限） |
 | 连接 / 单请求 / 总解析超时 | 10 秒 / 600 秒 / 24 小时 |
+
+内存占用随在途图像预算缩放：A4 文档在默认 1 GiB 预算下实测约 4-5 GB RSS，主要由渲染页 RGB 窗口与常驻解析后的 PDF 构成（文档越大越接近上限）。API 服务模式下每个并发任务都携带该预算，`MINERU_API_MAX_CONCURRENT_REQUESTS`（默认 3）会成倍放大内存占用；内存受限主机请调低在途预算（`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`）。
 
 ### 默认值来源与容量
 
-- **上游锁定**：200 DPI、64 页窗口、3 个渲染 worker、VLM HTTP 最大并发 100、HTTP 请求超时 600 秒。
+- **上游锁定**：200 DPI、64 页窗口、VLM HTTP 最大并发 100、HTTP 请求超时 600 秒。渲染 worker 不再上游锁定，默认值为 min(cpu, 8)。
 - **Rust 防护**：10 秒连接超时、24 小时总超时，以及页数、PDF、资产、响应、渲染图像、像素、在途图像和版面块限制。
 
 10,000 页支持仅是高内存下的尽力而为：输入字节、最终页面结果和资产都会保留在内存中，并非无上限保证。通过环境变量（`MINERU_MAX_*`、`MINERU_VLM_*` 等）与 CLI 参数（`--page-concurrency`、`--render-workers`、`--total-deadline-seconds` 等）按可用 RAM 和服务端点容量配置。所有限制、并发和 worker 必须大于零；所有超时必须非零，且单请求超时不得超过总超时。
