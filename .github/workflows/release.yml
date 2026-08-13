@@ -427,7 +427,6 @@ jobs:
             rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff \
             sh -ec '
               apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libreoffice-writer libreoffice-impress libreoffice-calc fonts-dejavu-core
               rm -rf /var/lib/apt/lists/*
               install -d -m 700 -o "$HOST_UID" -g "$HOST_GID" /tmp/mineru-home /tmp/mineru-cargo
               install -d -m 755 -o "$HOST_UID" -g "$HOST_GID" /workspace/target

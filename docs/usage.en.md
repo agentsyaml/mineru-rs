@@ -542,7 +542,7 @@ The pipeline enforces size limits at several independent stages. When a limit is
 | Input transfer cap `max_input_bytes` | 4_293_918_719 (≈4 GiB) | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | Input ingestion / transfer |
 | Output cap `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | Output generation |
 | OOXML archive cap | 1 GiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office document preflight |
-| Office conversion input cap | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | LibreOffice conversion |
+| Office conversion input cap | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | Office conversion |
 | Server-side file cap (with `--api-url`) | 1 GiB | `--file-cap` (server: `mineru-api`) | `MINERU_API_FILE_CAP` (server) | Upload at the server |
 
 ## Limitations and troubleshooting
