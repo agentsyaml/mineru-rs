@@ -1868,11 +1868,10 @@ impl MinerUVlmClient {
         // Both pipelines serialize CPU-bound encoding behind a global semaphore sized to the
         // machine's real parallelism: classic acquires one permit per encode, two-phase holds
         // one permit per in-flight encoder in its encode-all stage.
-        let encode_cpu_semaphore = Arc::new(Semaphore::new(
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4),
-        ));
+        let encode_cpu_parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let encode_cpu_semaphore = Arc::new(Semaphore::new(encode_cpu_parallelism));
         let image_config = Arc::new(http.clone());
         Ok(Self {
             backend: VlmBackend::Http(
