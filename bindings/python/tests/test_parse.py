@@ -50,12 +50,9 @@ class FakeRun:
 class ParseTests(unittest.TestCase):
     def setUp(self):
         self.original_run = mineru_rs._native._run
-        self.original_helper = mineru_rs._helper_path
-        mineru_rs._helper_path = lambda: "/nonexistent/mineru-office-convert"
 
     def tearDown(self):
         mineru_rs._native._run = self.original_run
-        mineru_rs._helper_path = self.original_helper
 
     def patch_run(self, fake):
         mineru_rs._native._run = fake

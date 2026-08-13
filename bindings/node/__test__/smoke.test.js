@@ -7,10 +7,6 @@ const os = require('os')
 const path = require('path')
 const { spawnSync } = require('child_process')
 const api = require('../api.js')
-const native = require('../index.js')
-const suffix = native._compileTargetSuffix()
-const platformPackage = `@alexsun-top/mineru-${suffix}`
-const helperBasename = process.platform === 'win32' ? 'mineru-office-convert.exe' : 'mineru-office-convert'
 
 const PNG = Buffer.from(
   '89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de' +
@@ -67,16 +63,6 @@ function storedZip(entries) {
   end.writeUInt32LE(directory.length, 12)
   end.writeUInt32LE(offset, 16)
   return Buffer.concat([...locals, directory, end])
-}
-
-function docx() {
-  return storedZip({
-    '[Content_Types].xml': '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>',
-    '_rels/.rels': '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
-    'word/document.xml': '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Node bundled helper proof</w:t></w:r></w:p><w:sectPr/></w:body></w:document>',
-    'word/_rels/document.xml.rels': '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
-    'word/styles.xml': '<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>',
-  })
 }
 
 async function mockApi({ blocked = false, failed = false, files } = {}) {
@@ -220,66 +206,9 @@ async function main() {
   assert.equal(jsInvalid.status, 0)
   assert.equal(jsInvalid.stdout.length, 0)
   assert.equal(jsInvalid.stderr.toString(), 'error: invalid Node CLI argument encoding\n')
-  const nativeInvalid = child(`const n=require('./index.js'),h=require.resolve('${platformPackage}/helper');n._runCli(['\\ud800'],h).then(c=>process.exit(c===2?0:3))`)
+  const nativeInvalid = child(`const n=require('./index.js'),h=require('path').join(__dirname,'mineru-office-convert');n._runCli(['\\ud800'],h).then(c=>process.exit(c===2?0:3))`)
   assert.equal(nativeInvalid.status, 0)
   assert.equal(nativeInvalid.stderr.toString(), 'error: invalid Node CLI argument encoding\n')
-
-  const platformDir = path.dirname(require.resolve(`${platformPackage}/helper`))
-  const manifestPath = path.join(platformDir, 'package.json')
-  const helperPath = path.join(platformDir, helperBasename)
-  const originalManifest = fs.readFileSync(manifestPath)
-  const originalMode = fs.statSync(helperPath).mode & 0o777
-  const wrongHelper = path.join(platformDir, 'wrong-helper')
-  const expectedAddon = `./mineru.${suffix}.node`
-  assert.deepEqual(JSON.parse(originalManifest).exports, {
-    '.': expectedAddon,
-    './helper': `./${helperBasename}`,
-    './package.json': './package.json',
-  })
-  const validationChild = "require('./api.js').run({path:'/missing',output:'/unused',method:'invalid'}).then(()=>process.exit(3),e=>process.exit(e.message==='MinerU platform helper validation failed'?0:4))"
-  try {
-    for (const field of ['name', 'version']) {
-      const manifest = JSON.parse(originalManifest)
-      manifest[field] = 'wrong'
-      fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`)
-      assert.equal(child(validationChild).status, 0, field)
-      fs.writeFileSync(manifestPath, originalManifest)
-    }
-    if (process.platform !== 'win32') {
-      fs.chmodSync(helperPath, 0o644)
-      assert.equal(child(validationChild).status, 0, 'mode')
-      fs.chmodSync(helperPath, originalMode)
-    }
-    fs.renameSync(helperPath, wrongHelper)
-    const manifest = JSON.parse(originalManifest)
-    manifest.exports['./helper'] = './wrong-helper'
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`)
-    assert.equal(child(validationChild).status, 0, 'basename')
-    fs.renameSync(wrongHelper, helperPath)
-  } finally {
-    if (!fs.existsSync(helperPath) && fs.existsSync(wrongHelper)) fs.renameSync(wrongHelper, helperPath)
-    fs.writeFileSync(manifestPath, originalManifest)
-    if (process.platform !== 'win32') fs.chmodSync(helperPath, originalMode)
-  }
-
-  if (process.env.MINERU_RUN_OFFICE_E2E === '1') {
-    await withTemp(async (root) => {
-      const input = path.join(root, 'sample.docx')
-      const output = path.join(root, 'output')
-      const office = docx()
-      fs.writeFileSync(input, office)
-      fs.mkdirSync(output)
-      const middle = JSON.stringify({ pdf_info: [{ page_idx: 0, page_size: [612, 792], preproc_blocks: [], discarded_blocks: [] }] })
-      const mock = await mockApi({ files: { 'sample/office/sample_middle.json': middle, 'sample/office/sample_origin.docx': office } })
-      try {
-        const report = await api.run({ path: input, output, apiUrl: mock.url })
-        assert.deepEqual(report.warnings, [])
-        assert(fs.readFileSync(path.join(output, 'sample/office/sample_layout.pdf')).subarray(0, 5).equals(Buffer.from('%PDF-')))
-      } finally {
-        await mock.close()
-      }
-    })
-  }
 
   console.log(`node source: all assertions passed in ${Date.now() - started}ms`)
 }

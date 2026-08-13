@@ -261,30 +261,14 @@ jobs:
           python-version: "3.9"
       - name: Install Rust 1.89.0 target
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add x86_64-unknown-linux-gnu
-      - name: Prepare same-manylinux helper staging hook
-        run: |
-          cat > .github/scripts/ci-stage-python-helper.sh <<'SH'
-          #!/bin/sh
-          set -eux
-          cargo build --locked --release --bin mineru-office-convert --features office --target x86_64-unknown-linux-gnu
-          helper="${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/release/mineru-office-convert"
-          python3 .github/scripts/stage_binding_artifacts.py stage-python \
-            --target x86_64-unknown-linux-gnu \
-            --helper "$helper" \
-            --package-dir bindings/python/python/mineru_rs
-          SH
-          chmod 755 .github/scripts/ci-stage-python-helper.sh
-      - name: Build locked manylinux wheel with same-target helper
+      - name: Build locked manylinux wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: build
           target: x86_64-unknown-linux-gnu
           manylinux: "2014"
           rust-toolchain: 1.89.0
-          before-script-linux: .github/scripts/ci-stage-python-helper.sh
           args: --release --locked --manifest-path bindings/python/Cargo.toml --out dist/python
-      - name: Inspect same-target staged helper
-        run: python .github/scripts/stage_binding_artifacts.py inspect-python --target x86_64-unknown-linux-gnu --package-dir bindings/python/python/mineru_rs
       - name: Verify wheel
         run: |
           cargo +1.89.0 metadata --locked --format-version 1 --no-deps > "$RUNNER_TEMP/wheel-metadata.json"
@@ -303,8 +287,6 @@ jobs:
           python .github/scripts/verify_release.py wheel --directory dist/python \
             --version "$MINERU_VERSION" --count 1 --platform manylinux-x64
       - name: Install and smoke-test wheel
-        env:
-          MINERU_RUN_OFFICE_E2E: "1"
         run: |
           python -m pip install --force-reinstall dist/python/*.whl
           python - <<'PY'
@@ -337,8 +319,6 @@ jobs:
         run: npm ci
       - name: Install Rust 1.89.0 target
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add x86_64-unknown-linux-gnu
-      - name: Build same-target Office helper
-        run: cargo +1.89.0 build --locked --release -p mineru --bin mineru-office-convert --features office --target x86_64-unknown-linux-gnu
       - name: Build Linux x64 binding
         run: |
           npx --no-install napi build --release --platform --target x86_64-unknown-linux-gnu -- --locked
@@ -349,7 +329,6 @@ jobs:
           python ../../.github/scripts/stage_binding_artifacts.py stage-npm \
             --target x86_64-unknown-linux-gnu \
             --addon mineru.linux-x64-gnu.node \
-            --helper ../../target/x86_64-unknown-linux-gnu/release/mineru-office-convert \
             --package-dir staged/linux-x64-gnu --root-package-json package.json
           python ../../.github/scripts/stage_binding_artifacts.py inspect-npm \
             --target x86_64-unknown-linux-gnu \
@@ -366,8 +345,6 @@ jobs:
           Path("mineru.linux-x64-gnu.node").unlink()
           PY
       - name: Test current-build platform package on Node 24
-        env:
-          MINERU_RUN_OFFICE_E2E: "1"
         run: |
           npm test
       - name: Set up Node 18.20.8

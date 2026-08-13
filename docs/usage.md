@@ -413,6 +413,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `mineru-rs` Python 软件包和 `@alexsun-top/mineru` Node.js 软件包封装同一个解析器。两者都提供 `parse()`（在内存中返回 markdown）和 `run()`（写入完整输出树）。
 
+> 绑定包不打包 `mineru-office-convert` 辅助程序，暂不支持 Office 格式（`.docx`/`.pptx`/`.xlsx`）输入转换；传入 Office 文档会报 "office conversion is unavailable"。PDF 与图像输入不受影响。需要 Office 转换时请使用 `cargo install mineru --features office` 的 CLI 或 `mineru-api` 服务端。
+
 ### Python
 
 ```sh

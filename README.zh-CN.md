@@ -93,6 +93,8 @@ asyncio.run(main())
 
 `run()` 则把完整输出树写入输出目录（见[英文使用指南](docs/usage.en.md)）。该 wheel 安装两个等效的控制台命令 `mineru` 和 `mineru-rs`；若同时安装了上游 Python `mineru` 软件包，应优先使用 `mineru-rs`，因为两者都提供 `mineru` 入口点，`PATH` 中靠前的那个会生效。发布物仅为 wheel；对于不受支持的平台或 PyPy，没有 sdist 或源代码回退方案。
 
+Python wheel 不打包 `mineru-office-convert` 辅助程序：绑定包暂不支持 Office 格式（`.docx`/`.pptx`/`.xlsx`）输入，传入 Office 文档会报 "office conversion is unavailable"。PDF 与图像输入不受影响；需要 Office 转换时请使用 Rust CLI（`cargo install mineru --features office`）或 `mineru-api` 服务端。
+
 ## Node.js
 
 需要 Node.js 18 或更高版本。用 `pnpm` 或 npm 安装：
@@ -111,6 +113,8 @@ await writeFile('out.md', markdown)
 ```
 
 `run({ path, output })` 则把完整输出树写入 `output`（见[英文使用指南](docs/usage.en.md)）。根软件包安装两个等效二进制文件 `mineru` 和 `mineru-rs`，两者都指向 `bin/mineru.js`；若 `PATH` 上已有另一个 `mineru` 命令，应优先使用 `mineru-rs`。
+
+npm 软件包不打包 `mineru-office-convert` 辅助程序：绑定包暂不支持 Office 格式（`.docx`/`.pptx`/`.xlsx`）输入，传入 Office 文档会报 "office conversion is unavailable"。PDF 与图像输入不受影响；需要 Office 转换时请使用 Rust CLI（`cargo install mineru --features office`）或 `mineru-api` 服务端。
 
 ## CLI 和 API 服务端
 

@@ -4,16 +4,6 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const native = require('./index.js')
-const rootManifest = require('./package.json')
-
-const TARGETS = Object.freeze({
-  'darwin-x64': { platform: 'darwin', arch: 'x64', helper: 'mineru-office-convert' },
-  'darwin-arm64': { platform: 'darwin', arch: 'arm64', helper: 'mineru-office-convert' },
-  'linux-x64-gnu': { platform: 'linux', arch: 'x64', helper: 'mineru-office-convert' },
-  'linux-arm64-gnu': { platform: 'linux', arch: 'arm64', helper: 'mineru-office-convert' },
-  'win32-x64-msvc': { platform: 'win32', arch: 'x64', helper: 'mineru-office-convert.exe' },
-  'win32-arm64-msvc': { platform: 'win32', arch: 'arm64', helper: 'mineru-office-convert.exe' },
-})
 
 function validArg(value) {
   if (typeof value !== 'string' || value.includes('\0') || value.includes('\ufffd')) return false
@@ -30,38 +20,12 @@ function validArg(value) {
   return true
 }
 
+// The `mineru-office-convert` helper binary is not bundled in the npm package, so this
+// always returns a path that does not exist. The Rust core maps the resulting spawn
+// failure to `OfficeConvertError::Unavailable` ("office conversion is unavailable"),
+// keeping PDF processing working while office inputs fail with a clear error.
 function helperPath() {
-  try {
-    const suffix = native._compileTargetSuffix()
-    const target = TARGETS[suffix]
-    if (!target || process.platform !== target.platform || process.arch !== target.arch) {
-      throw new Error('target mismatch')
-    }
-    if (target.platform === 'linux') {
-      const report = process.report && process.report.getReport && process.report.getReport()
-      if (!report || !report.header || !report.header.glibcVersionRuntime) {
-        throw new Error('GNU libc unavailable')
-      }
-    }
-    const packageName = `@alexsun-top/mineru-${suffix}`
-    const helper = require.resolve(`${packageName}/helper`)
-    const manifestPath = path.join(path.dirname(helper), 'package.json')
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
-    const info = fs.lstatSync(helper)
-    if (
-      manifest.name !== packageName ||
-      manifest.version !== rootManifest.version ||
-      path.basename(helper) !== target.helper ||
-      !info.isFile() ||
-      info.isSymbolicLink() ||
-      (target.platform !== 'win32' && (info.mode & 0o111) !== 0o111)
-    ) {
-      throw new Error('invalid platform package')
-    }
-    return helper
-  } catch {
-    throw new Error('MinerU platform helper validation failed')
-  }
+  return path.join(__dirname, 'mineru-office-convert' + (process.platform === 'win32' ? '.exe' : ''))
 }
 
 function canonicalStem(value) {

@@ -624,7 +624,7 @@ def validate_wheel(path: Path, version: str) -> str:
     platform = match.group(1)
     if any(part.startswith("linux_") for part in platform.split(".")):
         fail(f"raw linux wheel is forbidden: {path.name}")
-    files, modes = zip_contents(path)
+    files, _ = zip_contents(path)
     metadata_names = [n for n in files if n.endswith(".dist-info/METADATA")]
     wheel_names = [n for n in files if n.endswith(".dist-info/WHEEL")]
     if len(metadata_names) != 1 or len(wheel_names) != 1:
@@ -637,15 +637,12 @@ def validate_wheel(path: Path, version: str) -> str:
     if set(tags) != expected_wheel_tags(platform):
         fail(f"wheel tags are not exclusively cp39-abi3: {tags}")
     native = [name for name in files if re.fullmatch(r"mineru_rs/_native(?:\.abi3)?\.(?:so|pyd)", name)]
-    windows = "win_" in platform
-    helper = f"mineru_rs/mineru-office-convert{'.exe' if windows else ''}"
     package_files = {name for name in files if name.startswith("mineru_rs/")}
     expected_package = {
         "mineru_rs/__init__.py",
         "mineru_rs/__init__.pyi",
         "mineru_rs/_cli.py",
         "mineru_rs/_native.pyi",
-        helper,
         *native,
     }
     if len(native) != 1 or package_files != expected_package:
@@ -662,8 +659,6 @@ def validate_wheel(path: Path, version: str) -> str:
         fail(f"wheel metadata payload differs in {path.name}")
     if files[f"{dist_info}/entry_points.txt"] != WHEEL_ENTRY_POINTS:
         fail(f"wheel console entry point differs in {path.name}")
-    if not windows and modes.get(helper) != 0o755:
-        fail(f"wheel helper mode is not 0755 in {path.name}")
     return platform
 
 
@@ -1095,13 +1090,12 @@ def crate_postflight(args: argparse.Namespace) -> None:
 def expected_platform_manifest(root: dict, suffix: str, version: str) -> dict:
     os_name, cpu, libc, _ = PLATFORMS[suffix]
     native = f"mineru.{suffix}.node"
-    helper = f"mineru-office-convert{'.exe' if os_name == 'win32' else ''}"
     manifest: dict[str, typing.Any] = {
         "name": f"{NPM_ROOT}-{suffix}",
         "version": version,
         "cpu": [cpu],
         "main": native,
-        "files": [native, helper],
+        "files": [native],
     }
     for field in ("description", "keywords", "author", "authors", "homepage", "license", "engines", "repository", "bugs"):
         if field in root:
@@ -1115,7 +1109,6 @@ def expected_platform_manifest(root: dict, suffix: str, version: str) -> dict:
         manifest["libc"] = [libc]
     manifest["exports"] = {
         ".": f"./{native}",
-        "./helper": f"./{helper}",
         "./package.json": "./package.json",
     }
     return manifest
@@ -1162,11 +1155,9 @@ def validate_npm(path: Path, version: str, root_manifest: dict) -> str:
     expected = expected_platform_manifest(root_manifest, suffix, version)
     if manifest != expected or "bin" in manifest:
         fail(f"npm platform manifest differs for {name}")
-    native, helper = expected["files"]
-    if set(raw) != {"package.json", native, helper}:
+    native = expected["files"][0]
+    if set(raw) != {"package.json", native}:
         fail(f"npm platform payload differs for {name}: {sorted(raw)}")
-    if PLATFORMS[suffix][0] != "win32" and modes.get(helper) != 0o755:
-        fail(f"npm platform helper mode differs for {name}")
     return name
 
 
@@ -1211,7 +1202,7 @@ def self_test(_: argparse.Namespace) -> None:
                 return
             raise AssertionError(message)
 
-        def write_wheel(path: Path, helper_mode: int = 0o755, entry_point: bytes = WHEEL_ENTRY_POINTS) -> None:
+        def write_wheel(path: Path, entry_point: bytes = WHEEL_ENTRY_POINTS) -> None:
             dist = "mineru_rs-1.2.3.dist-info"
             contents = {
                 "mineru_rs/__init__.py": b"",
@@ -1219,7 +1210,6 @@ def self_test(_: argparse.Namespace) -> None:
                 "mineru_rs/_cli.py": b"",
                 "mineru_rs/_native.abi3.so": b"native",
                 "mineru_rs/_native.pyi": b"",
-                "mineru_rs/mineru-office-convert": b"helper",
                 f"{dist}/METADATA": b"Name: mineru-rs\nVersion: 1.2.3\n",
                 f"{dist}/WHEEL": b"Wheel-Version: 1.0\nTag: cp39-abi3-macosx_11_0_arm64\n",
                 f"{dist}/entry_points.txt": entry_point,
@@ -1229,8 +1219,7 @@ def self_test(_: argparse.Namespace) -> None:
             with zipfile.ZipFile(path, "w") as archive:
                 for name, data in contents.items():
                     member = zipfile.ZipInfo(name)
-                    mode = helper_mode if name.endswith("mineru-office-convert") else 0o644
-                    member.external_attr = mode << 16
+                    member.external_attr = 0o644 << 16
                     archive.writestr(member, data)
 
         def write_npm_tar(path: Path, manifest: dict, payload: dict[str, bytes], modes: dict[str, int]) -> None:
@@ -1476,8 +1465,6 @@ def self_test(_: argparse.Namespace) -> None:
         wheel_path = Path(tmp) / "mineru_rs-1.2.3-cp39-abi3-macosx_11_0_arm64.whl"
         write_wheel(wheel_path)
         assert validate_wheel(wheel_path, "1.2.3") == "macosx_11_0_arm64"
-        write_wheel(wheel_path, 0o644)
-        must_fail(lambda: validate_wheel(wheel_path, "1.2.3"), "non-executable wheel helper was accepted")
         for alias, target in PYTHON_SCRIPTS.items():
             write_wheel(wheel_path, entry_point=WHEEL_ENTRY_POINTS.replace(f"{alias}={target}\n".encode(), b""))
             must_fail(
@@ -1505,16 +1492,15 @@ def self_test(_: argparse.Namespace) -> None:
         root_payload = {name: (b"#!/usr/bin/env node\n" if name == "bin/mineru.js" else b"x") for name in NPM_ROOT_FILES}
         root_path = npm_dir / f"alexsun-top-mineru-{version}.tgz"
         write_npm_tar(root_path, root_manifest, root_payload, {"bin/mineru.js": 0o755})
-        for suffix, platform_config in PLATFORMS.items():
-            os_name = platform_config[0]
+        for suffix in PLATFORMS:
             manifest = expected_platform_manifest(root_manifest, suffix, version)
-            native, helper = manifest["files"]
+            native = manifest["files"][0]
             platform_path = npm_dir / f"alexsun-top-mineru-{suffix}-{version}.tgz"
             write_npm_tar(
                 platform_path,
                 manifest,
-                {native: b"native", helper: b"helper"},
-                {helper: 0o644 if os_name == "win32" else 0o755},
+                {native: b"native"},
+                {},
             )
         check_npm(argparse.Namespace(directory=npm_dir, version=version))
 
@@ -1538,9 +1524,9 @@ def self_test(_: argparse.Namespace) -> None:
         suffix = "darwin-arm64"
         bad_manifest = expected_platform_manifest(root_manifest, suffix, version)
         bad_manifest["exports"]["./extra"] = "./extra"
-        native, helper = bad_manifest["files"]
+        native = bad_manifest["files"][0]
         bad_path = bad_dir / f"alexsun-top-mineru-{suffix}-{version}.tgz"
-        write_npm_tar(bad_path, bad_manifest, {native: b"native", helper: b"helper"}, {helper: 0o755})
+        write_npm_tar(bad_path, bad_manifest, {native: b"native"}, {})
         must_fail(
             lambda: validate_npm(bad_path, version, root_manifest),
             "extra npm platform export was accepted",

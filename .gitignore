@@ -26,5 +26,5 @@ packed/
 .pytest_cache/
 __pycache__/
 *.py[cod]
-/bindings/python/python/mineru_rs/mineru-office-convert
-/bindings/python/python/mineru_rs/mineru-office-convert.exe
+# Local maturin build artifact from editable installs
+/bindings/python/python/mineru_rs/_native*.so

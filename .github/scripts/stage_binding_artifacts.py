@@ -22,7 +22,6 @@ TARGETS: dict[str, dict[str, str | None]] = {
         "cpu": "x64",
         "libc": None,
         "addon": "mineru.darwin-x64.node",
-        "helper": "mineru-office-convert",
     },
     "aarch64-apple-darwin": {
         "suffix": "darwin-arm64",
@@ -30,7 +29,6 @@ TARGETS: dict[str, dict[str, str | None]] = {
         "cpu": "arm64",
         "libc": None,
         "addon": "mineru.darwin-arm64.node",
-        "helper": "mineru-office-convert",
     },
     "x86_64-unknown-linux-gnu": {
         "suffix": "linux-x64-gnu",
@@ -38,7 +36,6 @@ TARGETS: dict[str, dict[str, str | None]] = {
         "cpu": "x64",
         "libc": "glibc",
         "addon": "mineru.linux-x64-gnu.node",
-        "helper": "mineru-office-convert",
     },
     "aarch64-unknown-linux-gnu": {
         "suffix": "linux-arm64-gnu",
@@ -46,7 +43,6 @@ TARGETS: dict[str, dict[str, str | None]] = {
         "cpu": "arm64",
         "libc": "glibc",
         "addon": "mineru.linux-arm64-gnu.node",
-        "helper": "mineru-office-convert",
     },
     "x86_64-pc-windows-msvc": {
         "suffix": "win32-x64-msvc",
@@ -54,7 +50,6 @@ TARGETS: dict[str, dict[str, str | None]] = {
         "cpu": "x64",
         "libc": None,
         "addon": "mineru.win32-x64-msvc.node",
-        "helper": "mineru-office-convert.exe",
     },
     "aarch64-pc-windows-msvc": {
         "suffix": "win32-arm64-msvc",
@@ -62,7 +57,6 @@ TARGETS: dict[str, dict[str, str | None]] = {
         "cpu": "arm64",
         "libc": None,
         "addon": "mineru.win32-arm64-msvc.node",
-        "helper": "mineru-office-convert.exe",
     },
 }
 
@@ -197,56 +191,6 @@ def binary_file(path: Path, target: str, expected_basename: str, *, executable: 
         unix_mode(info.st_mode, path, exact=False)
 
 
-def package_directory(path: Path) -> None:
-    if path.exists() or path.is_symlink():
-        if path.is_symlink() or not path.is_dir():
-            fail(f"package path is not a real directory: {path}")
-        return
-    path.mkdir(parents=True)
-
-
-def opposite_helper(helper: str) -> str:
-    return "mineru-office-convert" if helper.endswith(".exe") else "mineru-office-convert.exe"
-
-
-def inspect_python(target: str, package_dir: Path) -> Path:
-    config = target_config(target)
-    helper = str(config["helper"])
-    expected = package_dir / helper
-    opposite = package_dir / opposite_helper(helper)
-    if opposite.exists() or opposite.is_symlink():
-        fail(f"opposite-platform helper is present: {opposite}")
-    binary_file(expected, target, helper, executable=True)
-    if config["os"] != "win32":
-        unix_mode(expected.lstat().st_mode, expected, exact=True)
-    return expected
-
-
-def stage_python(target: str, helper_source: Path, package_dir: Path) -> Path:
-    config = target_config(target)
-    helper = str(config["helper"])
-    binary_file(helper_source, target, helper, executable=True)
-    package_directory(package_dir)
-    opposite = package_dir / opposite_helper(helper)
-    if opposite.exists() or opposite.is_symlink():
-        info = opposite.lstat()
-        if not stat.S_ISREG(info.st_mode):
-            fail(f"refusing to remove non-regular opposite helper: {opposite}")
-        opposite.unlink()
-    destination = package_dir / helper
-    if destination.exists() or destination.is_symlink():
-        regular_file(destination, helper)
-    temporary = package_dir / f".{helper}.tmp-{os.getpid()}"
-    try:
-        shutil.copyfile(helper_source, temporary)
-        if config["os"] != "win32":
-            temporary.chmod(0o755)
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return inspect_python(target, package_dir)
-
-
 def load_root_manifest(path: Path) -> dict:
     regular_file(path, "package.json")
     try:
@@ -262,13 +206,13 @@ def load_root_manifest(path: Path) -> dict:
 
 def npm_manifest(target: str, root: dict) -> dict:
     config = target_config(target)
-    addon, helper = str(config["addon"]), str(config["helper"])
+    addon = str(config["addon"])
     manifest = {
         "name": f"{NPM_ROOT}-{config['suffix']}",
         "version": root["version"],
         "cpu": [config["cpu"]],
         "main": addon,
-        "files": [addon, helper],
+        "files": [addon],
     }
     for field in (
         "description",
@@ -293,7 +237,6 @@ def npm_manifest(target: str, root: dict) -> dict:
         manifest["libc"] = [config["libc"]]
     manifest["exports"] = {
         ".": f"./{addon}",
-        "./helper": f"./{helper}",
         "./package.json": "./package.json",
     }
     return manifest
@@ -309,8 +252,8 @@ def inspect_npm(target: str, package_dir: Path, root_package_json: Path) -> Path
     root = load_root_manifest(root_package_json)
     if package_dir.is_symlink() or not package_dir.is_dir():
         fail(f"npm package is not a real directory: {package_dir}")
-    addon, helper = str(config["addon"]), str(config["helper"])
-    expected_names = {"package.json", addon, helper}
+    addon = str(config["addon"])
+    expected_names = {"package.json", addon}
     actual_names = {entry.name for entry in package_dir.iterdir()}
     if actual_names != expected_names:
         fail(f"npm package payload differs: expected {sorted(expected_names)}, got {sorted(actual_names)}")
@@ -322,33 +265,24 @@ def inspect_npm(target: str, package_dir: Path, root_package_json: Path) -> Path
         fail(f"cannot read npm platform manifest {manifest_path}: {error}")
     matching_manifest(manifest, npm_manifest(target, root), manifest_path)
     binary_file(package_dir / addon, target, addon, executable=False)
-    helper_path = package_dir / helper
-    binary_file(helper_path, target, helper, executable=True)
-    if config["os"] != "win32":
-        unix_mode(helper_path.lstat().st_mode, helper_path, exact=True)
     return package_dir
 
 
 def stage_npm(
     target: str,
     addon_source: Path,
-    helper_source: Path,
     package_dir: Path,
     root_package_json: Path,
 ) -> Path:
     config = target_config(target)
-    addon, helper = str(config["addon"]), str(config["helper"])
+    addon = str(config["addon"])
     root = load_root_manifest(root_package_json)
     binary_file(addon_source, target, addon, executable=False)
-    binary_file(helper_source, target, helper, executable=True)
     if package_dir.exists() or package_dir.is_symlink():
         fail(f"npm output directory must not already exist: {package_dir}")
     package_dir.mkdir(parents=True)
     try:
         shutil.copyfile(addon_source, package_dir / addon)
-        shutil.copyfile(helper_source, package_dir / helper)
-        if config["os"] != "win32":
-            (package_dir / helper).chmod(0o755)
         (package_dir / "package.json").write_text(
             json.dumps(npm_manifest(target, root), indent=2) + "\n", encoding="utf-8"
         )
@@ -382,13 +316,12 @@ def self_test() -> None:
         "version": "1.2.3",
         "cpu": ["x64"],
         "main": "mineru.linux-x64-gnu.node",
-        "files": ["mineru.linux-x64-gnu.node", "mineru-office-convert"],
+        "files": ["mineru.linux-x64-gnu.node"],
         "license": "MIT OR Apache-2.0",
         "os": ["linux"],
         "libc": ["glibc"],
         "exports": {
             ".": "./mineru.linux-x64-gnu.node",
-            "./helper": "./mineru-office-convert",
             "./package.json": "./package.json",
         },
     }
@@ -410,13 +343,6 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError(message)
-    try:
-        unix_mode(0o100644, Path("mineru-office-convert"), exact=False)
-    except ValidationError:
-        pass
-    else:
-        raise AssertionError("non-executable Unix mode was accepted")
-    unix_mode(0o100755, Path("mineru-office-convert"), exact=True)
     print("stage_binding_artifacts self-test passed")
 
 
@@ -424,19 +350,9 @@ def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description=__doc__)
     subcommands = command.add_subparsers(dest="command", required=True)
 
-    stage_py = subcommands.add_parser("stage-python")
-    stage_py.add_argument("--target", required=True)
-    stage_py.add_argument("--helper", type=Path, required=True)
-    stage_py.add_argument("--package-dir", type=Path, required=True)
-
-    inspect_py = subcommands.add_parser("inspect-python")
-    inspect_py.add_argument("--target", required=True)
-    inspect_py.add_argument("--package-dir", type=Path, required=True)
-
     stage_node = subcommands.add_parser("stage-npm")
     stage_node.add_argument("--target", required=True)
     stage_node.add_argument("--addon", type=Path, required=True)
-    stage_node.add_argument("--helper", type=Path, required=True)
     stage_node.add_argument("--package-dir", type=Path, required=True)
     stage_node.add_argument("--root-package-json", type=Path, required=True)
 
@@ -452,13 +368,9 @@ def parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = parser().parse_args()
     try:
-        if args.command == "stage-python":
-            result = stage_python(args.target, args.helper, args.package_dir)
-        elif args.command == "inspect-python":
-            result = inspect_python(args.target, args.package_dir)
-        elif args.command == "stage-npm":
+        if args.command == "stage-npm":
             result = stage_npm(
-                args.target, args.addon, args.helper, args.package_dir, args.root_package_json
+                args.target, args.addon, args.package_dir, args.root_package_json
             )
         elif args.command == "inspect-npm":
             result = inspect_npm(args.target, args.package_dir, args.root_package_json)

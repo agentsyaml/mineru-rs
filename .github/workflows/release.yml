@@ -137,35 +137,30 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            helper: mineru-office-convert
             python: "3.9"
             python-arch: x64
             slot: manylinux-x64
             deployment: ""
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            helper: mineru-office-convert
             python: 3.14.6
             python-arch: arm64
             slot: manylinux-arm64
             deployment: ""
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-            helper: mineru-office-convert
             python: 3.14.6
             python-arch: x64
             slot: macos-x64
             deployment: "10.12"
           - runner: macos-15
             target: aarch64-apple-darwin
-            helper: mineru-office-convert
             python: 3.14.6
             python-arch: arm64
             slot: macos-arm64
             deployment: "11.0"
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
-            helper: mineru-office-convert.exe
             python: 3.14.6
             python-arch: x64
             slot: windows-x64
@@ -186,24 +181,6 @@ jobs:
           architecture: ${{ matrix.python-arch }}
       - name: Install Rust 1.89.0
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add ${{ matrix.target }}
-      - name: Prepare same-manylinux helper staging hook
-        if: runner.os == 'Linux'
-        run: |
-          cat > .github/scripts/release-stage-python-helper.sh <<'SH'
-          #!/bin/sh
-          set -eux
-          cargo build --locked --release --bin mineru-office-convert --features office --target ${{ matrix.target }}
-          helper="${CARGO_TARGET_DIR:-target}/${{ matrix.target }}/release/${{ matrix.helper }}"
-          python3 .github/scripts/stage_binding_artifacts.py stage-python \
-            --target ${{ matrix.target }} --helper "$helper" \
-            --package-dir bindings/python/python/mineru_rs
-          SH
-          chmod 755 .github/scripts/release-stage-python-helper.sh
-      - name: Build and stage same-target native helper
-        if: runner.os != 'Linux'
-        run: |
-          cargo build --locked --release --bin mineru-office-convert --features office --target ${{ matrix.target }}
-          python .github/scripts/stage_binding_artifacts.py stage-python --target ${{ matrix.target }} --helper target/${{ matrix.target }}/release/${{ matrix.helper }} --package-dir bindings/python/python/mineru_rs
       - name: Build locked manylinux wheel
         if: runner.os == 'Linux'
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
@@ -212,7 +189,6 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: "2014"
           rust-toolchain: 1.89.0
-          before-script-linux: .github/scripts/release-stage-python-helper.sh
           args: --release --locked --manifest-path bindings/python/Cargo.toml --out dist
       - name: Build locked native wheel
         if: runner.os != 'Linux'
@@ -222,11 +198,7 @@ jobs:
           target: ${{ matrix.target }}
           rust-toolchain: 1.89.0
           args: --release --locked --manifest-path bindings/python/Cargo.toml --out dist
-      - name: Inspect exact same-target staged helper
-        run: python .github/scripts/stage_binding_artifacts.py inspect-python --target ${{ matrix.target }} --package-dir bindings/python/python/mineru_rs
       - name: Verify, install, and smoke wheel
-        env:
-          MINERU_RUN_OFFICE_E2E: "1"
         run: |
           python .github/scripts/verify_release.py wheel --directory dist --version "${{ needs.identity.outputs.version }}" --count 1 --platform "${{ matrix.slot }}"
           python -c "import os,venv; venv.create(os.path.join(os.environ['RUNNER_TEMP'],'wheel-venv'),with_pip=True)"
@@ -248,32 +220,26 @@ jobs:
         include:
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-            helper: mineru-office-convert
             node-arch: x64
             suffix: darwin-x64
           - runner: macos-15
             target: aarch64-apple-darwin
-            helper: mineru-office-convert
             node-arch: arm64
             suffix: darwin-arm64
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            helper: mineru-office-convert
             node-arch: x64
             suffix: linux-x64-gnu
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            helper: mineru-office-convert
             node-arch: arm64
             suffix: linux-arm64-gnu
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
-            helper: mineru-office-convert.exe
             node-arch: x64
             suffix: win32-x64-msvc
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-            helper: mineru-office-convert.exe
             node-arch: arm64
             suffix: win32-arm64-msvc
     runs-on: ${{ matrix.runner }}
@@ -297,8 +263,6 @@ jobs:
         run: npm install --global npm@12.0.2 && npm --version && npm ci
       - name: Install Rust 1.89.0 target
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add ${{ matrix.target }}
-      - name: Build same-target Office helper
-        run: cargo build --locked --release --bin mineru-office-convert --features office --target ${{ matrix.target }}
       - name: Build generated addon
         working-directory: bindings/node
         run: |
@@ -306,13 +270,11 @@ jobs:
           git restore --source=HEAD -- index.js
       - name: Stage and inspect current-build platform package
         run: |
-          python .github/scripts/stage_binding_artifacts.py stage-npm --target ${{ matrix.target }} --addon bindings/node/mineru.${{ matrix.suffix }}.node --helper target/${{ matrix.target }}/release/${{ matrix.helper }} --package-dir bindings/node/staged/${{ matrix.suffix }} --root-package-json bindings/node/package.json
+          python .github/scripts/stage_binding_artifacts.py stage-npm --target ${{ matrix.target }} --addon bindings/node/mineru.${{ matrix.suffix }}.node --package-dir bindings/node/staged/${{ matrix.suffix }} --root-package-json bindings/node/package.json
           python .github/scripts/stage_binding_artifacts.py inspect-npm --target ${{ matrix.target }} --package-dir bindings/node/staged/${{ matrix.suffix }} --root-package-json bindings/node/package.json
           python -c "from pathlib import Path; import shutil; source=Path('bindings/node/staged/${{ matrix.suffix }}'); destination=Path('bindings/node/node_modules/@alexsun-top/mineru-${{ matrix.suffix }}'); shutil.rmtree(destination, ignore_errors=True); destination.parent.mkdir(parents=True, exist_ok=True); shutil.copytree(source, destination); Path('bindings/node/mineru.${{ matrix.suffix }}.node').unlink()"
       - name: Smoke current-build platform package
         working-directory: bindings/node
-        env:
-          MINERU_RUN_OFFICE_E2E: "1"
         run: npm test
       - name: Verify checked-in generated types
         if: matrix.suffix == 'linux-x64-gnu'
@@ -340,10 +302,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: '& "${{ runner.temp }}/node-packed-smoke/node_modules/.bin/mineru.cmd" --help'
-      - name: Smoke installed API and Office conversion
+      - name: Smoke installed API
         working-directory: ${{ runner.temp }}/node-packed-smoke
         env:
-          MINERU_RUN_OFFICE_E2E: "1"
           MINERU_NODE_TEST_SOURCE: ${{ github.workspace }}/bindings/node/__test__/smoke.test.js
         run: |
           node -e "const api=require('@alexsun-top/mineru');if(api.canonicalStem('a bad/pdf')!=='a bad_pdf'||!api.validatePdfOptions(0,null,true,true,true))process.exit(1)"

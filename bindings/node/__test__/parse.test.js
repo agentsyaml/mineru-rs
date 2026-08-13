@@ -7,16 +7,6 @@ const path = require('path')
 const api = require('../api.js')
 const native = require('../index.js')
 
-function helperUnavailable() {
-  try {
-    const suffix = native._compileTargetSuffix()
-    require.resolve(`@alexsun-top/mineru-${suffix}/helper`)
-    return false
-  } catch {
-    return true
-  }
-}
-
 function patchRun(replacement) {
   const original = native._run
   native._run = replacement
@@ -25,8 +15,7 @@ function patchRun(replacement) {
   }
 }
 
-// Local copy of api.js locate logic, exercised only when the full parse flow
-// cannot run (platform helper package unavailable).
+// Local copy of api.js locate logic, exercised independently of the full parse flow.
 function locateMarkdown(root, stem) {
   const found = []
   const walk = (directory, depth) => {
@@ -178,12 +167,8 @@ async function testLocateLogic() {
 }
 
 async function main() {
-  if (helperUnavailable()) {
-    console.log('node parse: skipping full flow (platform helper package unavailable), testing locate logic only')
-    await testLocateLogic()
-  } else {
-    await testFullFlow()
-  }
+  await testFullFlow()
+  await testLocateLogic()
   console.log('node parse: all assertions passed')
 }
 

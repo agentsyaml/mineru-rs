@@ -115,6 +115,12 @@ upstream Python `mineru` package is also installed, since both provide a
 `mineru` entry point and the one earlier on `PATH` wins. Releases are wheels
 only; there is no sdist or source fallback for unsupported platforms or PyPy.
 
+The Python wheel does not bundle the `mineru-office-convert` helper: Office
+format (`.docx`/`.pptx`/`.xlsx`) input is not yet supported in the binding and
+fails with "office conversion is unavailable". PDF and image input are
+unaffected; use the Rust CLI (`cargo install mineru --features office`) or
+`mineru-api` for Office conversion.
+
 ## Node.js
 
 Requires Node.js 18 or newer. Install with `pnpm` or npm:
@@ -137,6 +143,12 @@ the [English usage guide](docs/usage.en.md)). The root package installs two
 equivalent binaries, `mineru` and `mineru-rs`, both pointing at
 `bin/mineru.js`; prefer `mineru-rs` if another `mineru` command is already on
 `PATH`.
+
+The npm packages do not bundle the `mineru-office-convert` helper: Office
+format (`.docx`/`.pptx`/`.xlsx`) input is not yet supported in the binding and
+fails with "office conversion is unavailable". PDF and image input are
+unaffected; use the Rust CLI (`cargo install mineru --features office`) or
+`mineru-api` for Office conversion.
 
 ## CLI and API server
 

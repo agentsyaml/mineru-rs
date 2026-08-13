@@ -424,6 +424,12 @@ The `mineru-rs` Python package and the `@alexsun-top/mineru` Node.js package
 wrap the same parser. Both expose a `parse()` that returns markdown in memory,
 and a `run()` that writes the full output tree.
 
+> The binding packages do not bundle the `mineru-office-convert` helper and do
+> not yet support Office-format (`.docx`/`.pptx`/`.xlsx`) input conversion;
+> passing an Office document fails with "office conversion is unavailable".
+> PDF and image input are unaffected. For Office conversion, use the
+> `cargo install mineru --features office` CLI or the `mineru-api` server.
+
 ### Python
 
 ```sh

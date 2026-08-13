@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import stat
 import tempfile
 from dataclasses import dataclass
 from importlib import resources
@@ -52,18 +51,12 @@ def validate_pdf_options(
 
 
 def _helper_path() -> Path:
+    # Office conversion is not bundled in the Python package; the core maps
+    # spawn failure to an "office conversion is unavailable" error when the
+    # helper path does not exist.
     name = "mineru-office-convert.exe" if os.name == "nt" else "mineru-office-convert"
     resource = resources.files(__package__ or "mineru_rs").joinpath(name)
-    try:
-        path = Path(cast("os.PathLike[str]", resource))
-        info = path.lstat()
-    except (FileNotFoundError, OSError, TypeError) as error:
-        raise RuntimeError(f"packaged Office helper is unavailable: {name}") from error
-    if not path.is_absolute() or path.name != name or not stat.S_ISREG(info.st_mode):
-        raise RuntimeError(f"packaged Office helper is invalid: {name}")
-    if os.name != "nt" and info.st_mode & 0o111 != 0o111:
-        raise RuntimeError(f"packaged Office helper is not executable: {name}")
-    return path
+    return Path(cast("os.PathLike[str]", resource))
 
 
 async def run(
