@@ -1192,37 +1192,37 @@ impl MinerUVlmClient {
                         requests.len(),
                     );
                 }
-                encoder = Some(Box::pin(async move {
-                    let _permit = cpu_semaphore
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| VlmError::Transport {
-                            operation: "official PDF",
-                            message: "encode semaphore closed".into(),
+                encoder =
+                    Some(Box::pin(async move {
+                        let _permit = cpu_semaphore.acquire_owned().await.map_err(|_| {
+                            VlmError::Transport {
+                                operation: "official PDF",
+                                message: "encode semaphore closed".into(),
+                            }
                         })?;
-                    client
-                        .official_blocking(deadline, move || {
-                            #[cfg(test)]
-                            if let Some(hook) = &scheduler_hook {
-                                (hook.before_encode)(order);
-                            }
-                            let mut blocks = blocks_for_encode;
-                            let prepared = preprocessor.encode_semantic_candidate_capped(
-                                &page,
-                                &mut blocks,
-                                &candidate,
-                                max_pixels,
-                            )?;
-                            #[cfg(test)]
-                            if let Some(hook) = &scheduler_hook {
-                                (hook.after_encode)(order);
-                            }
-                            Ok((
-                                blocks, prepared.0, prepared.1, prepared.2, prepared.3, order,
-                            ))
-                        })
-                        .await
-                }));
+                        client
+                            .official_blocking(deadline, move || {
+                                #[cfg(test)]
+                                if let Some(hook) = &scheduler_hook {
+                                    (hook.before_encode)(order);
+                                }
+                                let mut blocks = blocks_for_encode;
+                                let prepared = preprocessor.encode_semantic_candidate_capped(
+                                    &page,
+                                    &mut blocks,
+                                    &candidate,
+                                    max_pixels,
+                                )?;
+                                #[cfg(test)]
+                                if let Some(hook) = &scheduler_hook {
+                                    (hook.after_encode)(order);
+                                }
+                                Ok((
+                                    blocks, prepared.0, prepared.1, prepared.2, prepared.3, order,
+                                ))
+                            })
+                            .await
+                    }));
             }
             tokio::select! {
                 encoded = async {

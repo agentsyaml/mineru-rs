@@ -45,7 +45,10 @@ impl Default for OfficialPdfOptions {
             formula_enable: true,
             table_enable: true,
             image_analysis: true,
-            render_workers: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).min(8),
+            render_workers: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(8)
+                .min(8),
             processing_window_size: 64,
             render_timeout: Duration::from_secs(300),
             max_pdf_bytes: GIB as usize,
