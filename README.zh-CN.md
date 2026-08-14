@@ -159,21 +159,12 @@ mineru -p input.pdf -o output --api-url http://127.0.0.1:8000
 
 ## 安装
 
-### 预构建方式
-
-- **Docker**——llama.cpp server profile，见 [Docker](#docker)。
-- **crates.io**——安装仅限远程模式的命令行工具（需 Rust 1.89+）：
-
-  ```sh
-  cargo install mineru
-  cargo install mineru --features office   # 同时安装 Office 转换辅助程序
-  ```
+- **crates.io**——`cargo install mineru`（加 `--features office` 可安装 Office 转换辅助程序；需 Rust 1.89+）。
 - **Python**——`pip install mineru-rs`（支持 CPython 3.9+）。
 - **Node.js**——`npm install @alexsun-top/mineru`（需 Node.js 18+）。
+- **Docker**——见 [Docker](#docker)。
 
-### 从源码构建
-
-克隆仓库并构建远程 CLI/API 工具：
+从源码构建：
 
 ```sh
 git clone https://github.com/agentsyaml/mineru-rs
@@ -183,29 +174,6 @@ cargo build --release
 ```
 
 作为库使用：`cargo add mineru`。
-
-## 命令行用法
-
-### 选项
-
-规范的 `mineru` 命令从 `MINERU_VL_SERVER` 和 `MINERU_VL_MODEL_NAME` 环境变量读取服务地址与模型：
-
-```sh
-export MINERU_VL_SERVER="https://<server>"
-export MINERU_VL_MODEL_NAME="<model-id>"
-export MINERU_VL_API_KEY="<your-key>"
-mineru -p input.pdf -o output
-```
-
-### 输出目录
-
-- `mineru`（远程）直接写入 `output/`：`document.md`、`document.json`、`middle.json`、`content_list.json`、裁剪后的 `assets/` 以及版面预览 `{stem}_layout.pdf`。
-
-`{stem}` 为输入文件名去掉扩展名后的部分。
-
-### API 服务
-
-`mineru-api` 是 HTTP API 服务：它接收文档、调用所配置的 VLM，并返回结果归档。该服务本身不进行本地推理。API 模式的提交流程见 [CLI 和 API 服务端](#cli-和-api-服务端)。
 
 ## 二进制文件
 
@@ -217,7 +185,7 @@ mineru -p input.pdf -o output
 
 ## Docker
 
-### Docker Compose profiles
+### Docker Compose 配置
 
 仓库自带的 [`docker-compose.yaml`](docker-compose.yaml) 通过两个 profile 之一在 NVIDIA GPU 上运行 MinerU 的 OpenAI 兼容服务：
 

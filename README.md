@@ -198,22 +198,13 @@ for service configuration and complete options.
 
 ## Install
 
-### Prebuilt
-
-- **Docker** — llama.cpp server profile, see [Docker](#docker).
-- **crates.io** — install the remote-only command-line tools (requires Rust
-  1.89+):
-
-  ```sh
-  cargo install mineru
-  cargo install mineru --features office   # also installs the Office helper
-  ```
+- **crates.io** — `cargo install mineru` (add `--features office` for the
+  Office helper; requires Rust 1.89+).
 - **Python** — `pip install mineru-rs` (CPython 3.9+).
 - **Node.js** — `npm install @alexsun-top/mineru` (Node.js 18+).
+- **Docker** — see [Docker](#docker).
 
-### Build from source
-
-Clone the repository and build the remote CLI/API tools:
+Build from source:
 
 ```sh
 git clone https://github.com/agentsyaml/mineru-rs
@@ -223,50 +214,6 @@ cargo build --release
 ```
 
 As a library in your own project: `cargo add mineru`.
-
-## Command-line usage
-
-### Options
-
-The canonical `mineru` command reads the service address and model from the
-`MINERU_VL_SERVER` and `MINERU_VL_MODEL_NAME` environment variables:
-
-```sh
-export MINERU_VL_SERVER="https://<server>"
-export MINERU_VL_MODEL_NAME="<model-id>"
-export MINERU_VL_API_KEY="<your-key>"
-mineru -p input.pdf -o output
-```
-
-### Output
-
-- `mineru` (remote) writes to `output/` directly: `document.md`,
-  `document.json`, `middle.json`, `content_list.json`, cropped `assets/`, and
-  a layout preview `{stem}_layout.pdf`.
-
-`{stem}` is the input filename without its extension.
-
-### API server
-
-`mineru-api` is the HTTP API server: it accepts documents, calls the
-configured VLM, and returns result archives. It performs no local inference.
-See [CLI and API server](#cli-and-api-server) for the API-mode submission
-flow.
-
-## 输入上限与放大配置 / Input limits and how to raise them
-
-流水线在多个独立阶段执行大小上限。触发上限时，报错消息会给出具体文件名、大小、限制值与放大旋钮（flag 或环境变量）；单个文档失败不会中断整批处理，其余文档继续。本地解析大文件会按文件大小占用内存（磁盘总量上限与常驻内存上限相互独立）。
-
-| 上限 | 默认值 | Flag | 环境变量 | 触发阶段 |
-| --- | ---: | --- | --- | --- |
-| 本地驻留/解析上限 `max_pdf_bytes` | 1 GiB | `--max-pdf-bytes` | `MINERU_MAX_PDF_BYTES` | 文件读取与 PDF 本地解析（含办公室文档转换后 PDF） |
-| 输入传输上限 `max_input_bytes` | 4_293_918_719（≈4 GiB） | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | 输入摄取/传输 |
-| 输出上限 `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | 输出生成 |
-| OOXML 归档上限 | 1 GiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office 文档预检 |
-| Office 转换输入上限 | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | Office 转换 |
-| 服务器端文件上限（`--api-url` 模式） | 1 GiB | `--file-cap`（服务端 `mineru-api`） | `MINERU_API_FILE_CAP`（服务端） | 服务器上传 |
-
-Each limit can be raised independently via its flag or environment variable; see the [Chinese usage guide](docs/usage.md) or [English usage guide](docs/usage.en.md) for the full option tables.
 
 ## The binaries
 

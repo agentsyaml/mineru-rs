@@ -41,6 +41,8 @@ x-mineru-llama: &mineru-llama
     LLAMA_ARG_CTX_SIZE: ${LLAMA_CTX_SIZE:-8192}
     # Number of layers offloaded to the GPU; use auto/all for full offload.
     LLAMA_ARG_N_GPU_LAYERS: ${LLAMA_N_GPU_LAYERS:-99}
+    # Fetch the GGUF directly from Hugging Face when LLAMA_MODEL is not a local path.
+    LLAMA_ARG_HF_REPO: ${LLAMA_ARG_HF_REPO:-}
   volumes:
     # Put your quantized GGUF file(s) in ./models (host) or point LLAMA_MODELS_DIR elsewhere.
     - ${LLAMA_MODELS_DIR:-./models}:/models:ro

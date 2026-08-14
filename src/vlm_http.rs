@@ -920,13 +920,11 @@ fn build_body(
         content.push(json!({"type":"text","text":prompt}));
     }
     let mut messages = Vec::new();
-    if let Some(system) = config
+    let system = config
         .system_prompt
         .clone()
-        .unwrap_or_else(|| "You are a helpful assistant.".into())
-        .strip_prefix("")
-        .filter(|text| !text.is_empty())
-    {
+        .unwrap_or_else(|| "You are a helpful assistant.".into());
+    if !system.is_empty() {
         messages.push(json!({"role":"system","content":system}));
     }
     messages.push(json!({"role":"user","content":content}));
@@ -1749,6 +1747,35 @@ mod tests {
         assert_eq!(body["top_k"], 2);
         assert_eq!(body["max_tokens"], 7);
         assert_eq!(body["priority"], 3);
+    }
+
+    #[test]
+    fn shared_body_builder_omits_vllm_only_fields_for_gpt_models() {
+        // OpenAI-compatible endpoints reject unknown fields, so a gpt-prefixed model name
+        // must not receive skip_special_tokens/top_k/repetition_penalty. The max_tokens
+        // duplication is intentional: it covers both vLLM and OpenAI field namings.
+        let body = build_body(
+            &VlmHttpConfig {
+                sampling_params: Some(SamplingParams {
+                    top_k: Some(2),
+                    repetition_penalty: Some(1.1),
+                    max_new_tokens: Some(7),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            "gpt-4o-mini",
+            Some("prompt".into()),
+            None,
+            None,
+            false,
+            vec![],
+        );
+        assert!(body.get("skip_special_tokens").is_none());
+        assert!(body.get("top_k").is_none());
+        assert!(body.get("repetition_penalty").is_none());
+        assert_eq!(body["max_tokens"], 7);
+        assert_eq!(body["max_completion_tokens"], 7);
     }
 
     #[tokio::test]
