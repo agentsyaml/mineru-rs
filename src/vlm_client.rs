@@ -1579,9 +1579,7 @@ impl MinerUVlmClient {
                     // batch-degraded candidates never reach the server, so charging them could
                     // only push the document over its budget and fail the whole page — the
                     // failure mode classic avoids by never encoding admission-gated candidates.
-                    // (Classic still charges per-request-degraded candidates as a historical
-                    // quirk; two-phase is deliberately stricter and counts only what is actually
-                    // requested.)
+                    // (Both pipelines count only retained candidates.)
                     encoded_budget.charge(bytes as u64, "encoded document bytes")?;
                     encoded_bytes = encoded_bytes.saturating_add(bytes);
                     // Document-wide resident-encoded-bytes ledger created by the window function.
@@ -3765,6 +3763,142 @@ mod tests {
         );
         // The counter-case: retained candidates over the document budget still fail hard.
         let result = run(2, batch, (layout + first - 1) as u64).await;
+        assert!(
+            matches!(
+                &result,
+                Err(VlmError::LimitExceeded {
+                    resource: "encoded document bytes",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn classic_degraded_candidates_do_not_charge_document_encoded_budget() {
+        // Mirror of the two-phase budget test on the classic path: per-request-degraded
+        // candidates never charge the document encoded budget, and retained candidates over
+        // that budget still fail the page hard.
+        //
+        // Classic has no permanent batch elimination. The pre-admission gate
+        // (resident_bytes <= batch - request_cap) only holds a candidate back while the single
+        // in-flight request occupies its slot; once that request completes, the slot's lease is
+        // released (resident_bytes -= lease) and the gate re-admits the candidate. A post-encode
+        // batch overflow is also unreachable in classic: the gate keeps resident_before <=
+        // batch - request_cap and the per-request check keeps bytes <= request_cap, so
+        // resident_after <= batch always holds. Batch-capped candidates are therefore neither
+        // charged nor permanently dropped — they are simply re-queued behind the slot.
+        let (arrivals, _receiver) = mpsc::unbounded_channel();
+        let state = PipelineState {
+            arrivals,
+            semantic: Arc::new(AtomicUsize::new(0)),
+            release: (0..16).map(|_| Arc::new(Notify::new())).collect(),
+            hold: vec![false; 16],
+            fail: None,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(pipeline_chat))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = MinerUVlmClient::connect(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                max_concurrency: 8,
+                ..Default::default()
+            },
+            MinerUVlmConfig {
+                concurrency_model: ConcurrencyModel::Classic,
+                layout_image_size: (11, 10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let image = Arc::new(RgbImage::from_fn(600, 600, |x, y| {
+            image::Rgb([
+                ((x * 31 + y * 17) % 4) as u8,
+                ((x * 17 + y * 31) % 4) as u8,
+                ((x + y) % 4) as u8,
+            ])
+        }));
+        let run =
+            |semantic_cap: usize, request_cap: usize, batch_cap: usize, encoded_budget: u64| {
+                let client = client.clone();
+                let image = Arc::clone(&image);
+                async move {
+                    client
+                        .official_two_step_snapshot_window_with_budgets(
+                            vec![image],
+                            false,
+                            true,
+                            true,
+                            8,
+                            semantic_cap,
+                            3,
+                            request_cap,
+                            batch_cap,
+                            Arc::new(ByteBudget::new(encoded_budget)),
+                            Arc::new(ByteBudget::new(1 << 20)),
+                            Instant::now() + Duration::from_secs(10),
+                        )
+                        .await
+                        .map(|mut pages| pages.remove(0))
+                }
+            };
+        let layout_only = run(0, 1 << 20, 1 << 20, 1 << 20).await.unwrap();
+        let one = run(1, 1 << 20, 1 << 20, 1 << 20).await.unwrap();
+        let two = run(2, 1 << 20, 1 << 20, 1 << 20).await.unwrap();
+        let layout = layout_only.3;
+        let first = one.3 - layout_only.3;
+        let second = two.3 - one.3;
+        assert!(first > 0 && second > 0, "probe sizes must be nonzero");
+        // Per-request-degraded candidate: encoded over the per-request cap degrades to empty
+        // content; a budget below candidate 0's own bytes still succeeds, proving the degraded
+        // candidate was not charged.
+        let (snapshot, _, _, _, warnings) = run(1, first / 2, 1 << 20, (layout + first - 1) as u64)
+            .await
+            .expect("per-request-degraded candidates must not fail the document encoded budget");
+        assert_eq!(snapshot[0].content.as_deref(), Some(""));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("exceed the per-request cap")),
+            "{warnings:?}"
+        );
+        // A retained candidate over the document budget still fails hard.
+        let result = run(1, 1 << 20, 1 << 20, (layout + first - 1) as u64).await;
+        assert!(
+            matches!(
+                &result,
+                Err(VlmError::LimitExceeded {
+                    resource: "encoded document bytes",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        // Classic single-slot re-admission: with request == batch == max(first, second),
+        // candidate 0 fits exactly, and while its request is in flight the gate holds candidate
+        // 1 back. When the request completes, the slot's lease is released and the gate
+        // re-admits candidate 1; it encodes within the per-request cap, is retained, and is
+        // charged — so a budget holding only candidate 0 (layout + first) fails. This pins the
+        // correct classic semantics: the batch cap delays rather than eliminates, and the
+        // re-admitted candidate is charged like any retained candidate.
+        let result = run(
+            2,
+            first.max(second),
+            first.max(second),
+            (layout + first) as u64,
+        )
+        .await;
         assert!(
             matches!(
                 &result,

@@ -261,6 +261,7 @@ mod tests {
         assert_eq!(config.max_concurrency, 100);
         assert_eq!(config.http_timeout, Duration::from_secs(600));
         assert_eq!(config.max_response_bytes, 10 * 1024 * 1024);
+        assert_eq!(config.keepalive_expiry, Duration::from_secs(30));
         assert!(!config.skip_model_name_checking);
     }
 

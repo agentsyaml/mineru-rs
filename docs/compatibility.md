@@ -38,33 +38,3 @@ whitespace normalized; ordered content-list type plus normalized text/content;
 and existence of every referenced asset. Preview PDFs must retain page count
 and CropBox geometry. It intentionally ignores PDF, image, and JSON bytes,
 JSON key order, filenames, and private metadata.
-
-## Reproducible reference environment
-
-Supply the two wheel locations using operator-provided environment variables:
-
-```sh
-MINERU_REFERENCE_MINERU_WHEEL="/operator/path/mineru-3.4.4-py3-none-any.whl" \
-MINERU_REFERENCE_VL_UTILS_WHEEL="/operator/path/mineru_vl_utils-1.0.5-py3-none-any.whl" \
-cargo test --test real_mineru_344_vlm -- --ignored
-```
-
-## Env-gated reference suite
-
-The real semantic reference test is opt-in:
-
-```sh
-MINERU_RUN_REFERENCE=1 \
-MINERU_REFERENCE_URL="https://example.test/v1" \
-MINERU_REFERENCE_MODEL="<model-id>" \
-MINERU_REFERENCE_INPUT="input.pdf" \
-MINERU_REFERENCE_MINERU_WHEEL="/operator/path/mineru-3.4.4-py3-none-any.whl" \
-MINERU_REFERENCE_VL_UTILS_WHEEL="/operator/path/mineru_vl_utils-1.0.5-py3-none-any.whl" \
-cargo test --test real_mineru_344_vlm -- --ignored
-```
-
-`MINERU_RUN_REFERENCE=1`, URL, model, and input are required for the real
-semantic test. If authentication is needed, supply the optional bearer token
-only through `MINERU_REFERENCE_BEARER_TOKEN`; do not put it on the command
-line or in source control. Wheel locations are required operator-provided
-values; do not record them in source control.

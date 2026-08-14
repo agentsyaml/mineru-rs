@@ -524,7 +524,12 @@ impl VlmHttpClient {
             ));
         }
         for redirects in 0..=self.config.max_redirects {
-            let addrs = remote_addrs(&url, self.config.allow_private_remote_images).await?;
+            let addrs = remote_addrs(
+                &url,
+                self.config.allow_private_remote_images,
+                self.config.connect_timeout,
+            )
+            .await?;
             let host = url
                 .host_str()
                 .ok_or_else(|| VlmError::InvalidImageInput("remote URL missing host".into()))?;
@@ -1028,9 +1033,7 @@ async fn json_worker<T: Send + 'static>(
     let result = if let Some(deadline) = deadline {
         tokio::time::timeout_at(deadline, worker)
             .await
-            .map_err(|_| VlmError::Timeout {
-                operation: "official PDF",
-            })?
+            .map_err(|_| VlmError::Timeout { operation })?
     } else {
         worker.await
     };
@@ -1053,7 +1056,11 @@ fn limit(resource: &'static str, limit: usize, actual: usize) -> VlmError {
         actual: actual as u64,
     }
 }
-async fn remote_addrs(u: &Url, allow_private: bool) -> VlmResult<Vec<SocketAddr>> {
+async fn remote_addrs(
+    u: &Url,
+    allow_private: bool,
+    connect_timeout: Duration,
+) -> VlmResult<Vec<SocketAddr>> {
     if !matches!(u.scheme(), "http" | "https") || !u.username().is_empty() || u.password().is_some()
     {
         return Err(VlmError::InvalidImageInput(
@@ -1066,9 +1073,10 @@ async fn remote_addrs(u: &Url, allow_private: bool) -> VlmResult<Vec<SocketAddr>
     let port = u
         .port_or_known_default()
         .ok_or_else(|| VlmError::InvalidImageInput("remote URL invalid port".into()))?;
-    let a: Vec<_> = lookup_host((host, port))
+    let a: Vec<_> = tokio::time::timeout(connect_timeout, lookup_host((host, port)))
         .await
-        .map_err(|_| VlmError::InvalidImageInput("remote host resolution failed".into()))?
+        .map_err(|_| VlmError::InvalidImageInput("remote host resolution timed out".into()))?
+        .map_err(|e| VlmError::InvalidImageInput(format!("remote host resolution failed: {e}")))?
         .collect();
     if a.is_empty() || (!allow_private && a.iter().any(|x| !global(x.ip()))) {
         return Err(VlmError::InvalidImageInput(
@@ -1763,9 +1771,7 @@ mod tests {
         started_rx.await.unwrap();
         assert!(matches!(
             task.await.unwrap(),
-            Err(VlmError::Timeout {
-                operation: "official PDF"
-            })
+            Err(VlmError::Timeout { operation: "chat" })
         ));
         drop(root);
         assert!(gate.clone().try_acquire_owned().is_err());

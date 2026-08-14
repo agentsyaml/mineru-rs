@@ -49,6 +49,10 @@ fn write_outputs_with(
     if let Err(error) = install_stage(&staging, directory) {
         let restore = fs::rename(&backup, directory);
         let _ = fs::remove_dir_all(&staging);
+        if restore.is_err() {
+            // restore failed too: best-effort remove the stranded backup.
+            let _ = remove_path(&backup);
+        }
         return Err(restore.err().unwrap_or(error).into());
     }
     // Successful staged install is the commit point; cleanup cannot revoke it.

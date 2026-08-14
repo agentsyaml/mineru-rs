@@ -20,6 +20,10 @@ node_modules/
 npm/
 artifacts/
 packed/
+# CI staging output from stage-npm
+bindings/node/staged/
+platform-tarball/
+root-tarball/
 
 # Python
 .venv/

@@ -764,6 +764,29 @@ async fn owner(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
+    // Linux-only: die with the parent if it is SIGKILLed, so a killed parent never strands the
+    // helper as an orphan. macOS has no equivalent mechanism; on Windows the job object
+    // KILL_ON_JOB_CLOSE already covers this. Note PDEATHSIG only signals the direct child, not
+    // the helper's own grandchildren (e.g. soffice).
+    #[cfg(target_os = "linux")]
+    {
+        let parent_pid = std::process::id();
+        // SAFETY: PR_SET_PDEATHSIG is a single async-signal-safe prctl before exec; the parent
+        // pid captured above identifies the parent this process will die with.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // The parent may have died between fork() and prctl(), in which case
+                // PDEATHSIG was never armed; exiting here avoids orphaning the helper.
+                if libc::getppid() != parent_pid as libc::pid_t {
+                    libc::_exit(1);
+                }
+                Ok(())
+            });
+        }
+    }
     #[cfg(test)]
     command.env("MINERU_OFFICE_FAKE_CHILD", "1");
     let mut child = command

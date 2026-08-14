@@ -157,7 +157,7 @@ VLM transport knobs (each also has an environment spelling):
 | `--http-timeout-seconds <n>` | `600` | `MINERU_VLM_HTTP_TIMEOUT` |
 | `--connect-timeout-seconds <n>` | `10` | `MINERU_VLM_CONNECT_TIMEOUT` |
 | `--http-max-keepalive-connections <n>` | `20` | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` |
-| `--http-keepalive-expiry-seconds <n>` | `5` | `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` |
+| `--http-keepalive-expiry-seconds <n>` | `30` | `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` |
 | `--http-max-retries <n>` | `3` | `MINERU_VLM_HTTP_MAX_RETRIES` |
 | `--http-retry-backoff-factor <f>` | `0.5` | `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` |
 | `--max-remote-image-bytes <n>` | `33554432` | `MINERU_VLM_MAX_IMAGE_BYTES` |
@@ -292,7 +292,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_VLM_HTTP_TIMEOUT` | `600` | VLM HTTP request timeout in seconds. |
 | `MINERU_VLM_CONNECT_TIMEOUT` | `10` | Connect timeout in seconds. |
 | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` | `20` | Keepalive pool size. |
-| `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` | `5` | Keepalive expiry in seconds. |
+| `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` | `30` | Keepalive expiry in seconds. |
 | `MINERU_VLM_HTTP_MAX_RETRIES` | `3` | HTTP retry count. |
 | `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` | `0.5` | Retry backoff factor. |
 | `MINERU_VLM_MAX_IMAGE_BYTES` | `33554432` | Remote image byte cap. |
@@ -551,7 +551,7 @@ The pipeline enforces size limits at several independent stages. When a limit is
 
 - Hayro does not support encrypted PDFs; rendering of complex/advanced PDF effects may differ from other renderers. Invalid PDFs, inconsistent page mappings, size limits, or rendering errors fail explicitly and are not silently skipped.
 - The preview supports page rotations `0/90/180/270`. Its goal is usable visual and semantic alignment; because annotations are written and PDF serialization changes, the preview file's bytes are not identical to the original PDF. Other rotations fail.
-- `401` usually means a missing or invalid API key; `404` usually means an incorrect `--base-url` path. Confirm the service actually exposes `/v1/models` and `/v1/chat/completions`.
+- `401` usually means a missing or invalid API key; `404` usually means an incorrect `--url` / `MINERU_VL_SERVER` path. Confirm the service actually exposes `/v1/models` and `/v1/chat/completions`.
 - If model checking fails (the configured model was not returned by `GET /v1/models`, or no model is configured and the endpoint returns more than one), confirm that `data` returned by `GET /v1/models` contains the selected ID, and check authentication and the base URL.
 - `no valid layout tokens` means the service response does not contain the layout tokens required by MinerU; choose a compatible MinerU VLM model/service rather than a general chat model.
 - `limit exceeded` means a resource limit from the table above was exceeded; reduce the input or adjust and validate the configuration in a library caller. PDFs unsupported by Hayro must be processed first using a file/rendering workflow that supports the relevant PDF features, then retried.

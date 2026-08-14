@@ -154,7 +154,7 @@ VLM 传输旋钮（每个都有对应的环境拼写）：
 | `--http-timeout-seconds <n>` | `600` | `MINERU_VLM_HTTP_TIMEOUT` |
 | `--connect-timeout-seconds <n>` | `10` | `MINERU_VLM_CONNECT_TIMEOUT` |
 | `--http-max-keepalive-connections <n>` | `20` | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` |
-| `--http-keepalive-expiry-seconds <n>` | `5` | `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` |
+| `--http-keepalive-expiry-seconds <n>` | `30` | `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` |
 | `--http-max-retries <n>` | `3` | `MINERU_VLM_HTTP_MAX_RETRIES` |
 | `--http-retry-backoff-factor <f>` | `0.5` | `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` |
 | `--max-remote-image-bytes <n>` | `33554432` | `MINERU_VLM_MAX_IMAGE_BYTES` |
@@ -288,7 +288,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_VLM_HTTP_TIMEOUT` | `600` | VLM HTTP 请求超时秒数。 |
 | `MINERU_VLM_CONNECT_TIMEOUT` | `10` | 连接超时秒数。 |
 | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` | `20` | keepalive 连接池大小。 |
-| `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` | `5` | keepalive 过期秒数。 |
+| `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` | `30` | keepalive 过期秒数。 |
 | `MINERU_VLM_HTTP_MAX_RETRIES` | `3` | HTTP 重试次数。 |
 | `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` | `0.5` | 重试退避因子。 |
 | `MINERU_VLM_MAX_IMAGE_BYTES` | `33554432` | 远程图像字节上限。 |
@@ -526,7 +526,7 @@ if (warnings.length) console.warn(warnings)
 
 - Hayro 不支持加密 PDF；复杂/高级 PDF 效果的渲染可能与其他渲染器不同。遇到无效 PDF、页映射不一致、尺寸限制或渲染异常会明确失败，不会静默跳过。
 - 预览支持页面旋转 `0/90/180/270`。其目标是可用的视觉与语义对齐；由于写入了标注且 PDF 序列化会变化，预览文件字节不等于原 PDF。其他旋转会失败。
-- `401` 通常是缺失或无效的 API key；`404` 通常是 `--base-url` 路径不对。确认服务实际暴露 `/v1/models` 与 `/v1/chat/completions`。
+- `401` 通常是缺失或无效的 API key；`404` 通常是 `--url` / `MINERU_VL_SERVER` 路径不对。确认服务实际暴露 `/v1/models` 与 `/v1/chat/completions`。
 - 模型校验失败时（`GET /v1/models` 未返回所配置的模型，或未配置模型但端点返回多个模型），确认 `GET /v1/models` 返回的 `data` 中含所选 ID，并检查认证和 base URL。
 - `no valid layout tokens` 表示服务返回内容不含 MinerU 所需的版面 token；请选择兼容的 MinerU VLM 模型/服务，而不是普通聊天模型。
 - `limit exceeded` 表示超过上表资源上限；缩小输入或在库调用中调整并验证配置。Hayro 不支持的 PDF 则需用支持该 PDF 特性的文件/渲染流程处理后再试。

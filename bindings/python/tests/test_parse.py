@@ -1,8 +1,10 @@
 import asyncio
+import io
 import sys
 import tempfile
 import types
 import unittest
+import zipfile
 from pathlib import Path
 
 try:
@@ -89,6 +91,66 @@ class ParseTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "no markdown output"):
                 asyncio.run(mineru_rs.parse(source))
         self.assertFalse(fake.output_paths[0].exists())
+
+    @unittest.skipIf(
+        getattr(mineru_rs._native, "_run", None) is None,
+        "compiled native module unavailable; cannot exercise the office helper contract",
+    )
+    def test_office_conversion_unavailable_is_reported(self):
+        # A minimal but valid OOXML package passes the core's OOXML detection and reaches the
+        # office helper spawn. The helper is not bundled with the Python package, so the spawn
+        # fails and the unavailable contract is reported. A bogus (non-OOXML) file would instead
+        # fail earlier with "invalid OOXML" and never reach this branch.
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
+        class Models(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/v1/models":
+                    body = b'{"data":[{"id":"mock"}]}'
+                    self.send_response(200)
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Models)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w") as z:
+                    z.writestr(
+                        "_rels/.rels",
+                        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+                    )
+                    z.writestr(
+                        "[Content_Types].xml",
+                        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+                    )
+                source = Path(tmp) / "office.docx"
+                output = Path(tmp) / "output"
+                source.write_bytes(buf.getvalue())
+                output.mkdir()
+                with self.assertRaisesRegex(RuntimeError, "office conversion is unavailable"):
+                    asyncio.run(
+                        mineru_rs.run(
+                            source,
+                            output,
+                            method="ocr",
+                            url=f"http://127.0.0.1:{server.server_address[1]}",
+                        )
+                    )
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

@@ -80,17 +80,17 @@ def runtime_platforms(index, expected_platforms):
     return runtimes, attestations
 
 
-def expected_tags(image, release_tag, suffix=""):
+def expected_tags(image, release_tag):
     match = TAG_RE.fullmatch(release_tag)
     if not match:
         fail(f"release tag is not stable vX.Y.Z: {release_tag!r}")
     assert match is not None
     major, minor, patch = match.groups()
     return {
-        f"{image}:{major}.{minor}.{patch}{suffix}",
-        f"{image}:{major}.{minor}{suffix}",
-        f"{image}:{major}{suffix}",
-        f"{image}:latest{suffix}",
+        f"{image}:{major}.{minor}.{patch}",
+        f"{image}:{major}.{minor}",
+        f"{image}:{major}",
+        f"{image}:latest",
     }
 
 
@@ -119,7 +119,7 @@ def command_manifest(args):
 def command_tags(args):
     validate_digest(args.digest)
     tags = {line.strip() for line in Path(args.tags_file).read_text().splitlines() if line.strip()}
-    expected = expected_tags(args.image, args.release_tag, args.tag_suffix)
+    expected = expected_tags(args.image, args.release_tag)
     if tags != expected:
         fail(f"emitted tags are {sorted(tags)!r}, expected {sorted(expected)!r}")
     for tag in sorted(tags):
@@ -162,12 +162,6 @@ def self_test():
         "ghcr.io/agentsyaml/mineru-cli:1",
         "ghcr.io/agentsyaml/mineru-cli:latest",
     }
-    assert expected_tags("ghcr.io/agentsyaml/mineru-rs-cuda", "v1.2.3", "-sm80") == {
-        "ghcr.io/agentsyaml/mineru-rs-cuda:1.2.3-sm80",
-        "ghcr.io/agentsyaml/mineru-rs-cuda:1.2-sm80",
-        "ghcr.io/agentsyaml/mineru-rs-cuda:1-sm80",
-        "ghcr.io/agentsyaml/mineru-rs-cuda:latest-sm80",
-    }
     assert parse_platforms("linux/amd64") == {("linux", "amd64")}
     try:
         runtime_platforms({"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": []}, DEFAULT_PLATFORMS)
@@ -192,7 +186,6 @@ def main():
     tags.add_argument("--image", required=True)
     tags.add_argument("--release-tag", required=True)
     tags.add_argument("--tags-file", required=True)
-    tags.add_argument("--tag-suffix", default="", help="stable tag suffix, e.g. -sm80 for CUDA images")
     commands.add_parser("self-test")
     args = parser.parse_args()
     if args.command == "manifest":

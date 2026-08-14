@@ -146,7 +146,7 @@ Run from the repository root unless a subshell changes directory:
 
 ```sh
 cargo +1.89.0 fmt --all -- --check
-cargo +1.89.0 check --locked -p mineru --all-targets
+cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features
 cargo +1.89.0 check --locked -p mineru-python
 cargo +1.89.0 check --locked -p mineru-node
 cargo +1.89.0 metadata --locked --no-deps

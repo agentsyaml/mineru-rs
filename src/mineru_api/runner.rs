@@ -312,7 +312,9 @@ async fn run_core(
                         if let Some((route, response_cap, office, raster)) = preview {
                             for document in &task.documents {
                                 let kind = crate::DocumentKind::from_suffix(&document.suffix)
-                                    .expect("validated document kind");
+                                    .ok_or_else(|| {
+                                        format!("unsupported document kind: {}", document.suffix)
+                                    })?;
                                 if let Err(message) =
                                 crate::mineru_api::remote_preview::prepare_and_publish_downloaded(
                                     &output,

@@ -359,7 +359,7 @@ mod tests {
             NormalizedBbox::new(0.3, 0.4, 0.5, 0.6).unwrap(),
             None,
         );
-        let mut blocks = vec![outer, inner, first];
+        let blocks = vec![outer, inner, first];
 
         let mut page = RgbImage::from_pixel(100, 100, Rgb([240, 240, 240]));
         for y in 40..60 {

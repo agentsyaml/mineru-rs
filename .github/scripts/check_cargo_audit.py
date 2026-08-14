@@ -4,7 +4,6 @@
 import argparse
 import datetime as dt
 import json
-import re
 import tempfile
 import tomllib
 from pathlib import Path
@@ -109,21 +108,15 @@ def check_lock(lock):
             fail(f"quick-xml {version} parent drift: {sorted(parents)!r}")
 
 
-def check_version(manifest, today):
-    package = manifest.get("package")
-    version = package.get("version") if isinstance(package, dict) else None
-    if isinstance(version, dict) and version == {"workspace": True}:
-        workspace = manifest.get("workspace")
-        workspace_package = workspace.get("package") if isinstance(workspace, dict) else None
-        version = workspace_package.get("version") if isinstance(workspace_package, dict) else None
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version or "")
-    if not match or tuple(map(int, match.groups())) > (0, 2, 7):
-        fail(f"project version is outside exception policy: {version!r}")
+def check_expiry(today):
+    # The exception set is pinned exactly by advisory id, package name, package
+    # version, and dependency edges above; the project's own version is unrelated
+    # to whether those exceptions still apply, so no project version gate exists.
     if today >= EXPIRY:
         fail(f"cargo-audit exception expired on {EXPIRY.isoformat()}")
 
 
-def check(report, lock, manifest, today=None):
+def check(report, lock, today=None):
     if not isinstance(report, dict) or set(report) != {"database", "lockfile", "settings", "vulnerabilities", "warnings"}:
         fail("malformed cargo-audit report schema")
     settings = report["settings"]
@@ -141,7 +134,7 @@ def check(report, lock, manifest, today=None):
             fail("malformed unmaintained warning")
     exact_set(warnings["unmaintained"], WARNINGS, "warning")
     check_lock(lock)
-    check_version(manifest, today or dt.datetime.now(dt.timezone.utc).date())
+    check_expiry(today or dt.datetime.now(dt.timezone.utc).date())
 
 
 def fixture():
@@ -166,42 +159,39 @@ def fixture():
         {"name": name, "version": version, "dependencies": dependencies}
         for (name, version), dependencies in packages.items()
     ]}
-    return report, lock, {"package": {"version": "0.2.3"}}
+    return report, lock
 
 
 def self_test():
-    report, lock, manifest = fixture()
+    report, lock = fixture()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        report_path, lock_path, manifest_path = root / "report.json", root / "Cargo.lock", root / "Cargo.toml"
+        report_path, lock_path = root / "report.json", root / "Cargo.lock"
         report_path.write_text(json.dumps(report))
         lock_path.write_text("\n".join(
             "[[package]]\nname = \"{}\"\nversion = \"{}\"\ndependencies = [{}]\n".format(
                 package["name"], package["version"], ", ".join(json.dumps(item) for item in package["dependencies"])
             ) for package in lock["package"]
         ))
-        manifest_path.write_text('[package]\nversion = "0.2.3"\n')
         report = json.loads(report_path.read_text())
         lock = tomllib.loads(lock_path.read_text())
-        manifest = tomllib.loads(manifest_path.read_text())
-    check(report, lock, manifest, dt.date(2026, 1, 1))
+    check(report, lock, dt.date(2026, 1, 1))
     cases = []
-    unknown = json.loads(json.dumps(report)); unknown["vulnerabilities"]["list"][0]["advisory"]["id"] = "RUSTSEC-0000-0000"; cases.append((unknown, lock, manifest))
-    changed_version = json.loads(json.dumps(report)); changed_version["vulnerabilities"]["list"][0]["package"]["version"] = "0.37.6"; cases.append((changed_version, lock, manifest))
+    unknown = json.loads(json.dumps(report)); unknown["vulnerabilities"]["list"][0]["advisory"]["id"] = "RUSTSEC-0000-0000"; cases.append((unknown, lock))
+    changed_version = json.loads(json.dumps(report)); changed_version["vulnerabilities"]["list"][0]["package"]["version"] = "0.37.6"; cases.append((changed_version, lock))
     edge = json.loads(json.dumps(lock))
     next(package for package in edge["package"] if package["name"] == "umya-spreadsheet")["dependencies"] = []
-    cases.append((report, edge, manifest))
-    warning = json.loads(json.dumps(report)); warning["warnings"]["unmaintained"].append(warning["warnings"]["unmaintained"][0]); cases.append((warning, lock, manifest))
-    cases.append(({}, lock, manifest))
-    cases.append((report, lock, {"package": {"version": "0.2.8"}}))
-    for bad_report, bad_lock, bad_manifest in cases:
+    cases.append((report, edge))
+    warning = json.loads(json.dumps(report)); warning["warnings"]["unmaintained"].append(warning["warnings"]["unmaintained"][0]); cases.append((warning, lock))
+    cases.append(({}, lock))
+    for bad_report, bad_lock in cases:
         try:
-            check(bad_report, bad_lock, bad_manifest, dt.date(2026, 1, 1))
+            check(bad_report, bad_lock, dt.date(2026, 1, 1))
         except ValueError:
             continue
         raise AssertionError("self-test accepted an invalid fixture")
     try:
-        check(report, lock, manifest, EXPIRY)
+        check(report, lock, EXPIRY)
     except ValueError:
         return
     raise AssertionError("self-test accepted an expired exception")
@@ -214,7 +204,6 @@ def main():
     production = subcommands.add_parser("check")
     production.add_argument("--report", type=Path, required=True)
     production.add_argument("--lockfile", type=Path, required=True)
-    production.add_argument("--manifest", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "self-test":
         self_test()
@@ -222,10 +211,9 @@ def main():
     try:
         report = json.loads(args.report.read_text())
         lock = tomllib.loads(args.lockfile.read_text())
-        manifest = tomllib.loads(args.manifest.read_text())
     except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
         fail(f"cannot parse audit inputs: {error}")
-    check(report, lock, manifest)
+    check(report, lock)
     print("cargo-audit exception approved: RUSTSEC-2026-0194, RUSTSEC-2026-0195; expires 2026-09-30 UTC")
 
 

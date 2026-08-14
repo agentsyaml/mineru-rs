@@ -202,6 +202,39 @@ async function main() {
     }
   })
 
+  await withTemp(async (root) => {
+    const server = http.createServer((request, response) => {
+      if (request.method === 'GET' && request.url === '/v1/models') {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ data: [{ id: 'mock' }] }))
+      } else {
+        response.writeHead(404)
+        response.end()
+      }
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const input = path.join(root, 'office.docx')
+      const output = path.join(root, 'output')
+      fs.mkdirSync(output)
+      // A minimal but valid OOXML package: detection passes, then the conversion reaches the
+      // helper spawn. The helper is not bundled with the package, so the spawn fails and the
+      // core reports the unavailable contract (api.js `helperPath()` points at a non-existent
+      // path). A bogus (non-OOXML) file would instead fail earlier with "invalid OOXML" and
+      // never reach this branch.
+      fs.writeFileSync(input, storedZip({
+        '_rels/.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+        '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+      }))
+      await assert.rejects(
+        api.run({ path: input, output, method: 'ocr', url: `http://127.0.0.1:${server.address().port}` }),
+        /office conversion is unavailable/,
+      )
+    } finally {
+      server.close()
+    }
+  })
+
   const jsInvalid = child("require('./api.js').runCli(['\\0']).then(c=>process.exit(c===2?0:3))")
   assert.equal(jsInvalid.status, 0)
   assert.equal(jsInvalid.stdout.length, 0)
