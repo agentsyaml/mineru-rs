@@ -51,7 +51,7 @@ mineru -p input.pdf -o out/
 ```
 
 Your markdown appears in `out/`. Find a usable model ID with `GET /v1/models`
-on your endpoint. On success the `output/` directory contains `document.md`,
+on your endpoint. On success the `out/` directory contains `document.md`,
 `document.json`, `middle.json`, `content_list.json`, cropped `assets/`, and a
 layout preview `{stem}_layout.pdf`.
 

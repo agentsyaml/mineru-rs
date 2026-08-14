@@ -2,7 +2,7 @@
 
 [简体中文](usage.md) | [English](usage.en.md)
 
-兼容性基线、参考套件和可复现安装方式见 [compatibility.md](compatibility.md)。该声明仅覆盖 `vlm-http-client` 的 PDF 流程，不是完整 MinerU 3.4.4 兼容性声明。
+兼容性基线与可复现安装方式见 [compatibility.md](compatibility.md)。该声明仅覆盖 `vlm-http-client` 的 PDF 流程，不是完整 MinerU 3.4.4 兼容性声明。
 
 ## 构建与前置条件
 
@@ -354,7 +354,7 @@ curl -X POST "http://127.0.0.1:8000/file_parse" \
 
 选择建议：批量、长文档或需要进度可见性时用 `/tasks`；单个小文档、脚本内一次性调用用 `/file_parse`。
 
-表单接受 `files` 文件部分，以及 `lang_list`、`backend`、`effort`、`parse_method`、`formula_enable`、`table_enable`、`image_analysis`、`start_page_id`、`end_page_id`、`server_url`、`response_format_zip` 和 `return_md`、`return_middle_json`、`return_model_output`、`return_content_list`、`return_images`、`return_original_file` 文本字段。字段重复、字段过多或取值非法都会被拒绝。
+表单接受 `files` 文件部分，以及 `lang_list`、`backend`、`effort`、`parse_method`、`formula_enable`、`table_enable`、`image_analysis`、`start_page_id`、`end_page_id`、`server_url`、`response_format_zip`、`return_md`、`return_middle_json`、`return_model_output`、`return_content_list`、`return_images`、`return_original_file`、`client_side_output_generation` 文本字段。字段重复、字段过多或取值非法都会被拒绝。
 
 常见状态码：
 
@@ -391,7 +391,7 @@ output/
 └── {stem}_layout.pdf      # 原 PDF 加版面块标注的预览
 ```
 
-`{stem}` 是路径输入文件名去掉扩展名后的安全 stem；无安全 stem 时为 `document`。库 API 以字节传入 `PdfInput::Bytes` 时也使用 `document_layout.pdf`。输出先写入同级临时 staging 目录；完成后以重命名替换目标目录，已有目录会先作为备份，替换成功后删除备份，避免留下半写入结果。
+`{stem}` 是路径输入文件名去掉扩展名后的安全 stem；无安全 stem 时为 `document`。库 API 以字节传入 `PdfInput::Bytes` 且未提供安全 stem 时，预览同为 `document_layout.pdf`。输出先写入同级临时 staging 目录；完成后以重命名替换目标目录，已有目录会先作为备份，替换成功后删除备份，避免留下半写入结果。
 
 ## 库 API（最小示例）
 

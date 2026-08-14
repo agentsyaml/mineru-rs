@@ -39,7 +39,7 @@ npm install @alexsun-top/mineru # Node.js
 mineru -p input.pdf -o out/
 ```
 
-你的 markdown 会出现在 `out/` 中。可通过端点的 `GET /v1/models` 查询可用的模型 ID。成功后 `output/` 目录将包含 `document.md`、`document.json`、`middle.json`、`content_list.json`、裁剪后的 `assets/` 以及版面预览 `{stem}_layout.pdf`。
+你的 markdown 会出现在 `out/` 中。可通过端点的 `GET /v1/models` 查询可用的模型 ID。成功后 `out/` 目录将包含 `document.md`、`document.json`、`middle.json`、`content_list.json`、裁剪后的 `assets/` 以及版面预览 `{stem}_layout.pdf`。
 
 优先使用 `MINERU_VL_API_KEY` 环境变量，而非 `--api-key`，避免密钥进入 shell 历史记录。
 

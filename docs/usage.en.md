@@ -2,7 +2,7 @@
 
 [简体中文](usage.md) | [English](usage.en.md)
 
-See [compatibility.md](compatibility.md) for the compatibility baseline, reference suite, and reproducible installation. This statement covers only the `vlm-http-client` PDF flow; it is not a full MinerU 3.4.4 compatibility statement.
+See [compatibility.md](compatibility.md) for the compatibility baseline and reproducible installation. This statement covers only the `vlm-http-client` PDF flow; it is not a full MinerU 3.4.4 compatibility statement.
 
 ## Build and prerequisites
 
@@ -360,7 +360,7 @@ curl -X POST "http://127.0.0.1:8000/file_parse" \
 
 Selection guidance: use `/tasks` for batches, long documents, or when progress visibility is needed; use `/file_parse` for a single small document or a one-off call in a script.
 
-The form accepts `files` file parts and the text fields `lang_list`, `backend`, `effort`, `parse_method`, `formula_enable`, `table_enable`, `image_analysis`, `start_page_id`, `end_page_id`, `server_url`, `response_format_zip`, `return_md`, `return_middle_json`, `return_model_output`, `return_content_list`, `return_images`, and `return_original_file`. Duplicate fields, too many fields, or invalid values are rejected.
+The form accepts `files` file parts and the text fields `lang_list`, `backend`, `effort`, `parse_method`, `formula_enable`, `table_enable`, `image_analysis`, `start_page_id`, `end_page_id`, `server_url`, `response_format_zip`, `return_md`, `return_middle_json`, `return_model_output`, `return_content_list`, `return_images`, `return_original_file`, and `client_side_output_generation`. Duplicate fields, too many fields, or invalid values are rejected.
 
 Common status codes:
 
@@ -397,7 +397,7 @@ output/
 └── {stem}_layout.pdf      # Preview of the original PDF with layout-block annotations
 ```
 
-`{stem}` is the safe stem of the path input filename after removing its extension; it is `document` when there is no safe stem. The library API also uses `document_layout.pdf` when bytes are passed as `PdfInput::Bytes`. Output is first written to a sibling temporary staging directory; on completion, a rename replaces the target directory. An existing directory is first retained as a backup and the backup is removed after successful replacement, avoiding partially written results.
+`{stem}` is the safe stem of the path input filename after removing its extension; it is `document` when there is no safe stem. When bytes are passed as `PdfInput::Bytes` without a safe stem, the library API also uses `document_layout.pdf`. Output is first written to a sibling temporary staging directory; on completion, a rename replaces the target directory. An existing directory is first retained as a backup and the backup is removed after successful replacement, avoiding partially written results.
 
 ## Library API (minimal example)
 
