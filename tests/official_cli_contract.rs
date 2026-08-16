@@ -62,7 +62,7 @@ const ENVS: &[&str] = &[
 
 fn contract() -> Value {
     serde_json::from_str(include_str!(
-        "fixtures/official/mineru_3.4.4_cli_contract.json"
+        "fixtures/official/mineru_3.4.5_cli_contract.json"
     ))
     .unwrap()
 }
@@ -75,7 +75,7 @@ fn official_contract_is_exact_and_structured() {
     let c = contract();
     assert_eq!(
         c["source"]["commit"],
-        "0dfc9460cd9ab693b9af60ae3fbffd7bc111b062"
+        "fbb1257a555a3fde78ae5aaaa931e3b3f8fb2883"
     );
     let flags = c["flags"].as_array().unwrap();
     let flag_names: Vec<_> = flags

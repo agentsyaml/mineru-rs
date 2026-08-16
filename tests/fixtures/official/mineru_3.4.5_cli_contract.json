@@ -1,0 +1,926 @@
+{
+  "source": {
+    "repository": "https://github.com/opendatalab/MinerU",
+    "tag": "mineru-3.4.5-released",
+    "commit": "fbb1257a555a3fde78ae5aaaa931e3b3f8fb2883",
+    "entrypoint": "mineru.cli.client:main"
+  },
+  "flags": [
+    {
+      "names": [
+        "-v",
+        "--version"
+      ],
+      "field": "version",
+      "type": "version",
+      "default": "package version",
+      "required": false,
+      "choices": null,
+      "applicability": "command",
+      "behavior": "prints version and exits",
+      "source": "mineru/cli/client.py:1037-1039"
+    },
+    {
+      "names": [
+        "-p",
+        "--path"
+      ],
+      "field": "input_path",
+      "type": "existing path",
+      "default": null,
+      "required": true,
+      "choices": null,
+      "applicability": "command",
+      "behavior": "file or one-level directory input",
+      "source": "mineru/cli/client.py:1040-1047"
+    },
+    {
+      "names": [
+        "-o",
+        "--output"
+      ],
+      "field": "output_dir",
+      "type": "path",
+      "default": null,
+      "required": true,
+      "choices": null,
+      "applicability": "command",
+      "behavior": "output root",
+      "source": "mineru/cli/client.py:1048-1055"
+    },
+    {
+      "names": [
+        "--api-url"
+      ],
+      "field": "api_url",
+      "type": "string",
+      "default": null,
+      "required": false,
+      "choices": null,
+      "applicability": "command",
+      "behavior": "existing API; absence launches a temporary API",
+      "source": "mineru/cli/client.py:1056-1062"
+    },
+    {
+      "names": [
+        "-m",
+        "--method"
+      ],
+      "field": "method",
+      "type": "choice",
+      "default": "auto",
+      "required": false,
+      "choices": [
+        "auto",
+        "txt",
+        "ocr"
+      ],
+      "applicability": "pipeline and hybrid",
+      "behavior": "PDF parsing method",
+      "source": "mineru/cli/client.py:1063-1076"
+    },
+    {
+      "names": [
+        "-b",
+        "--backend"
+      ],
+      "field": "backend",
+      "type": "normalized string",
+      "default": "hybrid-engine",
+      "required": false,
+      "choices": [
+        "pipeline",
+        "vlm-engine",
+        "vlm-http-client",
+        "hybrid-engine",
+        "hybrid-http-client",
+        "vlm-auto-engine",
+        "hybrid-auto-engine"
+      ],
+      "applicability": "command",
+      "behavior": "selects a public backend; legacy aliases normalize to canonical names",
+      "source": "mineru/cli/client.py:1077-1093; mineru/cli/backend_options.py:3-45"
+    },
+    {
+      "names": [
+        "--effort"
+      ],
+      "field": "effort",
+      "type": "choice",
+      "default": "medium",
+      "required": false,
+      "choices": [
+        "medium",
+        "high"
+      ],
+      "applicability": "hybrid",
+      "behavior": "hybrid effort",
+      "source": "mineru/cli/client.py:1094-1107"
+    },
+    {
+      "names": [
+        "-l",
+        "--lang"
+      ],
+      "field": "lang",
+      "type": "normalized string",
+      "default": "ch",
+      "required": false,
+      "choices": "official OCR language table",
+      "applicability": "pipeline",
+      "behavior": "OCR language",
+      "source": "mineru/cli/client.py:1108-1121"
+    },
+    {
+      "names": [
+        "-u",
+        "--url"
+      ],
+      "field": "server_url",
+      "type": "string",
+      "default": null,
+      "required": false,
+      "choices": null,
+      "applicability": "vlm-http-client and hybrid-http-client",
+      "behavior": "OpenAI-compatible VLM server URL",
+      "source": "mineru/cli/client.py:1122-1131"
+    },
+    {
+      "names": [
+        "-s",
+        "--start"
+      ],
+      "field": "start_page_id",
+      "type": "integer",
+      "default": 0,
+      "required": false,
+      "choices": null,
+      "applicability": "PDF",
+      "behavior": "zero-based first page",
+      "source": "mineru/cli/client.py:1132-1139"
+    },
+    {
+      "names": [
+        "-e",
+        "--end"
+      ],
+      "field": "end_page_id",
+      "type": "integer",
+      "default": null,
+      "required": false,
+      "choices": null,
+      "applicability": "PDF",
+      "behavior": "zero-based final page; None serializes as 99999 for API tasks",
+      "source": "mineru/cli/client.py:1140-1147; mineru/cli/api_client.py:843-845"
+    },
+    {
+      "names": [
+        "-f",
+        "--formula"
+      ],
+      "field": "formula_enable",
+      "type": "boolean value",
+      "default": true,
+      "required": false,
+      "choices": [
+        true,
+        false
+      ],
+      "applicability": "backend-specific",
+      "behavior": "enables formula parsing; backend processing applies the value",
+      "source": "mineru/cli/client.py:1148-1155"
+    },
+    {
+      "names": [
+        "-t",
+        "--table"
+      ],
+      "field": "table_enable",
+      "type": "boolean value",
+      "default": true,
+      "required": false,
+      "choices": [
+        true,
+        false
+      ],
+      "applicability": "backend-specific",
+      "behavior": "enables table parsing; backend processing applies the value",
+      "source": "mineru/cli/client.py:1156-1163"
+    },
+    {
+      "names": [
+        "--image-analysis"
+      ],
+      "field": "image_analysis",
+      "type": "boolean value",
+      "default": true,
+      "required": false,
+      "choices": [
+        true,
+        false
+      ],
+      "applicability": "VLM and hybrid",
+      "behavior": "enables image/chart analysis; hybrid medium effort disables it",
+      "source": "mineru/cli/client.py:1164-1174"
+    },
+    {
+      "names": [
+        "--client-side-output-generation"
+      ],
+      "field": "client_side_output_generation",
+      "type": "boolean value",
+      "default": false,
+      "required": false,
+      "choices": [
+        true,
+        false
+      ],
+      "applicability": "API task result handling",
+      "behavior": "rebuilds markdown/content lists locally",
+      "source": "mineru/cli/client.py:1175-1183"
+    }
+  ],
+  "environment": [
+    {
+      "name": "ASCEND_RT_VISIBLE_DEVICES",
+      "access": "both",
+      "default": "none",
+      "type": "device list",
+      "invalid": "runtime handling",
+      "scope": "Ascend runtime",
+      "precedence": "environment",
+      "source": "mineru/cli/router.py:230-247,422-426"
+    },
+    {
+      "name": "CUDA_VISIBLE_DEVICES",
+      "access": "both",
+      "default": "none",
+      "type": "device list",
+      "invalid": "runtime handling",
+      "scope": "CUDA runtime",
+      "precedence": "environment",
+      "source": "mineru/cli/router.py:230-247,422-426"
+    },
+    {
+      "name": "MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT",
+      "access": "both",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; absent uses default; every other explicit value is false",
+      "scope": "API server HTTP client policy",
+      "precedence": "launcher writes resolved policy; server reads",
+      "source": "mineru/cli/fast_api.py:93,100-104,240-245,1443"
+    },
+    {
+      "name": "MINERU_API_DISABLE_ACCESS_LOG",
+      "access": "both",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; absent uses default; every other explicit value is false",
+      "scope": "API server logging",
+      "precedence": "local API/router launcher writes 1; server/router reads",
+      "source": "mineru/cli/api_client.py:397; mineru/cli/router.py:85-89,424,1648; mineru/cli/fast_api.py:100-104,1447"
+    },
+    {
+      "name": "MINERU_API_ENABLE_FASTAPI_DOCS",
+      "access": "read",
+      "default": true,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; absent uses default; every other explicit value is false",
+      "scope": "API server docs",
+      "precedence": "environment",
+      "source": "mineru/cli/fast_api.py:100-104,212-220; mineru/cli/router.py:85-89,1427-1443"
+    },
+    {
+      "name": "MINERU_API_ENABLE_VLM_PRELOAD",
+      "access": "both",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; absent uses default; every other explicit value is false",
+      "scope": "API server preload",
+      "precedence": "launcher writes resolved preload setting; server reads",
+      "source": "mineru/cli/fast_api.py:100-104,247-254,1439-1440"
+    },
+    {
+      "name": "MINERU_API_MAX_CONCURRENT_REQUESTS",
+      "access": "both",
+      "default": 3,
+      "type": "positive integer",
+      "invalid": "invalid/nonpositive errors",
+      "scope": "API server and client task concurrency",
+      "precedence": "environment; local launcher writes resolved value; macOS local API uses 1",
+      "source": "mineru/utils/config_reader.py:172-192; mineru/cli/fast_api.py:223-233; mineru/cli/api_client.py:389-396"
+    },
+    {
+      "name": "MINERU_API_OUTPUT_ROOT",
+      "access": "both",
+      "default": "./output",
+      "type": "path string",
+      "invalid": "path handling",
+      "scope": "API result storage",
+      "precedence": "launcher writes; server reads",
+      "source": "mineru/cli/api_client.py:393; mineru/cli/fast_api.py:87,337-340"
+    },
+    {
+      "name": "MINERU_API_PUBLIC_BIND_EXPOSED",
+      "access": "both",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; absent uses default; every other explicit value is false",
+      "scope": "API bind policy",
+      "precedence": "launcher writes resolved bind exposure; server reads",
+      "source": "mineru/cli/fast_api.py:92,100-104,238-245,1442"
+    },
+    {
+      "name": "MINERU_API_SHUTDOWN_ON_STDIN_EOF",
+      "access": "both",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; absent uses default; every other explicit value is false",
+      "scope": "API lifecycle",
+      "precedence": "local launcher writes or removes; server reads",
+      "source": "mineru/cli/api_client.py:401-404; mineru/cli/fast_api.py:100-104,114-131"
+    },
+    {
+      "name": "MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS",
+      "access": "read",
+      "default": 300,
+      "type": "seconds integer",
+      "invalid": "invalid or below 1 falls back",
+      "scope": "API task cleanup",
+      "precedence": "environment",
+      "source": "mineru/cli/fast_api.py:85,309-316; mineru/cli/router.py:123-128"
+    },
+    {
+      "name": "MINERU_API_TASK_RETENTION_SECONDS",
+      "access": "read",
+      "default": 86400,
+      "type": "seconds integer",
+      "invalid": "invalid or negative falls back",
+      "scope": "API task retention",
+      "precedence": "environment",
+      "source": "mineru/cli/fast_api.py:85,309-316; mineru/cli/router.py:115-120"
+    },
+    {
+      "name": "MINERU_DEVICE_MODE",
+      "access": "read",
+      "default": "auto-detect",
+      "type": "string",
+      "invalid": "verbatim override; absent probes cuda/mps/npu/gcu/musa/mlu/sdaa then cpu",
+      "scope": "device configuration",
+      "precedence": "environment",
+      "source": "mineru/utils/config_reader.py:105-137"
+    },
+    {
+      "name": "MINERU_FORMULA_ENABLE",
+      "access": "read",
+      "default": "caller-supplied boolean",
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact true enables; no trimming; absent preserves caller boolean; every other explicit value is false",
+      "scope": "configuration override",
+      "precedence": "environment override; otherwise caller value",
+      "source": "mineru/utils/config_reader.py:140-155"
+    },
+    {
+      "name": "MINERU_HYBRID_BATCH_RATIO",
+      "access": "read",
+      "default": "VRAM heuristic",
+      "type": "integer",
+      "invalid": "absent or empty uses VRAM heuristic; nonempty integer is returned unchanged including zero/negative; only integer parse failure falls back to VRAM heuristic",
+      "scope": "hybrid model batching",
+      "precedence": "environment",
+      "source": "mineru/backend/hybrid/hybrid_analyze.py:835-869"
+    },
+    {
+      "name": "MINERU_INTER_OP_NUM_THREADS",
+      "access": "read",
+      "default": -1,
+      "type": "integer",
+      "invalid": "nonpositive/invalid uses -1",
+      "scope": "torch threading",
+      "precedence": "environment",
+      "source": "mineru/utils/os_env_config.py:5-8; mineru/model/table/rec/slanet_plus/table_structure.py:33-34; mineru/model/table/rec/unet_table/table_structure_unet.py:34-35"
+    },
+    {
+      "name": "MINERU_INTRA_OP_NUM_THREADS",
+      "access": "read",
+      "default": -1,
+      "type": "integer",
+      "invalid": "nonpositive/invalid uses -1",
+      "scope": "torch threading",
+      "precedence": "environment",
+      "source": "mineru/utils/os_env_config.py:5-8; mineru/model/table/rec/slanet_plus/table_structure.py:33-34; mineru/model/table/rec/unet_table/table_structure_unet.py:34-35"
+    },
+    {
+      "name": "MINERU_LOCAL_API_LAUNCH_MODE",
+      "access": "read",
+      "default": "subprocess",
+      "type": "choice",
+      "invalid": "warns and falls back",
+      "scope": "temporary API launcher",
+      "precedence": "environment; Ascend implicitly selects spawn",
+      "source": "mineru/cli/api_client.py:43,113-141"
+    },
+    {
+      "name": "MINERU_LOCAL_API_STARTUP_TIMEOUT_SECONDS",
+      "access": "read",
+      "default": 300.0,
+      "type": "seconds float",
+      "invalid": "invalid or below 1.0 falls back",
+      "scope": "temporary API startup",
+      "precedence": "environment",
+      "source": "mineru/cli/api_client.py:76-88"
+    },
+    {
+      "name": "MINERU_LOG_LEVEL",
+      "access": "read",
+      "default": "INFO",
+      "type": "string",
+      "invalid": "logging handling",
+      "scope": "CLI/API/Gradio logging",
+      "precedence": "environment",
+      "source": "mineru/cli/client.py:59; mineru/cli/fast_api.py:74; mineru/cli/gradio_app.py:29"
+    },
+    {
+      "name": "MINERU_LMDEPLOY_BACKEND",
+      "access": "read",
+      "default": "empty string; derived from device",
+      "type": "enum: pytorch|turbomind",
+      "invalid": "other values are rejected by LMDeploy runtime",
+      "scope": "LMDeploy",
+      "precedence": "environment > caller kwargs > device-derived default",
+      "source": "mineru/model/vlm/lmdeploy_server.py:57-83; mineru/backend/vlm/vlm_analyze.py:184-194"
+    },
+    {
+      "name": "MINERU_LMDEPLOY_DEVICE",
+      "access": "read",
+      "default": "empty string; resolves to cuda",
+      "type": "enum: cuda|ascend|maca|camb",
+      "invalid": "other values are rejected by LMDeploy runtime",
+      "scope": "LMDeploy",
+      "precedence": "environment > caller kwargs > cuda",
+      "source": "mineru/model/vlm/lmdeploy_server.py:57-83; mineru/backend/vlm/vlm_analyze.py:184-194"
+    },
+    {
+      "name": "MINERU_MODEL_SOURCE",
+      "access": "both",
+      "default": "auto",
+      "type": "normalized enum: huggingface|modelscope|local",
+      "invalid": "explicit environment auto rejects; unsupported value/type warns then resolves auto and persists resolved source",
+      "scope": "model download",
+      "precedence": "environment > config > internal auto; resolved auto source persists; temporary write/restore applies for download command",
+      "source": "mineru/utils/models_download_utils.py:211-250; mineru/cli/models_download.py:64,82-90"
+    },
+    {
+      "name": "MINERU_OCR_DET_MASK_INLINE_FORMULA_ENABLE",
+      "access": "read",
+      "default": "caller-supplied boolean",
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact true enables; no trimming; absent preserves caller boolean; every other explicit value is false",
+      "scope": "OCR configuration",
+      "precedence": "environment override; otherwise caller value",
+      "source": "mineru/utils/config_reader.py:140-155"
+    },
+    {
+      "name": "MINERU_PDF_RENDER_THREADS",
+      "access": "read",
+      "default": 3,
+      "type": "positive integer",
+      "invalid": "invalid/nonpositive falls back",
+      "scope": "PDF rendering",
+      "precedence": "environment; docs state 4",
+      "source": "mineru/utils/os_env_config.py:15-20"
+    },
+    {
+      "name": "MINERU_PDF_RENDER_TIMEOUT",
+      "access": "read",
+      "default": 300,
+      "type": "seconds integer",
+      "invalid": "invalid/nonpositive falls back",
+      "scope": "PDF rendering",
+      "precedence": "environment",
+      "source": "mineru/utils/os_env_config.py:9-14"
+    },
+    {
+      "name": "MINERU_PROCESSING_WINDOW_SIZE",
+      "access": "read",
+      "default": 64,
+      "type": "integer",
+      "invalid": "invalid integer falls back; minimum 1",
+      "scope": "per-document page windows",
+      "precedence": "environment",
+      "source": "mineru/utils/config_reader.py:159-174"
+    },
+    {
+      "name": "MINERU_ROUTER_ALLOW_PUBLIC_HTTP_CLIENT",
+      "access": "both",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; absent uses default; every other explicit value is false",
+      "scope": "router policy",
+      "precedence": "module/settings read environment where applicable; router CLI/default resolved values are forcibly written at router.py:1617-1644, overriding process environment for child/runtime handoff",
+      "source": "mineru/cli/router.py:77-89,1617-1644"
+    },
+    {
+      "name": "MINERU_ROUTER_ENABLE_VLM_PRELOAD",
+      "access": "both",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; absent uses default; every other explicit value is false",
+      "scope": "router preload",
+      "precedence": "module/settings read environment where applicable; router CLI/default resolved values are forcibly written at router.py:1617-1644, overriding process environment for child/runtime handoff",
+      "source": "mineru/cli/router.py:85-89,318-319,1617-1644"
+    },
+    {
+      "name": "MINERU_ROUTER_LOCAL_GPUS",
+      "access": "both",
+      "default": "auto",
+      "type": "string",
+      "invalid": "router handling",
+      "scope": "router worker placement",
+      "precedence": "module/settings read environment where applicable; router CLI/default resolved values are forcibly written at router.py:1617-1644, overriding process environment for child/runtime handoff",
+      "source": "mineru/cli/router.py:230-247,318-319,1617-1644"
+    },
+    {
+      "name": "MINERU_ROUTER_PUBLIC_BIND_EXPOSED",
+      "access": "both",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; absent uses default; every other explicit value is false",
+      "scope": "router bind policy",
+      "precedence": "module/settings read environment where applicable; router CLI/default resolved values are forcibly written at router.py:1617-1644, overriding process environment for child/runtime handoff",
+      "source": "mineru/cli/router.py:77-89,1617-1644"
+    },
+    {
+      "name": "MINERU_ROUTER_UPSTREAM_URLS_JSON",
+      "access": "both",
+      "default": "empty sequence",
+      "type": "JSON array of strings",
+      "invalid": "missing, invalid JSON, non-array, or non-string member falls back to empty sequence",
+      "scope": "router upstreams",
+      "precedence": "module/settings read environment where applicable; router CLI/default resolved values are forcibly written at router.py:1617-1644, overriding process environment for child/runtime handoff",
+      "source": "mineru/cli/router.py:174-186,318-319,1617-1644"
+    },
+    {
+      "name": "MINERU_ROUTER_WORKER_ARGS_JSON",
+      "access": "both",
+      "default": "empty sequence",
+      "type": "JSON array of strings",
+      "invalid": "missing, invalid JSON, non-array, or non-string member falls back to empty sequence",
+      "scope": "router worker arguments",
+      "precedence": "module/settings read environment where applicable; router CLI/default resolved values are forcibly written at router.py:1617-1644, overriding process environment for child/runtime handoff",
+      "source": "mineru/cli/router.py:174-186,318-319,1617-1644"
+    },
+    {
+      "name": "MINERU_ROUTER_WORKER_HOST",
+      "access": "both",
+      "default": "127.0.0.1",
+      "type": "string",
+      "invalid": "router handling",
+      "scope": "router workers",
+      "precedence": "module/settings read environment where applicable; router CLI/default resolved values are forcibly written at router.py:1617-1644, overriding process environment for child/runtime handoff",
+      "source": "mineru/cli/router.py:230-247,318-319,1617-1644"
+    },
+    {
+      "name": "MINERU_SEAL_OCR_DEBUG",
+      "access": "read",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact 1|true|yes|on enables; no trimming; every other value is off",
+      "scope": "seal OCR diagnostics",
+      "precedence": "environment",
+      "source": "mineru/model/ocr/pytorch_paddle.py:122-124"
+    },
+    {
+      "name": "MINERU_SEAL_OCR_DEBUG_DIR",
+      "access": "read",
+      "default": "none",
+      "type": "path string",
+      "invalid": "path handling",
+      "scope": "seal OCR diagnostics",
+      "precedence": "environment",
+      "source": "mineru/model/ocr/pytorch_paddle.py:118"
+    },
+    {
+      "name": "MINERU_TABLE_ENABLE",
+      "access": "read",
+      "default": "caller-supplied boolean",
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact true enables; no trimming; absent preserves caller boolean; every other explicit value is false",
+      "scope": "configuration override",
+      "precedence": "environment override; otherwise caller value",
+      "source": "mineru/utils/config_reader.py:140-155"
+    },
+    {
+      "name": "MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS",
+      "access": "read",
+      "default": 600.0,
+      "type": "seconds float",
+      "invalid": "invalid or below 1.0 falls back",
+      "scope": "API result download",
+      "precedence": "environment",
+      "source": "mineru/cli/api_client.py:101-111"
+    },
+    {
+      "name": "MINERU_TASK_RESULT_TIMEOUT_SECONDS",
+      "access": "read",
+      "default": 3600.0,
+      "type": "seconds float",
+      "invalid": "invalid or below 1.0 falls back",
+      "scope": "API task polling",
+      "precedence": "environment",
+      "source": "mineru/cli/api_client.py:89-100"
+    },
+    {
+      "name": "MINERU_TOOLS_CONFIG_JSON",
+      "access": "read",
+      "default": "mineru.json",
+      "type": "path string",
+      "invalid": "path handling",
+      "scope": "configuration/model download",
+      "precedence": "environment",
+      "source": "mineru/utils/config_reader.py:14; mineru/utils/models_download_utils.py:25"
+    },
+    {
+      "name": "MINERU_VIRTUAL_VRAM_SIZE",
+      "access": "read",
+      "default": "auto",
+      "type": "integer string",
+      "invalid": "invalid or nonpositive value falls back to auto",
+      "scope": "model memory",
+      "precedence": "environment",
+      "source": "mineru/utils/model_utils.py:218-231"
+    },
+    {
+      "name": "MINERU_VLLM_DEVICE",
+      "access": "read",
+      "default": "",
+      "type": "string",
+      "invalid": "runtime selection",
+      "scope": "vLLM",
+      "precedence": "environment",
+      "source": "mineru/backend/vlm/utils.py:180-190"
+    },
+    {
+      "name": "MINERU_VLM_FORMULA_ENABLE",
+      "access": "both",
+      "default": "VLM: caller formula value; hybrid: true",
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact true enables; no trimming; every other value disables",
+      "scope": "VLM result conversion",
+      "precedence": "VLM writes caller formula value; hybrid forces true before backend reads",
+      "source": "mineru/cli/common.py:731-749,826-844; mineru/backend/vlm/vlm_middle_json_mkcontent.py:897-898"
+    },
+    {
+      "name": "MINERU_VLM_TABLE_ENABLE",
+      "access": "both",
+      "default": "caller table value in VLM and hybrid",
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact true enables; no trimming; every other value disables",
+      "scope": "VLM and hybrid result conversion",
+      "precedence": "VLM and hybrid write caller table value before backend reads",
+      "source": "mineru/cli/common.py:731-749,826-844; mineru/backend/vlm/vlm_middle_json_mkcontent.py:897-898; mineru/backend/hybrid/hybrid_model_output_to_middle_json.py:266"
+    },
+    {
+      "name": "OMP_NUM_THREADS",
+      "access": "both",
+      "default": "1",
+      "type": "integer string",
+      "invalid": "runtime handling",
+      "scope": "model runtime threads",
+      "precedence": "writer sets 1 only when absent",
+      "source": "mineru/backend/vlm/vlm_analyze.py:115-116; mineru/model/vlm/lmdeploy_server.py:83-84; mineru/model/vlm/vllm_server.py:60-61"
+    },
+    {
+      "name": "TM_LOG_LEVEL",
+      "access": "both",
+      "default": "ERROR",
+      "type": "string",
+      "invalid": "runtime handling",
+      "scope": "model runtime logging",
+      "precedence": "writer sets ERROR only when absent",
+      "source": "mineru/backend/vlm/vlm_analyze.py:210-215"
+    },
+    {
+      "name": "TOKENIZERS_PARALLELISM",
+      "access": "both",
+      "default": "false",
+      "type": "boolean-like string",
+      "invalid": "runtime handling",
+      "scope": "tokenizer runtime",
+      "precedence": "MinerU forces false",
+      "source": "mineru/cli/common.py:49; mineru/model/vlm/lmdeploy_server.py:69-71"
+    },
+    {
+      "name": "TORCH_CUDNN_V8_API_DISABLED",
+      "access": "both",
+      "default": "1",
+      "type": "boolean-like string",
+      "invalid": "runtime handling",
+      "scope": "torch runtime",
+      "precedence": "MinerU forces 1",
+      "source": "mineru/cli/client.py:58; mineru/cli/fast_api.py:73; mineru/cli/common.py:36"
+    },
+    {
+      "name": "VLLM_USE_V1",
+      "access": "read",
+      "default": "1",
+      "type": "integer string",
+      "invalid": "non-digit value falls back to 1",
+      "scope": "vLLM",
+      "precedence": "environment",
+      "source": "mineru/backend/vlm/utils.py:34-42"
+    }
+  ,
+    {
+      "name": "FTLANG_CACHE",
+      "access": "both",
+      "default": "resource cache path",
+      "type": "path string",
+      "invalid": "path handling",
+      "scope": "language resource cache",
+      "precedence": "non-empty existing environment wins; absent or empty is replaced with the resource cache path",
+      "source": "mineru/utils/language.py:5-10"
+    },
+    {
+      "name": "MINERU_ENABLE_PIPELINE_INFERENCE_LOCKS",
+      "access": "read",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact true|1|yes enables; no trimming; every other value is false",
+      "scope": "pipeline inference locks",
+      "precedence": "environment",
+      "source": "mineru/backend/pipeline/model_init.py:27-30"
+    },
+    {
+      "name": "MINERU_FORMULA_CH_SUPPORT",
+      "access": "read",
+      "default": false,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact true|1|yes selects pp_formulanet_plus_m; false|0|no selects unimernet_small; no trimming; all other values warn and select unimernet_small",
+      "scope": "pipeline formula model",
+      "precedence": "false selects unimernet_small; true selects pp_formulanet_plus_m",
+      "source": "mineru/backend/pipeline/model_init.py:62-69"
+    },
+    {
+      "name": "MINERU_TABLE_MERGE_ENABLE",
+      "access": "read",
+      "default": true,
+      "type": "boolean-like string",
+      "invalid": "case-insensitive exact true|1|yes merges; false|0|no skips; no trimming; all other values warn and skip",
+      "scope": "table postprocessing",
+      "precedence": "environment",
+      "source": "mineru/backend/utils/runtime_utils.py:19-26"
+    },
+    {
+      "name": "MINERU_GRADIO_DEFAULT_LOCALE",
+      "access": "read",
+      "default": "zh",
+      "type": "string",
+      "invalid": "non-zh normalizes to en",
+      "scope": "Gradio locale",
+      "precedence": "explicit locale argument > environment > zh",
+      "source": "mineru/cli/gradio_app.py:257-265"
+    },
+    {
+      "name": "GRADIO_ALLOWED_PATHS",
+      "access": "read",
+      "default": "empty comma-list",
+      "type": "comma-separated paths",
+      "invalid": "blank entries ignored",
+      "scope": "Gradio file access",
+      "precedence": "local allowlist appends output_root; environment is not written",
+      "source": "mineru/cli/gradio_app.py:893-904"
+    },
+    {
+      "name": "PYTORCH_ENABLE_MPS_FALLBACK",
+      "access": "write",
+      "default": "1",
+      "type": "string",
+      "invalid": "not parsed",
+      "scope": "pipeline/hybrid runtime",
+      "precedence": "forced to 1",
+      "source": "mineru/backend/pipeline/pipeline_analyze.py:31; mineru/backend/hybrid/hybrid_analyze.py:66"
+    }
+  ],
+  "cli_facts": {
+    "parser_context": {
+      "ignore_unknown_options": true,
+      "allow_extra_args": true,
+      "source": "mineru/cli/client.py:1037-1038"
+    },
+    "extra_args": {
+      "destination": "temporary LocalAPIServer only",
+      "stripped_options": ["--host", "--port"],
+      "source": "mineru/cli/client.py:1037-1218; mineru/cli/api_client.py:355-366,467-547,658-691"
+    },
+    "page_validation": {
+      "negative_start_or_end": "error",
+      "end": "clamp to final page when absent or beyond it",
+      "start_after_effective_end": "error",
+      "source": "mineru/cli/client.py:927-930,535-541; mineru/utils/pdf_page_id.py:5-10"
+    },
+    "ocr": {
+      "choices": ["ch", "ch_server", "korean", "ta", "te", "ka", "th", "el", "arabic", "east_slavic", "cyrillic", "devanagari"],
+      "aliases": {"en": "ch", "japan": "ch", "chinese_cht": "ch", "latin": "ch"},
+      "source": "mineru/utils/ocr_language.py:3-16,44-53,116-125"
+    },
+    "input_discovery": {
+      "suffixes": {"pdf": ["pdf"], "image": ["png", "jpeg", "jp2", "webp", "gif", "bmp", "jpg", "tiff"], "office": ["docx", "pptx", "xlsx"]},
+      "directory": "one-level sorted regular files",
+      "unsupported": "skip",
+      "empty": "error",
+      "classification": "OOXML ZIP package inspection for docx/pptx/xlsx, then Magika content detection, then PDF-signature recovery when .pdf is classified ai/html",
+      "page_accounting": "PDF uses selected effective page count; image and Office inputs count as one",
+      "source": "mineru/cli/client.py:535-581; mineru/utils/guess_suffix_or_lang.py:142-201; mineru/cli/common.py:42-47"
+    },
+    "duplicate_stems": {
+      "comparison": "casefold",
+      "reservation": "global original and assigned stem reservation",
+      "truncation": "UTF-8 byte truncation",
+      "collision": "smallest collision-free _N suffix",
+      "source": "mineru/cli/common.py:89-168"
+    },
+    "backend_effects": {
+      "pipeline": "formula and table values are passed to pipeline",
+      "vlm": "formula and table values are written to MINERU_VLM_*; image_analysis is passed",
+      "hybrid": "table value is written; formula environment override is forced true; formula and image_analysis are passed",
+      "http_client": "server_url is passed to VLM/hybrid processing",
+      "source": "mineru/cli/common.py:716-756,810-851"
+    },
+    "output_dirs": {
+      "pipeline": "<output>/<stem>/<method>",
+      "vlm": "<output>/<stem>/vlm",
+      "hybrid": "<output>/<stem>/hybrid_<method>",
+      "office": "<output>/<stem>/office",
+      "source": "mineru/cli/output_paths.py:5-58"
+    }
+  },
+  "external_names": {
+    "docs_only": [
+      "MINERU_VL_MODEL_NAME",
+      "MINERU_VL_API_KEY"
+    ],
+    "absent": [
+      "MINERU_VL_SERVER",
+      "MINERU_VL_DEBUG_ENABLE",
+      "MINERU_VLM_END_TOKEN"
+    ]
+  },
+  "protocol": {
+    "protocol_version": 2,
+    "protocol_version_source": "mineru/cli/api_protocol.py:2-4",
+    "health": {
+      "method": "GET",
+      "path": "/health",
+      "required": {"status": "healthy", "protocol_version": 2, "max_concurrent_requests": "positive integer", "processing_window_size": "integer"},
+      "processing_window_normalization": "max(1, processing_window_size)",
+      "reject": ["unhealthy response", "protocol version mismatch", "missing required field", "invalid required field"],
+      "source": "mineru/cli/api_client.py:729-758; mineru/cli/fast_api.py:1377-1392"
+    },
+    "endpoints": [
+      {"method": "POST", "path": "/file_parse"},
+      {"method": "POST", "path": "/tasks"},
+      {"method": "GET", "path": "/tasks/{task_id}"},
+      {"method": "GET", "path": "/tasks/{task_id}/result"},
+      {"method": "GET", "path": "/health"}
+    ],
+    "multipart": {
+      "required_files_field": "files",
+      "defaults": {"lang_list": ["ch"], "backend": "hybrid-engine", "effort": "medium", "parse_method": "auto", "formula_enable": true, "table_enable": true, "image_analysis": true, "server_url": null, "return_md": true, "return_middle_json": false, "return_model_output": false, "return_content_list": false, "return_images": false, "response_format_zip": false, "return_original_file": false, "client_side_output_generation": false, "start_page_id": 0, "end_page_id": 99999},
+      "none_mapping": {"end_page_id": 99999, "server_url": "omitted"},
+      "return_original_file": "effective only when response_format_zip=true",
+      "client_side_output_generation_mutation": {"return_md": false, "return_middle_json": true, "return_model_output": true, "return_content_list": false, "return_images": true},
+      "source": "mineru/cli/api_request.py:92-254; mineru/cli/backend_options.py:11; mineru/cli/api_client.py:805-848"
+    },
+    "public_http_client_security": {"reject_when": "publicly bound and not explicitly allowed, with backend ending -http-client or nonblank server_url after strip", "status_code": 400, "bypass_when": "non-public bind or explicit allow", "source": "mineru/cli/api_request.py:214-225; mineru/cli/public_http_client_policy.py:27-37"},
+    "canonical_client_submission": {"caller_selected": ["lang", "backend", "method", "formula_enable", "table_enable", "image_analysis", "server_url", "start_page_id", "end_page_id", "effort", "client_side_output_generation"], "mappings": {"lang": "lang_list=[lang]", "method": "parse_method"}, "always": {"return_middle_json": true, "return_model_output": true, "return_images": true, "response_format_zip": true, "return_original_file": true, "client_side_output_generation": "caller-selected bool serialized"}, "conditional": {"return_md": "!client_side_output_generation", "return_content_list": "!client_side_output_generation"}, "source": "mineru/cli/client.py:667-702; mineru/cli/api_client.py:805-848"},
+    "task_payload": {"fields": ["task_id", "status", "backend", "file_names", "created_at", "started_at", "completed_at", "error", "status_url", "result_url"], "optional": {"queued_ahead": "integer when supplied"}, "source": "mineru/cli/fast_api.py:173-196; mineru/cli/api_client.py:900-933"},
+    "async_submission": {"method": "POST", "path": "/tasks", "status_code": 202, "response": "status payload plus message=Task submitted successfully", "client_requires": ["string task_id", "string status_url", "string result_url"], "file_names": "tuple only for list[str], otherwise empty", "queued_ahead": "non-integer becomes None", "source": "mineru/cli/fast_api.py:685-692,1276-1293; mineru/cli/api_client.py:864-933"},
+    "sync_zip": {"headers_only_when_zip": ["X-MinerU-Task-Id", "X-MinerU-Task-Status", "X-MinerU-Task-Status-Url", "X-MinerU-Task-Result-Url"], "source": "mineru/cli/fast_api.py:695-722"},
+    "legacy_backend_aliases": {
+      "vlm-auto-engine": "vlm-engine",
+      "hybrid-auto-engine": "hybrid-engine"
+    },
+    "end_none_serializes": 99999,
+    "status": {
+      "active": [
+        "pending",
+        "processing"
+      ],
+      "success": "completed",
+      "failure": "any other returned status immediately errors",
+      "queued_ahead": "retained only if integer while active; renderer shows ahead only while pending",
+      "source": "mineru/cli/api_client.py:936-991; mineru/cli/client.py:292-301"
+    },
+    "tty_live_renderer": {"enabled_when": "explicit api_url and stderr is a TTY", "disabled_when": "no explicit api_url or non-TTY stderr", "source": "mineru/cli/client.py:292-301"},
+    "processing_window": {"default_pages": 64, "invalid": "invalid integer falls back; minimum 1", "operation": "sequential contiguous windows within one document; each window performs one ordered batch extraction operation", "vlm": "batch_two_step_extract per window", "hybrid": "medium batch_extract_with_layout or high batch_two_step_extract per window", "distinct_from": "model batch ratio and API task concurrency", "source": "mineru/utils/config_reader.py:158-174; mineru/backend/vlm/vlm_analyze.py:446-500,546-599; mineru/backend/hybrid/hybrid_analyze.py:924-1060,1132-1275"},
+    "hybrid_batch_ratio": "separate model batching control",
+    "task_concurrency": {"formula": "min(client, server, task_count)", "local": "temporary local API uses server health limit directly", "remote": "explicit API uses min(client limit, server health limit)", "macos_server": 1, "router_health": "sum worker concurrency; minimum worker window", "source": "mineru/cli/client.py:950-984; mineru/cli/router.py:807-824"},
+    "timeouts": {"startup": "wait until local health deadline", "polling": "ReadTimeout retries until task deadline; other errors fail", "download": "download deadline", "source": "mineru/cli/api_client.py:774-802,936-991,994-1039"},
+    "task_planning": {"pipeline": ["sort by effective pages descending with original-order ties", "oversized document is a singleton", "place only in eligible existing bins", "choose least total pages then smallest bin index", "reindex after packing"], "vlm_hybrid": "one document per task", "source": "mineru/cli/client.py:609-664"},
+    "zip_safety": {"reject": ["absolute paths", ".. path components", "destination escapes"], "cleanup": "partial download is removed on error", "source": "mineru/cli/api_client.py:994-1065"},
+    "legacy_backend_aliases_source": "mineru/cli/backend_options.py:25-45",
+    "end_none_serializes_source": "mineru/cli/api_client.py:843-845"
+  }
+}

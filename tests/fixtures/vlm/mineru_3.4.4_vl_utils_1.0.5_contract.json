@@ -1,9 +1,9 @@
 {
   "artifacts": {
-    "mineru": { "version": "3.4.4", "sha256": "d4d678539782a7683d998e2914a52d96b5720676ce65658b29666b1f4d9dfd13" },
+    "mineru": { "version": "3.4.5", "sha256": "4a73b865920bb9109c1b8b1bc46567e296bf0133a67106a04effd219536ae72d" },
     "mineru_vl_utils": { "version": "1.0.5", "sha256": "cf910e68f0607634e61b613b7f5992daf604bf80b400d81e7b9f0f117b7c3c15" }
   },
-  "model": "mineru-vl-3.4.4",
+  "model": "mineru-vl-3.4.5",
   "system": "You are a helpful assistant.",
   "requests": [
     { "prompt": "\nLayout Detection:", "temperature": 0.0, "top_p": 0.01, "top_k": 1, "presence_penalty": 0.0, "frequency_penalty": 0.0, "repetition_penalty": 1.0, "no_repeat_ngram_size": 100 },

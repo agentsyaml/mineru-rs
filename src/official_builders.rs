@@ -3755,7 +3755,7 @@ pub(crate) fn finalize_official_document_until(
                 .join("\n\n");
             Ok(OfficialBuildArtifacts {
                 model_output: vec![page.snapshot.clone()],
-                middle_json: json!({"pdf_info":[middle],"_backend":"vlm","_version_name":"3.4.4"}),
+                middle_json: json!({"pdf_info":[middle],"_backend":"vlm","_version_name":"3.4.5"}),
                 content_list: Value::Array(flat),
                 content_list_v2: Value::Array(vec![Value::Array(page_v2)]),
                 markdown,
@@ -3850,7 +3850,7 @@ mod tests {
             .join("\n\n");
         Ok(OfficialBuildArtifacts {
             model_output,
-            middle_json: json!({"pdf_info":infos,"_backend":"vlm","_version_name":"3.4.4"}),
+            middle_json: json!({"pdf_info":infos,"_backend":"vlm","_version_name":"3.4.5"}),
             content_list: Value::Array(flat),
             content_list_v2: Value::Array(v2),
             markdown,
@@ -3999,7 +3999,7 @@ mod tests {
 
         assert_eq!(model.as_array().unwrap().len(), 3);
         assert_eq!(middle["_backend"], "vlm");
-        assert_eq!(middle["_version_name"], "3.4.4");
+        assert_eq!(middle["_version_name"], "3.4.5");
         assert_eq!(middle["pdf_info"].as_array().unwrap().len(), 3);
         assert_eq!(middle["pdf_info"][1]["preproc_blocks"][0]["type"], "table");
         assert_eq!(middle["pdf_info"][1]["preproc_blocks"][5]["type"], "list");

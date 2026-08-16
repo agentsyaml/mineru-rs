@@ -563,7 +563,7 @@ impl OfficialOutputStage {
         }
         self.write_fragment(
             &mut middle,
-            b"],\"_backend\":\"vlm\",\"_version_name\":\"3.4.4\"}",
+            b"],\"_backend\":\"vlm\",\"_version_name\":\"3.4.5\"}",
         )?;
 
         let mut model = self
