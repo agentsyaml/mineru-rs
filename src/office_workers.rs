@@ -26,6 +26,10 @@ const INPUT_CAP: usize = 32 * 1024 * 1024;
 const OUTPUT_CAP: usize = 64 * 1024 * 1024;
 #[cfg(test)]
 const STDERR_CAP: usize = 4096;
+/// The fake child emits its markdown behind this marker so the owner's test-mode scan can
+/// strip the libtest harness preamble ("running 1 test") that precedes any test stdout.
+#[cfg(test)]
+const MARKDOWN_FAKE_MARKER: &[u8] = b"\0__markdown_fake__\0";
 // Only the direct child is reaped. After this grace, cleanup continues detached so drain stays bounded.
 const CHILD_REAP_GRACE: Duration = Duration::from_millis(250);
 
@@ -38,6 +42,14 @@ pub enum OfficeConvertError {
     Draining,
     #[error("office conversion failed: {0}")]
     Failed(String),
+}
+
+/// Output contract of a conversion: PDF mode validates the `%PDF-` signature plus lopdf
+/// structure (OOXML family); Markdown mode validates non-empty UTF-8 text (legacy family).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConvertMode {
+    Pdf,
+    Markdown,
 }
 
 struct State {
@@ -174,6 +186,38 @@ impl OfficeWorkers {
         input: impl Into<Bytes>,
         timeout: Duration,
     ) -> Result<(Vec<u8>, Option<String>), OfficeConvertError> {
+        self.convert_inner(format, input, timeout, ConvertMode::Pdf)
+            .await
+    }
+    /// Legacy-family text extraction: converts to Markdown with the same bounded subprocess
+    /// skeleton as [`Self::convert`], validating the output as UTF-8 text instead of a PDF.
+    #[doc(hidden)]
+    pub async fn convert_text(
+        &self,
+        format: &'static str,
+        input: impl Into<Bytes>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, OfficeConvertError> {
+        self.convert_text_with_warning(format, input, timeout)
+            .await
+            .map(|(text, _)| text)
+    }
+    pub(crate) async fn convert_text_with_warning(
+        &self,
+        format: &'static str,
+        input: impl Into<Bytes>,
+        timeout: Duration,
+    ) -> Result<(Vec<u8>, Option<String>), OfficeConvertError> {
+        self.convert_inner(format, input, timeout, ConvertMode::Markdown)
+            .await
+    }
+    async fn convert_inner(
+        &self,
+        format: &'static str,
+        input: impl Into<Bytes>,
+        timeout: Duration,
+        mode: ConvertMode,
+    ) -> Result<(Vec<u8>, Option<String>), OfficeConvertError> {
         let input = input.into();
         let limits = self.limits;
         let ooxml = self.ooxml;
@@ -208,13 +252,13 @@ impl OfficeWorkers {
             state.owners.spawn(async move {
                 #[cfg(test)]
                 let result = owner(
-                    executable, prefix, format, input, timeout, cancel_rx, limits, ooxml, probe,
-                    ready,
+                    executable, prefix, format, input, timeout, cancel_rx, limits, ooxml, mode,
+                    probe, ready,
                 )
                 .await;
                 #[cfg(not(test))]
                 let result = owner(
-                    executable, prefix, format, input, timeout, cancel_rx, limits, ooxml,
+                    executable, prefix, format, input, timeout, cancel_rx, limits, ooxml, mode,
                 )
                 .await;
                 let _ = result_tx.send(result);
@@ -339,6 +383,22 @@ mod tests {
             }
             "signature_only" => {
                 let _ = std::io::stdout().write_all(b"%PDF-1.4\nok");
+                std::process::exit(0);
+            }
+            "ok_markdown" => {
+                let mut out = MARKDOWN_FAKE_MARKER.to_vec();
+                out.extend_from_slice(b"hello markdown \xe4\xb8\xad\xe6\x96\x87");
+                let _ = std::io::stdout().write_all(&out);
+                std::process::exit(0);
+            }
+            "invalid_text" => {
+                let mut out = MARKDOWN_FAKE_MARKER.to_vec();
+                out.extend_from_slice(&[0xff, 0xfe, 0x80, 0x00]);
+                let _ = std::io::stdout().write_all(&out);
+                std::process::exit(0);
+            }
+            "empty_markdown" => {
+                let _ = std::io::stdout().write_all(MARKDOWN_FAKE_MARKER);
                 std::process::exit(0);
             }
             "hang" => {
@@ -621,6 +681,59 @@ mod tests {
     async fn signature_only_pdf_is_rejected() {
         assert!(convert(&workers(), "signature_only").await.is_err());
     }
+
+    #[tokio::test]
+    async fn text_mode_accepts_utf8_markdown_and_discards_warning() {
+        let w = workers();
+        let (text, warning) = w
+            .convert_text_with_warning("ok_markdown", b"input".to_vec(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(text.starts_with(b"hello markdown"));
+        assert!(String::from_utf8_lossy(&text).contains('中'));
+        assert_eq!(warning, None);
+        assert!(
+            w.convert_text("ok_markdown", b"input".to_vec(), Duration::from_secs(5))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn text_mode_rejects_empty_and_non_utf8_output() {
+        let w = workers();
+        let error = w
+            .convert_text("invalid_text", b"input".to_vec(), Duration::from_secs(5))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid text output"), "{error}");
+        let error = w
+            .convert_text("empty_markdown", b"input".to_vec(), Duration::from_secs(5))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid text output"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn text_mode_honors_deadline_and_output_cap() {
+        let w = workers();
+        let start = tokio::time::Instant::now();
+        assert!(
+            w.convert_text("hang", vec![], Duration::from_millis(100))
+                .await
+                .is_err()
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let start = tokio::time::Instant::now();
+        assert!(
+            w.convert_text("largeout", vec![], Duration::from_secs(10))
+                .await
+                .is_err()
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
     #[tokio::test]
     async fn abort_after_activity_reaps_everything_once() {
         let mut w = workers();
@@ -730,6 +843,7 @@ async fn owner(
     mut cancel: watch::Receiver<bool>,
     limits: crate::command::service::OfficeLimits,
     ooxml: crate::command::service::OoxmlLimits,
+    mode: ConvertMode,
     #[cfg(test)] probe: Arc<TestProbe>,
     #[cfg(test)] ready: Option<PathBuf>,
 ) -> Result<(Vec<u8>, Option<String>), OfficeConvertError> {
@@ -992,23 +1106,40 @@ async fn owner(
     let output = output.unwrap_or_default();
     #[cfg(test)]
     let output = if fake_child {
-        output
-            .windows(5)
-            .position(|window| window == b"%PDF-")
-            .map_or(output.clone(), |start| output[start..].to_vec())
+        match mode {
+            ConvertMode::Pdf => output
+                .windows(5)
+                .position(|window| window == b"%PDF-")
+                .map_or(output.clone(), |start| output[start..].to_vec()),
+            ConvertMode::Markdown => output
+                .windows(MARKDOWN_FAKE_MARKER.len())
+                .position(|window| window == MARKDOWN_FAKE_MARKER)
+                .map_or(output.clone(), |start| {
+                    output[start + MARKDOWN_FAKE_MARKER.len()..].to_vec()
+                }),
+        }
     } else {
         output
     };
-    if !output.starts_with(b"%PDF-") {
-        return Err(OfficeConvertError::Failed(sanitize(
-            diagnostic.as_deref().unwrap_or_default(),
-            stderr_cap,
-        )));
-    }
-    let document = lopdf::Document::load_mem(&output)
-        .map_err(|_| OfficeConvertError::Failed("invalid PDF output".into()))?;
-    if document.is_encrypted() || document.get_pages().is_empty() {
-        return Err(OfficeConvertError::Failed("invalid PDF output".into()));
+    match mode {
+        ConvertMode::Pdf => {
+            if !output.starts_with(b"%PDF-") {
+                return Err(OfficeConvertError::Failed(sanitize(
+                    diagnostic.as_deref().unwrap_or_default(),
+                    stderr_cap,
+                )));
+            }
+            let document = lopdf::Document::load_mem(&output)
+                .map_err(|_| OfficeConvertError::Failed("invalid PDF output".into()))?;
+            if document.is_encrypted() || document.get_pages().is_empty() {
+                return Err(OfficeConvertError::Failed("invalid PDF output".into()));
+            }
+        }
+        ConvertMode::Markdown => {
+            if output.is_empty() || std::str::from_utf8(&output).is_err() {
+                return Err(OfficeConvertError::Failed("invalid text output".into()));
+            }
+        }
     }
     let warning = diagnostic
         .as_deref()

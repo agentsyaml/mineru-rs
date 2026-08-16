@@ -16,6 +16,9 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
+#[path = "support/legacy_fixtures.rs"]
+#[allow(dead_code)]
+mod legacy_fixtures;
 #[path = "support/office_fixtures.rs"]
 #[allow(dead_code)]
 mod office_fixtures;
@@ -275,7 +278,6 @@ struct ApiState {
     third_after_layouts: bool,
 }
 
-#[cfg(feature = "office")]
 fn result_zip(stem: &str, kind: &str, extension: &str, origin: &[u8]) -> Vec<u8> {
     use std::io::Write;
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
@@ -429,7 +431,7 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
     );
     for values in [
         "[possible values: auto, txt, ocr]",
-        "[possible values: vlm-http-client]",
+        "[possible values: vlm-http-client, hybrid-http-client]",
         "[possible values: medium, high]",
         "[possible values: ch, ch_server, korean, ta, te, ka, th, el, arabic, east_slavic, cyrillic, devanagari, en, japan, chinese_cht, latin]",
         "[possible values: true, false]",
@@ -628,6 +630,173 @@ async fn non_pdf_ranges_are_ignored_by_the_direct_consumer() {
     assert!(output.path().join("word/office/word_origin.docx").is_file());
 }
 
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn legacy_office_single_file_extracts_markdown_without_any_vlm_server() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path().join("old.doc"))
+        .args(["-o"])
+        .arg(output.path());
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let markdown = std::fs::read_to_string(output.path().join("old/office/old.md")).unwrap();
+    assert!(markdown.contains("Legacy DOC fixture") && markdown.contains("中文测试"));
+    assert!(!markdown.contains('\u{fffd}'));
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn all_legacy_batch_never_connects_to_a_vlm_server() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path().join("old.doc"))
+        .args(["-o"])
+        .arg(output.path())
+        // A dead port proves the VLM client is never constructed for an all-legacy batch.
+        .args(["--url", "http://127.0.0.1:1"]);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(output.path().join("old/office/old.md").is_file());
+}
+
+#[cfg(all(feature = "office", feature = "legacy-office"))]
+#[tokio::test]
+async fn legacy_batch_with_doomed_ooxml_candidate_still_converts_offline() {
+    // A preflight-doomed non-legacy candidate must not force a VLM connection for an otherwise
+    // all-legacy batch: the .doc converts offline even when a sibling .docx trips the office
+    // input limit (dead port: any connect attempt would fail the whole batch up front).
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    std::fs::write(input.path().join("huge.docx"), vec![0u8; 64 * 1024]).unwrap();
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path())
+        .args(["-o"])
+        .arg(output.path())
+        .args(["--url", "http://127.0.0.1:1"])
+        .env("MINERU_OFFICE_INPUT_BYTES", "32768");
+    let result = command(cmd).await;
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    // The doomed .docx is announced in the preflight (the batch fails as a whole), but the
+    // legacy document must have converted offline: no VLM connect error may appear.
+    assert!(
+        stderr.contains("exceeds office conversion input limit"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("request connection failed"),
+        "a VLM connection was attempted: {stderr}"
+    );
+    assert!(
+        output.path().join("old/office/old.md").is_file(),
+        "legacy document did not convert: {stderr}"
+    );
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn legacy_office_directory_input_extracts_every_format() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let fixtures = legacy_fixtures::all();
+    for (index, fixture) in fixtures.iter().enumerate() {
+        std::fs::write(
+            input.path().join(format!("doc{index}.{}", fixture.kind)),
+            &fixture.bytes,
+        )
+        .unwrap();
+    }
+    std::fs::write(input.path().join("skip.txt"), b"skip").unwrap();
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path())
+        .args(["-o"])
+        .arg(output.path());
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    for (index, fixture) in fixtures.iter().enumerate() {
+        let stem = format!("doc{index}");
+        let markdown = std::fs::read_to_string(
+            output
+                .path()
+                .join(&stem)
+                .join("office")
+                .join(format!("{stem}.md")),
+        )
+        .unwrap_or_else(|_| panic!("missing output for {}", fixture.kind));
+        assert!(
+            !markdown.contains('\u{fffd}'),
+            "{}: replacement character",
+            fixture.kind
+        );
+        for expected in fixture.expected {
+            assert!(
+                markdown.contains(expected),
+                "{}: missing {expected:?}",
+                fixture.kind
+            );
+        }
+    }
+    assert!(String::from_utf8_lossy(&result.stderr).contains("skip.txt"));
+}
+
+#[cfg(all(feature = "office", feature = "legacy-office"))]
+#[tokio::test]
+async fn mixed_legacy_and_ooxml_batch_handles_both_kinds_in_order() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    std::fs::write(input.path().join("word.docx"), office_fixtures::docx()).unwrap();
+    let (url, seen) = mock().await;
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path())
+        .args(["-o"])
+        .arg(output.path())
+        .args(["--url", &url]);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // The legacy doc takes the text lane: extracted markdown, no VLM completion.
+    let markdown = std::fs::read_to_string(output.path().join("old/office/old.md")).unwrap();
+    assert!(markdown.contains("Legacy DOC fixture"));
+    assert_eq!(
+        seen.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _, _)| kind == "completion")
+            .count(),
+        1
+    );
+    // The OOXML doc still takes the PDF -> VLM lane with its origin preserved.
+    assert!(output.path().join("word/office/word_origin.docx").is_file());
+    assert!(output.path().join("word/office/word.md").is_file());
+}
+
 #[tokio::test]
 #[ignore = "CLI process contract e2e"]
 async fn declared_image_mismatch_preserves_existing_target_without_a_completion() {
@@ -749,6 +918,124 @@ async fn behaviorless_options_warn_once_with_canonical_progress() {
         ]
     );
     assert!(output.join("document/vlm/document.md").is_file());
+}
+
+#[tokio::test]
+async fn direct_mode_hybrid_backend_warns_honestly_and_succeeds() {
+    // hybrid-http-client is an alias for vlm-http-client in direct mode: every run must warn
+    // that this build has no local models, then succeed through the VLM pipeline.
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let (url, seen) = mock().await;
+    let mut cmd = mineru();
+    cmd.args(["-p"]).arg(pdf).args(["-o"]).arg(&output).args([
+        "--url",
+        &url,
+        "--backend",
+        "hybrid-http-client",
+    ]);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"");
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert!(
+        stderr.contains(
+            "warning: backend=hybrid-http-client: this build has no local layout/OCR/formula models; falling back to the vlm-http-client pipeline (identical behavior)"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        unstamped(stderr.as_bytes()).contains(&"document completed: document".to_owned()),
+        "{stderr}"
+    );
+    assert!(!seen.0.lock().unwrap().is_empty());
+    assert!(output.join("document/vlm/document.md").is_file());
+}
+
+#[tokio::test]
+async fn api_mode_passes_hybrid_backend_through_verbatim_without_warning() {
+    // Pure pass-through: the backend field reaches the server untouched (the server decides the
+    // semantics), and the direct-mode alias warning must NOT appear in api mode.
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let recorded = Arc::new(Mutex::new(Vec::<String>::new()));
+    let app = Router::new()
+        .route(
+            "/health",
+            get(|| async {
+                Json(
+                    json!({"status":"healthy","protocol_version":2,"max_concurrent_requests":2,"processing_window_size":64}),
+                )
+            }),
+        )
+        .route(
+            "/tasks",
+            post({
+                let base = base.clone();
+                let record = Arc::clone(&recorded);
+                move |mut multipart: Multipart| async move {
+                    let mut backend = None;
+                    while let Some(field) = multipart.next_field().await.unwrap() {
+                        if field.name() == Some("backend") {
+                            backend = Some(field.text().await.unwrap());
+                        }
+                    }
+                    record.lock().unwrap().push(backend.unwrap());
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(
+                            json!({"task_id":format!("{base}/task/x"),"status_url":format!("{base}/status/x"),"result_url":format!("{base}/result/x")}),
+                        ),
+                    )
+                }
+            }),
+        )
+        .route("/status/x", get(|| async { Json(json!({"status":"completed"})) }))
+        .route(
+            "/result/x",
+            get(|| async {
+                let origin = std::fs::read("tests/fixtures/pdf/minimal.pdf").unwrap();
+                let archive = result_zip("document", "vlm", "pdf", &origin);
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/zip")],
+                    archive,
+                )
+                    .into_response()
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut cmd = mineru();
+    cmd.args(["-p"]).arg(pdf).args(["-o"]).arg(&output).args([
+        "--api-url",
+        &base,
+        "--backend",
+        "hybrid-http-client",
+    ]);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"");
+    assert_eq!(
+        *recorded.lock().unwrap(),
+        vec!["hybrid-http-client".to_owned()]
+    );
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert!(
+        !stderr.contains("backend=hybrid-http-client:"),
+        "api mode must not warn: {stderr}"
+    );
+    assert!(output.join("document/vlm/document_origin.pdf").is_file());
 }
 
 #[tokio::test]

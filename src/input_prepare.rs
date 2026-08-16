@@ -112,6 +112,15 @@ pub enum DocumentKind {
     Docx,
     Pptx,
     Xlsx,
+    Doc,
+    Ppt,
+    Xls,
+    Odt,
+    Rtf,
+    Epub,
+    Ods,
+    Odp,
+    Csv,
 }
 impl DocumentKind {
     /// Returns the closed set of input types accepted by the local runners.
@@ -140,6 +149,24 @@ impl DocumentKind {
             Some(Self::Pptx)
         } else if suffix.eq_ignore_ascii_case("xlsx") {
             Some(Self::Xlsx)
+        } else if suffix.eq_ignore_ascii_case("doc") {
+            Some(Self::Doc)
+        } else if suffix.eq_ignore_ascii_case("ppt") {
+            Some(Self::Ppt)
+        } else if suffix.eq_ignore_ascii_case("xls") {
+            Some(Self::Xls)
+        } else if suffix.eq_ignore_ascii_case("odt") {
+            Some(Self::Odt)
+        } else if suffix.eq_ignore_ascii_case("rtf") {
+            Some(Self::Rtf)
+        } else if suffix.eq_ignore_ascii_case("epub") {
+            Some(Self::Epub)
+        } else if suffix.eq_ignore_ascii_case("ods") {
+            Some(Self::Ods)
+        } else if suffix.eq_ignore_ascii_case("odp") {
+            Some(Self::Odp)
+        } else if suffix.eq_ignore_ascii_case("csv") {
+            Some(Self::Csv)
         } else {
             None
         }
@@ -158,10 +185,33 @@ impl DocumentKind {
             Self::Docx => "docx",
             Self::Pptx => "pptx",
             Self::Xlsx => "xlsx",
+            Self::Doc => "doc",
+            Self::Ppt => "ppt",
+            Self::Xls => "xls",
+            Self::Odt => "odt",
+            Self::Rtf => "rtf",
+            Self::Epub => "epub",
+            Self::Ods => "ods",
+            Self::Odp => "odp",
+            Self::Csv => "csv",
         }
     }
     pub const fn is_office(self) -> bool {
         matches!(self, Self::Docx | Self::Pptx | Self::Xlsx)
+    }
+    pub const fn is_legacy_office(self) -> bool {
+        matches!(
+            self,
+            Self::Doc
+                | Self::Ppt
+                | Self::Xls
+                | Self::Odt
+                | Self::Rtf
+                | Self::Epub
+                | Self::Ods
+                | Self::Odp
+                | Self::Csv
+        )
     }
     pub const fn supports_page_range(self) -> bool {
         matches!(self, Self::Pdf)
@@ -517,6 +567,15 @@ mod tests {
             DocumentKind::Docx,
             DocumentKind::Pptx,
             DocumentKind::Xlsx,
+            DocumentKind::Doc,
+            DocumentKind::Ppt,
+            DocumentKind::Xls,
+            DocumentKind::Odt,
+            DocumentKind::Rtf,
+            DocumentKind::Epub,
+            DocumentKind::Ods,
+            DocumentKind::Odp,
+            DocumentKind::Csv,
         ];
         for kind in all {
             assert_eq!(DocumentKind::from_suffix(kind.suffix()), Some(kind));
@@ -526,6 +585,55 @@ mod tests {
             );
         }
         assert_eq!(DocumentKind::from_suffix("txt"), None);
+    }
+
+    #[test]
+    fn office_and_legacy_office_kinds_partition() {
+        let kinds = [
+            DocumentKind::Pdf,
+            DocumentKind::Png,
+            DocumentKind::Jpeg,
+            DocumentKind::Jpg,
+            DocumentKind::Jp2,
+            DocumentKind::Webp,
+            DocumentKind::Gif,
+            DocumentKind::Bmp,
+            DocumentKind::Tiff,
+            DocumentKind::Docx,
+            DocumentKind::Pptx,
+            DocumentKind::Xlsx,
+            DocumentKind::Doc,
+            DocumentKind::Ppt,
+            DocumentKind::Xls,
+            DocumentKind::Odt,
+            DocumentKind::Rtf,
+            DocumentKind::Epub,
+            DocumentKind::Ods,
+            DocumentKind::Odp,
+            DocumentKind::Csv,
+        ];
+        for kind in kinds {
+            assert!(
+                !(kind.is_office() && kind.is_legacy_office()),
+                "{kind:?} is both office and legacy office"
+            );
+        }
+        for kind in [DocumentKind::Docx, DocumentKind::Pptx, DocumentKind::Xlsx] {
+            assert!(kind.is_office() && !kind.is_legacy_office());
+        }
+        for kind in [
+            DocumentKind::Doc,
+            DocumentKind::Ppt,
+            DocumentKind::Xls,
+            DocumentKind::Odt,
+            DocumentKind::Rtf,
+            DocumentKind::Epub,
+            DocumentKind::Ods,
+            DocumentKind::Odp,
+            DocumentKind::Csv,
+        ] {
+            assert!(!kind.is_office() && kind.is_legacy_office());
+        }
     }
 
     #[test]

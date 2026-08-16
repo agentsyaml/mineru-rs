@@ -14,11 +14,11 @@ use cap_std::{
 use std::{
     collections::HashSet,
     ffi::OsString,
-    io::Read,
+    io::{Read, Write},
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 pub(super) type WarningCallback = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
@@ -445,17 +445,36 @@ fn preflight_limit_message(
             "input \"{label}\" is {len} bytes; exceeds resident preparation limit of {max_pdf_bytes} bytes; raise with --max-pdf-bytes or MINERU_MAX_PDF_BYTES"
         ));
     }
+    // The resident cap (`max_pdf_bytes`, checked above) applies to every kind: snapshot enforces
+    // it for legacy and OOXML inputs too, with the PDF-named wording, so preflight announces it
+    // for them as well. The OOXML archive limit below is OOXML-package-specific; legacy's
+    // container-size gate here is the office input limit after it (the helper enforces it
+    // TOCTOU-safe on the raw bytes it reads, so this stays advisory).
     if kind.is_office() && len > ooxml_archive_bytes {
         return Some(format!(
             "input \"{label}\" is {len} bytes; exceeds OOXML archive limit of {ooxml_archive_bytes} bytes; raise with --ooxml-archive-bytes or MINERU_OOXML_ARCHIVE_BYTES"
         ));
     }
-    if kind.is_office() && len > office_input_bytes as u64 {
+    if (kind.is_office() || kind.is_legacy_office()) && len > office_input_bytes as u64 {
         return Some(format!(
             "input \"{label}\" is {len} bytes; exceeds office conversion input limit of {office_input_bytes} bytes; raise with --office-input-bytes or MINERU_OFFICE_INPUT_BYTES"
         ));
     }
     None
+}
+
+/// Feature gates for the office lanes. A build without the owning feature must reject the kind at
+/// plan time instead of spawning the helper, which only knows the formats compiled into it and
+/// would fail with a generic "invalid format" (or a misleading "unavailable" when the helper
+/// binary is absent).
+fn feature_unavailable_message(kind: DocumentKind) -> Option<&'static str> {
+    if kind.is_legacy_office() && !cfg!(feature = "legacy-office") {
+        Some("legacy office conversion is unavailable (build with --features legacy-office)")
+    } else if kind.is_office() && !cfg!(feature = "office") {
+        Some("office conversion is unavailable")
+    } else {
+        None
+    }
 }
 
 /// Joins per-document failures into the batch summary: count, then the first 16 details.
@@ -468,6 +487,88 @@ fn format_failures(failures: &[(String, String)]) -> String {
         .join("; ");
     let suffix = if failures.len() > 16 { "; ..." } else { "" };
     format!("{} document(s) failed: {details}{suffix}", failures.len())
+}
+
+/// The legacy-family lane: helper text extraction into `{root}/{stem}/office/{stem}.md`.
+/// Image references in the markdown stay dangling — no image assets are extracted.
+async fn extract_text_and_write(
+    bytes: bytes::Bytes,
+    kind: DocumentKind,
+    root: &Path,
+    stem: &str,
+    office_workers: &OfficeWorkers,
+    remaining: Duration,
+    task_events: &Option<ProgressCallback>,
+) -> Result<(), DirectError> {
+    let format = legacy_format_name(kind)?;
+    let (text, warning) = office_workers
+        .convert_text_with_warning(format, bytes, remaining)
+        .await
+        .map_err(|e| err(e.to_string()))?;
+    if let Some(message) = warning {
+        emit_event(
+            task_events,
+            ProgressEvent::OfficeWarning {
+                document: stem.to_owned(),
+                message,
+            },
+        );
+    }
+    write_legacy_text(root, stem, &text)?;
+    Ok(())
+}
+
+fn legacy_format_name(kind: DocumentKind) -> Result<&'static str, DirectError> {
+    Ok(match kind {
+        DocumentKind::Doc => "doc",
+        DocumentKind::Ppt => "ppt",
+        DocumentKind::Xls => "xls",
+        DocumentKind::Odt => "odt",
+        DocumentKind::Rtf => "rtf",
+        DocumentKind::Epub => "epub",
+        DocumentKind::Ods => "ods",
+        DocumentKind::Odp => "odp",
+        DocumentKind::Csv => "csv",
+        _ => return Err(err("legacy office kind required")),
+    })
+}
+
+/// Opens or creates `{root}/{stem}/office` with no-follow directory walks and writes
+/// `{stem}.md` with the symlink-free open the snapshot path uses for reads.
+fn write_legacy_text(root: &Path, stem: &str, text: &[u8]) -> Result<(), DirectError> {
+    let (anchor, mut names) = anchor_and_names(root)?;
+    names.extend([stem.into(), "office".into()]);
+    let mut current = Dir::open_ambient_dir(anchor, ambient_authority())?;
+    for name in &names {
+        match current.symlink_metadata(name) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(err("output path component is not a directory"));
+                }
+                current = current.open_dir_nofollow(name)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                current
+                    .create_dir(name)
+                    .map_err(|_| err("output directory creation failed"))?;
+                current = current.open_dir_nofollow(name)?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .follow(FollowSymlinks::No);
+    let mut file = current
+        .open_with(format!("{stem}.md"), &options)
+        .map_err(|_| err("output file creation failed"))?;
+    file.write_all(text)
+        .map_err(|_| err("output write failed"))?;
+    file.flush().map_err(|_| err("output write failed"))?;
+    Ok(())
 }
 #[cfg(unix)]
 fn same_dir(a: &Dir, b: &Dir) -> std::io::Result<bool> {
@@ -688,7 +789,11 @@ async fn run_inner(
         .zip(allocated)
         .enumerate()
         .map(|(index, ((p, kind), stem))| {
-            let target = if kind.is_office() { "office" } else { "vlm" };
+            let target = if kind.is_office() || kind.is_legacy_office() {
+                "office"
+            } else {
+                "vlm"
+            };
             output_chain(&output, &stem, input_dir.as_ref(), target)?;
             Ok((index + 1, p, kind, stem))
         })
@@ -703,24 +808,30 @@ async fn run_inner(
     for path in skipped {
         emit_warning(&warnings, "unsupported input", &path.display().to_string());
     }
-    // Advisory batch preflight: announce every document that will be rejected by a preparation
-    // limit before any parsing starts. `snapshot` remains the final enforcer; doomed documents
-    // are skipped in the main loop below so the rest of the batch still runs.
+    // Advisory batch preflight: announce every document that will be rejected before any parsing
+    // starts — either by a preparation limit or by a missing office feature. `snapshot` remains
+    // the final enforcer for limits; doomed documents are skipped in the main loop below so the
+    // rest of the batch still runs.
     let mut failures: Vec<(String, String)> = Vec::new();
     let mut doomed: HashSet<PathBuf> = HashSet::new();
     for (candidate_id, path, kind, stem) in &candidates {
         let Ok(metadata) = std::fs::symlink_metadata(path) else {
             continue;
         };
-        let Some(message) = preflight_limit_message(
-            &path.display().to_string(),
-            metadata.len(),
-            *kind,
-            options.document_limits.max_input_bytes,
-            route.max_pdf_bytes,
-            service.ooxml.archive_bytes,
-            service.office.input_bytes,
-        ) else {
+        let Some(message) = feature_unavailable_message(*kind)
+            .map(str::to_owned)
+            .or_else(|| {
+                preflight_limit_message(
+                    &path.display().to_string(),
+                    metadata.len(),
+                    *kind,
+                    options.document_limits.max_input_bytes,
+                    route.max_pdf_bytes,
+                    service.ooxml.archive_bytes,
+                    service.office.input_bytes,
+                )
+            })
+        else {
             continue;
         };
         let task_events = document_events(&command_events, &events, *candidate_id);
@@ -743,14 +854,28 @@ async fn run_inner(
         route.processing_window_size,
     )
     .map_err(|error| err(error.to_string()))?;
-    let client = MinerUVlmClient::connect(
-        http,
-        MinerUVlmConfig {
-            concurrency_model: resolved.concurrency_model,
-            ..Default::default()
-        },
-    )
-    .await?;
+    // Lazy VLM connection: a batch whose *surviving* candidates are all legacy formats never
+    // touches a VLM server, so no connection is attempted (`mineru -i old.doc -o out` works
+    // offline). Preflight-doomed candidates are skipped before the main loop and never reach
+    // the client, so they must not count toward the decision either.
+    let all_legacy = candidates
+        .iter()
+        .filter(|(_, path, _, _)| !doomed.contains(path))
+        .all(|(_, _, kind, _)| kind.is_legacy_office());
+    let client = if all_legacy {
+        None
+    } else {
+        Some(
+            MinerUVlmClient::connect(
+                http,
+                MinerUVlmConfig {
+                    concurrency_model: resolved.concurrency_model,
+                    ..Default::default()
+                },
+            )
+            .await?,
+        )
+    };
     for (candidate_id, path, kind, stem) in &candidates {
         if doomed.contains(path) {
             continue;
@@ -763,7 +888,7 @@ async fn run_inner(
             },
         );
         let cleanup_warning = cleanup_warning_callback(&warnings);
-        let result = async {
+        let result: Result<(), DirectError> = async {
             let deadline = Instant::now()
                 .checked_add(route.total_deadline)
                 .ok_or_else(|| err("input deadline overflow"))?;
@@ -773,12 +898,35 @@ async fn run_inner(
                 options.document_limits.max_input_bytes,
             )?;
             let bytes = snapshot.bytes;
-            let target = if kind.is_office() { "office" } else { "vlm" };
+            let target = if kind.is_office() || kind.is_legacy_office() {
+                "office"
+            } else {
+                "vlm"
+            };
             let root = output_chain(&output, stem, input_dir.as_ref(), target)?;
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .filter(|d| !d.is_zero())
                 .ok_or_else(|| err("input deadline expired"))?;
+            if kind.is_legacy_office() {
+                extract_text_and_write(
+                    bytes,
+                    *kind,
+                    &root,
+                    stem,
+                    office_workers,
+                    remaining,
+                    &task_events,
+                )
+                .await?;
+                emit_event(
+                    &task_events,
+                    ProgressEvent::DocumentPrepared {
+                        document: stem.clone(),
+                    },
+                );
+                return Ok(());
+            }
             let (prepared, warning) = prepare_with_warning_and_ooxml(
                 bytes,
                 *kind,
@@ -814,7 +962,12 @@ async fn run_inner(
                 .checked_duration_since(Instant::now())
                 .filter(|d| !d.is_zero())
                 .ok_or_else(|| err("input deadline expired"))?;
+            // Invariant: a non-legacy candidate reaching this loop implies the VLM client was
+            // connected. `all_legacy` is computed over exactly the loop's surviving candidates
+            // (the same doomed filter the loop applies), so do not skip candidates elsewhere.
             client
+                .as_ref()
+                .expect("a non-legacy candidate implies a connected VLM client")
                 .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
                     prepared,
                     route,
@@ -826,7 +979,8 @@ async fn run_inner(
                     page_concurrency.clone(),
                 )
                 .await
-                .map_err(|e| -> DirectError { Box::new(e) })
+                .map_err(|e| -> DirectError { Box::new(e) })?;
+            Ok(())
         }
         .await;
         if let Err(e) = result {
@@ -1042,8 +1196,47 @@ mod tests {
         assert!(office(5).unwrap().contains("--office-input-bytes"));
         assert!(office(4).is_none());
 
+        // The OOXML archive limit never trips legacy kinds (they are not archives); their gate
+        // is the office input limit, reported with its own wording.
+        let legacy = |len| preflight_limit_message("big", len, DocumentKind::Doc, 100, 100, 5, 100);
+        assert!(
+            legacy(6).is_none(),
+            "archive limit must not bind legacy kinds"
+        );
+        let legacy = |len| preflight_limit_message("big", len, DocumentKind::Rtf, 100, 100, 100, 4);
+        let message = legacy(5).unwrap();
+        assert!(message.contains("--office-input-bytes"), "{message}");
+        assert!(!message.contains("OOXML archive"), "{message}");
+
+        // The resident cap applies to every kind, including legacy: preflight announces it (with
+        // the PDF-named wording) exactly as snapshot enforces it, so a huge legacy input is never
+        // a mid-run surprise.
+        let legacy_resident =
+            |len| preflight_limit_message("big", len, DocumentKind::Doc, 1000, 100, 1000, 1000);
+        let resident_message = legacy_resident(150).unwrap();
+        assert!(
+            resident_message.contains("--max-pdf-bytes"),
+            "{resident_message}"
+        );
+        assert!(legacy_resident(100).is_none());
+
         // The office-only limits never trip non-office kinds.
         assert!(preflight_limit_message("big", 50, DocumentKind::Png, 100, 100, 5, 4).is_none());
+    }
+
+    #[test]
+    fn feature_unavailable_gate_tracks_compiled_features() {
+        // The gate is a compile-time constant: a kind is only reported unavailable when the
+        // build lacks the feature that owns its lane. This test runs under every feature set.
+        assert_eq!(
+            feature_unavailable_message(DocumentKind::Doc).is_some(),
+            !cfg!(feature = "legacy-office")
+        );
+        assert_eq!(
+            feature_unavailable_message(DocumentKind::Docx).is_some(),
+            !cfg!(feature = "office")
+        );
+        assert!(feature_unavailable_message(DocumentKind::Pdf).is_none());
     }
 
     #[test]

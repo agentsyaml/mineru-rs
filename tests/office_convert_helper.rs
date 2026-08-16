@@ -246,7 +246,10 @@ const CHART_XML: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformat
 #[test]
 fn helper_argument_errors_run_after_containment_setup() {
     for (args, expected) in [
-        (&[][..], "usage: mineru-office-convert <docx|pptx|xlsx>\n"),
+        (
+            &[][..],
+            "usage: mineru-office-convert <docx|pptx|xlsx|doc|ppt|xls|odt|rtf|epub|ods|odp|csv>\n",
+        ),
         (&["bad"][..], "invalid format\n"),
     ] {
         let output = run(args, b"");

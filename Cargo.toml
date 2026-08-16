@@ -45,13 +45,17 @@ path = "src/bin/mineru-api.rs"
 [[bin]]
 name = "mineru-office-convert"
 path = "src/bin/mineru-office-convert.rs"
-required-features = ["office"]
+# No required-features: Cargo requires ALL listed features (AND), which would
+# break `--features office` alone and `--features legacy-office` alone. The
+# helper always builds and gates its branches with cfg(feature=...).
 
 [features]
 default = []
 office = ["dep:office2pdf"]
+legacy-office = ["dep:anydoc"]
 
 [dependencies]
+anydoc = { version = "=0.1.9", optional = true }
 base64 = "0.23"
 axum = { version = "0.8", features = ["multipart"] }
 bytes = { version = "1", features = ["serde"] }
@@ -85,6 +89,12 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"
 url = { version = "2", features = ["serde"] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = { version = "=0.41.0", default-features = false, features = ["encoding"] }
+
+[dev-dependencies]
+# Legacy fixture construction only: cfb builds the OLE containers for doc/ppt/xls
+# samples, encoding_rs supplies the GBK bytes for the Chinese-text .doc sample.
+cfb = "0.14"
+encoding_rs = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }

@@ -1,6 +1,11 @@
+#[cfg(feature = "legacy-office")]
+use anydoc::Format as AnyDocFormat;
 use mineru::command::service::OfficeLimits;
-use office2pdf::config::{ConvertOptions, Format};
-use std::io::{Read, Write};
+#[cfg(feature = "office")]
+use office2pdf::config::{ConvertOptions, Format as PdfFormat};
+use std::io::Read;
+#[cfg(any(feature = "office", feature = "legacy-office"))]
+use std::io::Write;
 
 fn main() {
     // The parent CLI resolves the office policy at startup and writes it into this child's
@@ -9,14 +14,16 @@ fn main() {
     let _containment = containment(&limits).unwrap_or_else(|_| fail("containment setup failed"));
     let mut args = std::env::args_os();
     let _ = args.next();
-    let (requested_kind, format) = match (args.next().as_deref(), args.next()) {
-        (Some(value), None) => match value.to_str() {
-            Some("docx") => ("docx", Format::Docx),
-            Some("pptx") => ("pptx", Format::Pptx),
-            Some("xlsx") => ("xlsx", Format::Xlsx),
-            _ => fail("invalid format"),
-        },
-        _ => fail("usage: mineru-office-convert <docx|pptx|xlsx>"),
+    let first = args.next();
+    let value = match (first.as_deref(), args.next()) {
+        (Some(value), None) => value,
+        _ => fail(
+            "usage: mineru-office-convert <docx|pptx|xlsx|doc|ppt|xls|odt|rtf|epub|ods|odp|csv>",
+        ),
+    };
+    let requested = match value.to_str() {
+        Some(value) => value,
+        None => fail("invalid format"),
     };
     let mut input = Vec::new();
     if std::io::stdin()
@@ -27,16 +34,83 @@ fn main() {
     {
         fail("input too large");
     }
+    convert(requested, &input, limits);
+    #[cfg(windows)]
+    _containment.finish();
+}
+
+/// Dispatch on the requested format name. The format alone decides the output kind: the OOXML
+/// family converts to PDF, the legacy family to Markdown. The helper never takes a mode.
+#[cfg_attr(
+    not(any(feature = "office", feature = "legacy-office")),
+    allow(unused_variables)
+)]
+fn convert(requested: &str, input: &[u8], limits: OfficeLimits) {
+    #[cfg(feature = "office")]
+    if let Some((kind, format)) = pdf_format(requested) {
+        return convert_pdf(limits, kind, format, input);
+    }
+    #[cfg(feature = "legacy-office")]
+    if let Some((kind, format)) = text_format(requested) {
+        return convert_text(limits, kind, format, input);
+    }
+    fail("invalid format");
+}
+
+/// The requested OOXML format is resolved against the OOXML preflight before conversion.
+#[cfg(feature = "office")]
+fn pdf_format(requested: &str) -> Option<(&'static str, PdfFormat)> {
+    Some(match requested {
+        "docx" => ("docx", PdfFormat::Docx),
+        "pptx" => ("pptx", PdfFormat::Pptx),
+        "xlsx" => ("xlsx", PdfFormat::Xlsx),
+        _ => return None,
+    })
+}
+
+/// The requested legacy format; `xls` shares the Excel parser with the OOXML family.
+#[cfg(feature = "legacy-office")]
+fn text_format(requested: &str) -> Option<(&'static str, AnyDocFormat)> {
+    Some(match requested {
+        "doc" => ("doc", AnyDocFormat::Doc),
+        "ppt" => ("ppt", AnyDocFormat::Ppt),
+        "xls" => ("xls", AnyDocFormat::Excel),
+        "odt" => ("odt", AnyDocFormat::Odt),
+        "rtf" => ("rtf", AnyDocFormat::Rtf),
+        "epub" => ("epub", AnyDocFormat::Epub),
+        "ods" => ("ods", AnyDocFormat::Ods),
+        "odp" => ("odp", AnyDocFormat::Odp),
+        "csv" => ("csv", AnyDocFormat::Csv),
+        _ => return None,
+    })
+}
+
+/// Content cross-validation for the legacy family. CSV carries no file signature, so it is
+/// accepted as declared; every other legacy format must match its container signature. A UTF-8
+/// BOM (written by LibreOffice/Word for non-ASCII text) is not part of any signature, so it is
+/// skipped for detection.
+#[cfg(feature = "legacy-office")]
+fn format_matches(requested_kind: &str, format: AnyDocFormat, input: &[u8]) -> bool {
+    requested_kind == "csv"
+        || anydoc::Format::from_bytes(input).or_else(|| {
+            input
+                .strip_prefix(b"\xef\xbb\xbf")
+                .and_then(anydoc::Format::from_bytes)
+        }) == Some(format)
+}
+
+#[cfg(feature = "office")]
+fn convert_pdf(limits: OfficeLimits, requested_kind: &str, format: PdfFormat, input: &[u8]) {
     if !requested_kind_matches(
         mineru::preflight_ooxml_bytes_with(
-            &input,
+            input,
             mineru::command::service::OoxmlLimits::from_child_env(),
         ),
         requested_kind,
     ) {
         fail("input format does not match requested format");
     }
-    let result = office2pdf::convert_bytes(&input, format, &ConvertOptions::default())
+    let result = office2pdf::convert_bytes(input, format, &ConvertOptions::default())
         .unwrap_or_else(|_| fail("conversion failed"));
     if !result.pdf.starts_with(b"%PDF-") {
         fail("conversion produced invalid PDF");
@@ -50,14 +124,36 @@ fn main() {
     if !result.warnings.is_empty() {
         eprintln!("conversion warnings: {}", result.warnings.len());
     }
-    #[cfg(windows)]
-    _containment.finish();
 }
 
+#[cfg(feature = "legacy-office")]
+fn convert_text(limits: OfficeLimits, requested_kind: &str, format: AnyDocFormat, input: &[u8]) {
+    // A UTF-8 BOM is not part of any legacy container signature; strip it before parsing so
+    // BOM-prefixed RTF (written by LibreOffice/Word for non-ASCII text) converts, not just
+    // passes validation.
+    let input = input.strip_prefix(b"\xef\xbb\xbf").unwrap_or(input);
+    if !format_matches(requested_kind, format, input) {
+        fail("input format does not match requested format");
+    }
+    // `to_markdown_bytes` returns a `String`, so the output is valid UTF-8 by construction;
+    // the parent's owner re-validates the raw stdout bytes regardless. No image assets are
+    // written: embedded images are referenced but not extracted.
+    let markdown = anydoc::to_markdown_bytes(input, Some(format))
+        .unwrap_or_else(|_| fail("conversion failed"));
+    if markdown.len() > limits.output_bytes {
+        fail("conversion produced oversized output");
+    }
+    if std::io::stdout().write_all(markdown.as_bytes()).is_err() {
+        fail("output failed");
+    }
+}
+
+#[cfg(feature = "office")]
 fn requested_kind_matches(detected: Result<Option<&'static str>, String>, requested: &str) -> bool {
     matches!(detected, Ok(Some(kind)) if kind == requested)
 }
 
+#[cfg(feature = "office")]
 #[cfg(test)]
 fn valid_pdf_output(pdf: &[u8], output_cap: usize) -> bool {
     pdf.len() <= output_cap && pdf.starts_with(b"%PDF-")
@@ -200,6 +296,7 @@ fn fail(message: &str) -> ! {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "office")]
     #[test]
     fn rejects_exact_kind_mismatch() {
         assert!(!requested_kind_matches(Ok(Some("pptx")), "docx"));
@@ -207,6 +304,7 @@ mod tests {
         assert!(!requested_kind_matches(Err("bad archive".into()), "docx"));
     }
 
+    #[cfg(feature = "office")]
     #[test]
     fn output_cap_is_inclusive() {
         assert!(!valid_pdf_output(b"not a PDF", 64));
@@ -215,6 +313,61 @@ mod tests {
         assert!(valid_pdf_output(&at_cap, 64));
         at_cap.push(b'x');
         assert!(!valid_pdf_output(&at_cap, 64));
+    }
+
+    #[cfg(feature = "office")]
+    #[test]
+    fn pdf_format_mapping_is_closed() {
+        assert_eq!(pdf_format("docx"), Some(("docx", PdfFormat::Docx)));
+        assert_eq!(pdf_format("pptx"), Some(("pptx", PdfFormat::Pptx)));
+        assert_eq!(pdf_format("xlsx"), Some(("xlsx", PdfFormat::Xlsx)));
+        assert_eq!(pdf_format("doc"), None);
+        assert_eq!(pdf_format("DOCX"), None); // helper receives lowercase names only
+    }
+
+    #[cfg(feature = "legacy-office")]
+    #[test]
+    fn text_format_mapping_is_closed() {
+        for (name, format) in [
+            ("doc", AnyDocFormat::Doc),
+            ("ppt", AnyDocFormat::Ppt),
+            ("xls", AnyDocFormat::Excel),
+            ("odt", AnyDocFormat::Odt),
+            ("rtf", AnyDocFormat::Rtf),
+            ("epub", AnyDocFormat::Epub),
+            ("ods", AnyDocFormat::Ods),
+            ("odp", AnyDocFormat::Odp),
+            ("csv", AnyDocFormat::Csv),
+        ] {
+            assert_eq!(text_format(name), Some((name, format)), "{name}");
+        }
+        assert_eq!(text_format("docx"), None);
+        assert_eq!(text_format("bad"), None);
+    }
+
+    #[cfg(feature = "legacy-office")]
+    #[test]
+    fn legacy_content_cross_validation_matches_or_rejects() {
+        assert!(format_matches(
+            "rtf",
+            AnyDocFormat::Rtf,
+            b"{\\rtf1\\ansi hello}"
+        ));
+        // A UTF-8 BOM is skipped for detection, so a BOM-prefixed RTF still matches.
+        assert!(format_matches(
+            "rtf",
+            AnyDocFormat::Rtf,
+            b"\xef\xbb\xbf{\\rtf1\\ansi hello}"
+        ));
+        // A signature-less container cannot be detected: CSV is accepted as declared.
+        assert!(format_matches("csv", AnyDocFormat::Csv, b"a,b\n1,2\n"));
+        // Mismatched or undetectable content is rejected with the shared mismatch error.
+        assert!(!format_matches(
+            "doc",
+            AnyDocFormat::Doc,
+            b"{\\rtf1\\ansi hello}"
+        ));
+        assert!(!format_matches("doc", AnyDocFormat::Doc, b"garbage"));
     }
 
     #[test]
