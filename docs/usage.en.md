@@ -2,7 +2,7 @@
 
 [简体中文](usage.md) | [English](usage.en.md)
 
-See [compatibility.md](compatibility.md) for the compatibility baseline and reproducible installation. This statement covers only the `vlm-http-client` PDF flow; it is not a full MinerU 3.4.4 compatibility statement.
+See [compatibility.md](compatibility.md) for the compatibility baseline and reproducible installation. This statement covers only the `vlm-http-client` PDF flow; it is not a full MinerU 3.4.5 compatibility statement.
 
 ## Build and prerequisites
 
@@ -69,13 +69,20 @@ export MINERU_VL_MODEL_NAME="<model-id>"
 
 ## Canonical `mineru` command (PDF / images / Office)
 
-`mineru` is the canonical product binary, supporting PDF, image, and Office input and an optional `--api-url` remote API server mode. It exposes no local ML backend; `--backend` accepts only `vlm-http-client`.
+`mineru` is the canonical product binary, supporting PDF, image, and Office input and an optional `--api-url` remote API server mode. It exposes no local ML backend; `--backend` accepts `vlm-http-client` and `hybrid-http-client` (a protocol alias for the former in direct mode, see below).
 
-Office-format conversion requires the `mineru-office-convert` helper, which depends on the optional `office` feature:
+Office-format conversion requires the `mineru-office-convert` helper, which depends on two optional features:
 
 ```sh
+# docx/pptx/xlsx → PDF (via office2pdf, then VLM layout parsing)
 cargo build --release --features office
+# legacy formats → Markdown text (via anydoc, no VLM required)
+cargo build --release --features legacy-office
+# both
+cargo build --release --features office,legacy-office
 ```
+
+`mineru` routes by extension: `.docx`/`.pptx`/`.xlsx` are converted to PDF and parsed through the VLM; `.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv` are extracted to Markdown text directly by `anydoc`, with **no VLM service required**. Legacy output is written to `{out}/{stem}/office/{stem}.md` and contains text only — no layout JSON and no assets; image references in the document are kept as unresolved Markdown references. The `mineru-api` server rejects legacy formats (HTTP `422`); only `mineru` direct mode supports them.
 
 ### Office helper containment
 
@@ -92,6 +99,12 @@ Native macOS APIs have no reliable process RSS/address-space hard limit that doe
 ### Direct VLM mode (default)
 
 Without `--api-url`, `mineru` calls the external VLM service directly. The service address and model are supplied by the `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and `MINERU_VL_API_KEY` environment variables or overridden by `--url`.
+
+In direct mode `-b hybrid-http-client` behaves identically to `vlm-http-client` (this build has no local layout/OCR/formula models); every run prints to stderr:
+
+```text
+warning: backend=hybrid-http-client: this build has no local layout/OCR/formula models; falling back to the vlm-http-client pipeline (identical behavior)
+```
 
 ```sh
 export MINERU_VL_SERVER="https://<server>"
@@ -117,7 +130,7 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `-o, --output <directory>` | Required | Output directory. |
 | `--api-url <URL>` | None | Remote API server address; without it, direct VLM mode is used. |
 | `-m, --method <auto\|txt\|ocr>` | `auto` | Parsing method (ignored in direct mode). |
-| `-b, --backend <vlm-http-client>` | `vlm-http-client` | Backend (the only one available). |
+| `-b, --backend <vlm-http-client\|hybrid-http-client>` | `vlm-http-client` | Backend. In direct mode `hybrid-http-client` is a protocol alias for `vlm-http-client` (warned on every run); in API mode it is passed through to the server verbatim. |
 | `--effort <medium\|high>` | `medium` | Parsing effort (ignored in direct mode). |
 | `-l, --lang <language>` | `ch` | Language code. |
 | `-u, --url <URL>` | None | VLM service-address override in direct mode; per-task model-server override in API mode. |
@@ -471,7 +484,7 @@ asyncio.run(main())
 ```
 
 Both accept the same keyword options as the CLI: `api_url`, `method`
-(`auto`/`txt`/`ocr`), `backend` (`vlm-http-client`), `effort`
+(`auto`/`txt`/`ocr`), `backend` (`vlm-http-client`/`hybrid-http-client`), `effort`
 (`medium`/`high`), `lang` (default `ch`), `url` (direct VLM server), `start`,
 `end`, `formula`, `table`, `image_analysis`, and
 `client_side_output_generation`.

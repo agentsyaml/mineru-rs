@@ -9,11 +9,24 @@ MinerU VLM 模型有两种运行方式：
 - **远程**——让工具连接 OpenAI 兼容的 MinerU VLM 服务，无需在自己的机器上运行模型即可解析文档。
 - **本地（可选）**——用 llama.cpp（`llama-server`）自行托管一个量化 MinerU 模型，并让工具连接它；见 [Docker](#docker)。
 
-在 MinerU 3.4.4 VLM 范围内，MinerU Rust 是 MinerU Python SDK `vlm-http-client` 路径的可直接替代实现，可以完全替代该 VLM 工作流。本项目不实现、也不声称兼容非 VLM 后端。参见[兼容性契约](docs/compatibility.md)、[中文使用指南](docs/usage.md)和[英文使用指南](docs/usage.en.md)。文档大小限制控制项及其 CLI/API 适用范围见使用指南。
+在 MinerU 3.4.5 VLM 范围内，MinerU Rust 是 MinerU Python SDK `vlm-http-client` 路径的可直接替代实现，可以完全替代该 VLM 工作流。本项目不实现、也不声称兼容非 VLM 后端。参见[兼容性契约](docs/compatibility.md)、[中文使用指南](docs/usage.md)和[英文使用指南](docs/usage.en.md)。文档大小限制控制项及其 CLI/API 适用范围见使用指南。
+
+**没有 GPU？** MinerU Rust 只驱动 VLM 端点，纯 CPU 的替代方案是官方 MinerU Python pipeline（PP-OCRv6）：它产出相同的 `document.json` / `middle.json` / `content_list.json` / markdown 契约，两份输出可互换消费。无 VLM 服务的办公文档需要纯文本抽取时，可选用专用转换器如 [anydoc](https://github.com/firecrawl/anydoc)（仅 markdown，无版面 JSON）。官方 MinerU 4.x 同样默认走 CPU 友好路线（llama.cpp + ONNX light 栈）；`llama-server` 暴露 OpenAI 兼容端点，本项目可直接对接，但 4.x 的 `http-client` 协议未审计，不在本项目兼容契约范围内（见[兼容性说明](docs/compatibility.md)）。
 
 远程协议固定于 MinerU `vlm-http-client` 传输基线，因此需要兼容 MinerU 的 VLM 端点——通用聊天模型无法产出版面结果。
 
 需要 Rust 1.89 或更高版本。
+
+## 性能
+
+与官方 MinerU Python SDK（`vlm-http-client` 路径）实测对比，同一 VLM 端点、同一输入文档：
+
+| 文档 | MinerU Rust | 官方 SDK | 速度 | 内存 |
+| --- | --- | --- | --- | --- |
+| 334 页 | 130.44 s / 2.15 GB | 162.24 s / 3.93 GB | **快 19.6%** | **省 45%** |
+| 738 页 | 324.48 s / 2.31 GB | 361.74 s / 4.45 GB | **快 10.3%** | **省 48%** |
+
+Rust 客户端全程保持更小的常驻内存：流式消费 VLM 响应并增量写出输出树，而不是把完整结果缓冲在内存中。
 
 ## 快速开始
 
@@ -123,10 +136,12 @@ cargo install mineru
 mineru --help
 ```
 
-该软件包安装 `mineru` 和 `mineru-api` 二进制文件。若还要安装 `mineru-office-convert` Office 转换辅助程序，请使用 `--features office` 构建：
+该软件包安装 `mineru` 和 `mineru-api` 二进制文件。若还要安装 `mineru-office-convert` 转换辅助程序，请使用 office 相关 feature 构建：
 
 ```sh
-cargo install mineru --features office
+cargo install mineru --features office          # docx/pptx/xlsx → PDF + VLM
+cargo install mineru --features legacy-office   # doc/ppt/xls/odt/rtf/epub/ods/odp/csv → Markdown（无需 VLM）
+cargo install mineru --features office,legacy-office
 ```
 
 `mineru-api` 是 HTTP API 服务：它接收文档、调用所配置的 VLM，并返回结果归档。该服务本身不进行本地推理。
@@ -159,7 +174,7 @@ mineru -p input.pdf -o output --api-url http://127.0.0.1:8000
 
 ## 安装
 
-- **crates.io**——`cargo install mineru`（加 `--features office` 可安装 Office 转换辅助程序；需 Rust 1.89+）。
+- **crates.io**——`cargo install mineru`（加 `--features office` 支持 docx/pptx/xlsx→PDF，加 `--features legacy-office` 支持 doc/ppt/xls/odt/rtf/epub/ods/odp/csv→Markdown；需 Rust 1.89+）。
 - **Python**——`pip install mineru-rs`（支持 CPython 3.9+）。
 - **Node.js**——`npm install @alexsun-top/mineru`（需 Node.js 18+）。
 - **Docker**——见 [Docker](#docker)。
@@ -181,7 +196,7 @@ cargo build --release
 | --- | --- |
 | `mineru` | 主命令行工具：支持 PDF、图像和 Office 文档，可直接对接 VLM，也可通过 `mineru-api` 服务。 |
 | `mineru-api` | HTTP API 服务（见上文）。 |
-| `mineru-office-convert` | Office（.docx/.pptx/.xlsx）→ PDF 转换辅助程序，供 `mineru` 使用；需以 `--features office` 构建。 |
+| `mineru-office-convert` | Office 转换辅助程序，供 `mineru` 使用：docx/pptx/xlsx→PDF（`--features office`），旧格式 doc/ppt/xls/odt/rtf/epub/ods/odp/csv→Markdown（`--features legacy-office`）。 |
 
 ## Docker
 

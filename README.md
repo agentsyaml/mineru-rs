@@ -13,18 +13,44 @@ The MinerU VLM model can run in two ways:
 - **Local (optional)** — serve a quantized MinerU model yourself with llama.cpp
   (`llama-server`) and point the tools at it; see [Docker](#docker).
 
-Within the MinerU 3.4.4 VLM scope, MinerU Rust is a drop-in replacement for the
+Within the MinerU 3.4.5 VLM scope, MinerU Rust is a drop-in replacement for the
 MinerU Python SDK's `vlm-http-client` path and can replace that VLM workflow
 completely. It does not implement or claim compatibility with non-VLM backends.
 See [the compatibility contract](docs/compatibility.md), the
 [Chinese usage guide](docs/usage.md), and the [English usage guide](docs/usage.en.md).
 Document-limit controls and their CLI/API applicability are summarized in the usage guides.
 
+**No GPU?** MinerU Rust drives a VLM endpoint only, so the CPU-only alternative
+is the official MinerU Python pipeline (PP-OCRv6): it emits the same
+`document.json` / `middle.json` / `content_list.json` / markdown contract and
+the two outputs can be consumed interchangeably. For office documents without a
+VLM service, the plain-text route is a dedicated converter such as
+[anydoc](https://github.com/firecrawl/anydoc) (markdown only, no layout JSON).
+Official MinerU 4.x also defaults to a CPU-friendly route (llama.cpp + ONNX
+light stack); `llama-server` exposes an OpenAI-compatible endpoint this project
+can talk to, but the 4.x `http-client` protocol is not audited and is outside
+this project's compatibility contract (see
+[compatibility](docs/compatibility.md)).
+
 The remote protocol is pinned to the MinerU `vlm-http-client` transport
 baseline, so a MinerU-compatible VLM endpoint is required — a general-purpose
 chat model will not produce layout results.
 
 Requires Rust 1.89 or newer.
+
+## Performance
+
+Measured against the official MinerU Python SDK (`vlm-http-client` path), same
+VLM endpoint, same input documents:
+
+| Document | MinerU Rust | Official SDK | Speed | Memory |
+| --- | --- | --- | --- | --- |
+| 334 pages | 130.44 s / 2.15 GB | 162.24 s / 3.93 GB | **19.6% faster** | **45% less** |
+| 738 pages | 324.48 s / 2.31 GB | 361.74 s / 4.45 GB | **10.3% faster** | **48% less** |
+
+The Rust client keeps a smaller resident footprint end to end: it streams the
+VLM response and writes the output tree incrementally instead of buffering the
+full result in memory.
 
 ## Quickstart
 
@@ -158,11 +184,12 @@ mineru --help
 ```
 
 The package installs the `mineru` and `mineru-api` binaries. To also install
-the `mineru-office-convert` Office conversion helper, build with `--features
-office`:
+the `mineru-office-convert` conversion helper, build with the office features:
 
 ```sh
-cargo install mineru --features office
+cargo install mineru --features office          # docx/pptx/xlsx → PDF + VLM
+cargo install mineru --features legacy-office   # doc/ppt/xls/odt/rtf/epub/ods/odp/csv → Markdown (no VLM)
+cargo install mineru --features office,legacy-office
 ```
 
 `mineru-api` is the HTTP API server: it accepts documents, calls the
@@ -198,8 +225,9 @@ for service configuration and complete options.
 
 ## Install
 
-- **crates.io** — `cargo install mineru` (add `--features office` for the
-  Office helper; requires Rust 1.89+).
+- **crates.io** — `cargo install mineru` (add `--features office` for
+  docx/pptx/xlsx→PDF conversion or `--features legacy-office` for
+  doc/ppt/xls/odt/rtf/epub/ods/odp/csv→Markdown; requires Rust 1.89+).
 - **Python** — `pip install mineru-rs` (CPython 3.9+).
 - **Node.js** — `npm install @alexsun-top/mineru` (Node.js 18+).
 - **Docker** — see [Docker](#docker).
@@ -221,7 +249,7 @@ As a library in your own project: `cargo add mineru`.
 | --- | --- |
 | `mineru` | Canonical CLI: PDF, image, and Office documents, either directly against a VLM or through a `mineru-api` server. |
 | `mineru-api` | HTTP API server (see above). |
-| `mineru-office-convert` | Office (.docx/.pptx/.xlsx) → PDF conversion helper used by `mineru`; built with `--features office`. |
+| `mineru-office-convert` | Office conversion helper used by `mineru`: docx/pptx/xlsx → PDF (`--features office`), legacy doc/ppt/xls/odt/rtf/epub/ods/odp/csv → Markdown (`--features legacy-office`). |
 
 ## Docker
 

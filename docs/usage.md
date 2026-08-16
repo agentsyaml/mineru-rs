@@ -2,7 +2,7 @@
 
 [简体中文](usage.md) | [English](usage.en.md)
 
-兼容性基线与可复现安装方式见 [compatibility.md](compatibility.md)。该声明仅覆盖 `vlm-http-client` 的 PDF 流程，不是完整 MinerU 3.4.4 兼容性声明。
+兼容性基线与可复现安装方式见 [compatibility.md](compatibility.md)。该声明仅覆盖 `vlm-http-client` 的 PDF 流程，不是完整 MinerU 3.4.5 兼容性声明。
 
 ## 构建与前置条件
 
@@ -66,13 +66,20 @@ export MINERU_VL_MODEL_NAME="<model-id>"
 
 ## `mineru` 规范命令（PDF / 图像 / Office）
 
-`mineru` 是规范产品二进制，支持 PDF、图像和 Office 输入，可选 `--api-url` 远程 API 服务器模式。它不暴露本地 ML 后端；`--backend` 仅接受 `vlm-http-client`。
+`mineru` 是规范产品二进制，支持 PDF、图像和 Office 输入，可选 `--api-url` 远程 API 服务器模式。它不暴露本地 ML 后端；`--backend` 接受 `vlm-http-client` 与 `hybrid-http-client`（直接模式下后者是前者的协议别名，见下文）。
 
-Office 格式转换需要 `mineru-office-convert` 辅助程序，它依赖可选的 `office` feature：
+Office 格式转换需要 `mineru-office-convert` 辅助程序，它依赖两个可选 feature：
 
 ```sh
+# docx/pptx/xlsx → PDF（经 office2pdf，再走 VLM 版面解析）
 cargo build --release --features office
+# 旧格式 → Markdown 文本（经 anydoc，无需 VLM）
+cargo build --release --features legacy-office
+# 两者都启用
+cargo build --release --features office,legacy-office
 ```
+
+`mineru` 按扩展名自动路由：`.docx`/`.pptx`/`.xlsx` 先转 PDF 再走 VLM 版面解析；`.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv` 由 `anydoc` 直接抽取 Markdown 文本，**不需要 VLM 服务**。旧格式输出位于 `{输出}/{stem}/office/{stem}.md`，仅含文本，无版面 JSON 与资产；文档中的图片引用保留为未解析的 Markdown 引用。`mineru-api` 服务端不接受旧格式（返回 `422`），仅 `mineru` 直接模式支持。
 
 ### Office helper containment
 
@@ -89,6 +96,12 @@ macOS 原生 API 没有可靠且无需 entitlement 的进程 RSS/地址空间硬
 ### 直接 VLM 模式（默认）
 
 不传 `--api-url` 时，`mineru` 直接调用外部 VLM 服务。服务地址和模型由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME`、`MINERU_VL_API_KEY` 环境变量或 `--url` 覆盖。
+
+直接模式下 `-b hybrid-http-client` 与 `vlm-http-client` 行为完全相同（本构建没有本地 layout/OCR/formula 模型），每次运行会在 stderr 提示：
+
+```text
+warning: backend=hybrid-http-client: this build has no local layout/OCR/formula models; falling back to the vlm-http-client pipeline (identical behavior)
+```
 
 ```sh
 export MINERU_VL_SERVER="https://<server>"
@@ -114,7 +127,7 @@ export MINERU_VL_API_KEY="<your-key>"
 | `-o, --output <目录>` | 必填 | 输出目录。 |
 | `--api-url <URL>` | 无 | 远程 API 服务器地址；不传则直接 VLM 模式。 |
 | `-m, --method <auto\|txt\|ocr>` | `auto` | 解析方法（直接模式下忽略）。 |
-| `-b, --backend <vlm-http-client>` | `vlm-http-client` | 后端（仅此一个）。 |
+| `-b, --backend <vlm-http-client\|hybrid-http-client>` | `vlm-http-client` | 后端。直接模式下 `hybrid-http-client` 是 `vlm-http-client` 的协议别名（每次运行警告），API 模式下原样透传给服务器。 |
 | `--effort <medium\|high>` | `medium` | 解析力度（直接模式下忽略）。 |
 | `-l, --lang <语言>` | `ch` | 语言代码。 |
 | `-u, --url <URL>` | 无 | 直接模式下的 VLM 服务地址覆盖；API 模式下的任务级模型服务器覆盖。 |
@@ -453,7 +466,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-两者都接受与 CLI 相同的关键字选项：`api_url`、`method`（`auto`/`txt`/`ocr`）、`backend`（`vlm-http-client`）、`effort`（`medium`/`high`）、`lang`（默认 `ch`）、`url`（直接 VLM 服务）、`start`、`end`、`formula`、`table`、`image_analysis` 和 `client_side_output_generation`。
+两者都接受与 CLI 相同的关键字选项：`api_url`、`method`（`auto`/`txt`/`ocr`）、`backend`（`vlm-http-client`/`hybrid-http-client`）、`effort`（`medium`/`high`）、`lang`（默认 `ch`）、`url`（直接 VLM 服务）、`start`、`end`、`formula`、`table`、`image_analysis` 和 `client_side_output_generation`。
 
 ### Node.js
 
