@@ -53,7 +53,10 @@ async fn run_documents_impl(
     if options.client_side_output_generation {
         return Err("client-side output generation is unsupported".into());
     }
-    if options.backend != "vlm-http-client" {
+    if !matches!(
+        options.backend.as_str(),
+        "vlm-http-client" | "hybrid-http-client"
+    ) {
         return Err(format!("unsupported backend: {}", options.backend));
     }
     let backend = super::Backend::parse(&options.backend)?;
@@ -106,6 +109,9 @@ async fn run_documents_impl(
                 .extension()
                 .and_then(|s| s.to_str())
                 .and_then(crate::input_prepare::DocumentKind::from_suffix);
+            if suffix.is_some_and(|kind| kind.is_legacy_office()) {
+                return Err("legacy office formats are not supported by the API".into());
+            }
             if d.effective_pages == 0
                 || suffix != Some(d.kind)
                 || crate::canonical_stem(&d.stem).ok().as_deref() != Some(&d.stem)

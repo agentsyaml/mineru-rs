@@ -538,7 +538,7 @@ impl Default for Submit {
     fn default() -> Self {
         Self {
             server_url: None,
-            backend: Some("hybrid-engine".into()),
+            backend: Some("vlm-http-client".into()),
             language: Some("ch".into()),
             effort: Some("medium".into()),
             parse_method: Some("auto".into()),
@@ -1111,6 +1111,12 @@ async fn parse_form(
                 .and_then(|s| s.to_str())
                 .and_then(DocumentKind::from_suffix)
                 .ok_or((StatusCode::UNPROCESSABLE_ENTITY, "unsupported file type"))?;
+            if kind.is_legacy_office() {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "legacy office formats are not supported by the API",
+                ));
+            }
             let upload = root.path().join(format!("upload.{}", kind.suffix()));
             let mut f = tokio::fs::File::create(&upload).await.map_err(|_| {
                 (
@@ -1256,7 +1262,10 @@ async fn parse_form(
             _ => {}
         }
     }
-    if out.backend.as_deref() != Some("vlm-http-client") {
+    if !matches!(
+        out.backend.as_deref(),
+        Some("vlm-http-client" | "hybrid-http-client")
+    ) {
         return Err((StatusCode::BAD_REQUEST, "unsupported backend"));
     }
     apply_client_side(&mut out);
@@ -5532,7 +5541,7 @@ mod tests {
             .iter_mut()
             .find(|(name, _)| name == "backend")
             .unwrap()
-            .1 = "wrong".into();
+            .1 = "other".into();
         let response = post(&service, form(fields, vec![])).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
@@ -6263,7 +6272,7 @@ mod tests {
     async fn official_defaults_and_client_selector_mutation_are_order_independent() {
         let default = Submit::default();
         assert_eq!(default.language.as_deref(), Some("ch"));
-        assert_eq!(default.backend.as_deref(), Some("hybrid-engine"));
+        assert_eq!(default.backend.as_deref(), Some("vlm-http-client"));
         assert_eq!(default.effort.as_deref(), Some("medium"));
         assert_eq!(default.parse_method.as_deref(), Some("auto"));
         assert!(default.formula && default.table && default.image && default.md);

@@ -488,7 +488,10 @@ async fn run_core(
             options.method
         )));
     }
-    if options.backend != "vlm-http-client" {
+    if !matches!(
+        options.backend.as_str(),
+        "vlm-http-client" | "hybrid-http-client"
+    ) {
         return Err(RunError::new(format!(
             "unsupported backend: {}",
             options.backend
@@ -511,6 +514,15 @@ async fn run_core(
         && let Some(message) = behaviorless_warning(&options)
     {
         warnings("ignored direct options", &message);
+    }
+    // Direct mode has no local layout/OCR/formula models, so the hybrid-http-client backend is
+    // an alias for vlm-http-client; say so honestly on every run. API mode passes the backend
+    // through to the server untouched, where the server decides the semantics, so no warning.
+    if options.api_url.is_none() && options.backend == "hybrid-http-client" {
+        warnings(
+            "backend=hybrid-http-client",
+            "this build has no local layout/OCR/formula models; falling back to the vlm-http-client pipeline (identical behavior)",
+        );
     }
     if let Some(api_url) = options.api_url.clone() {
         run_api(
@@ -1007,7 +1019,7 @@ fn has_pdf_input(path: &Path) -> bool {
 
 #[derive(Parser, Debug)]
 #[command(
-    about = "Parse PDF, image, and Office documents with the supported external VLM-HTTP subset (vlm-http-client only; no local engines).",
+    about = "Parse PDF, image, and Office documents with the supported external VLM-HTTP subset (vlm-http-client and hybrid-http-client; no local engines).",
     version,
     disable_version_flag = true,
     after_help = "Environment:\n  MINERU_VL_SERVER      MinerU VLM service base URL, e.g. https://host/v1\n  MINERU_VL_MODEL_NAME  model id served by that endpoint\n  MINERU_VL_API_KEY     Bearer token; preferred over --api-key\n\nFull reference: docs/usage.en.md"
@@ -1025,7 +1037,7 @@ pub struct Cli {
     api_key: Option<String>,
     #[arg(short = 'm', long, value_parser = ["auto", "txt", "ocr"], default_value = "auto")]
     method: String,
-    #[arg(short = 'b', long, value_parser = ["vlm-http-client"], default_value = "vlm-http-client")]
+    #[arg(short = 'b', long, value_parser = ["vlm-http-client", "hybrid-http-client"], default_value = "vlm-http-client")]
     backend: String,
     #[arg(long, value_parser = ["medium", "high"], default_value = "medium")]
     effort: String,
