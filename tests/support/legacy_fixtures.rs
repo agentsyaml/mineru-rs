@@ -253,7 +253,12 @@ fn regenerate_committed_legacy_fixtures() {
 /// The committed fixture binaries must stay in lockstep with the in-memory generators; any drift
 /// (an edited fixture or a stale regenerator) is caught here so the committed files never
 /// silently diverge from what the tests actually exercise.
-#[cfg(test)]
+///
+/// Unix-only: the zip-based fixtures (odt/ods/odp/epub) embed the zip crate's
+/// version-made-by host OS byte, which is platform-dependent (Unix=3, MS-DOS=0 on
+/// Windows). The committed binaries are generated on Unix, so byte equality can
+/// only hold there; Windows still exercises conversion via the helper tests.
+#[cfg(all(test, not(windows)))]
 #[test]
 fn committed_legacy_fixtures_match_generators() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy");
