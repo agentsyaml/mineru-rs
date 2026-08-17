@@ -19,7 +19,7 @@ __all__ = [
 ]
 
 Method = Literal["auto", "txt", "ocr"]
-Backend = Literal["vlm-http-client"]
+Backend = Literal["vlm-http-client", "hybrid-http-client"]
 Effort = Literal["medium", "high"]
 
 

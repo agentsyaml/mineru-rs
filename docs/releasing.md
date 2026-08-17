@@ -35,7 +35,7 @@ verification; GHCR uses the job-scoped `GITHUB_TOKEN` permissions above.
 ## Non-user-facing 0.0.1 bootstrap
 
 Perform bootstrap from a temporary checkout or branch with the Cargo workspace
-version changed to `0.0.1`. Main remains at the current workspace version (`0.2.8`).
+version changed to `0.0.1`. Main remains at the current workspace version (`0.2.9`).
 
 ### crates.io
 

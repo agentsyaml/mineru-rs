@@ -136,7 +136,7 @@ cargo install mineru
 mineru --help
 ```
 
-该软件包安装 `mineru` 和 `mineru-api` 二进制文件。若还要安装 `mineru-office-convert` 转换辅助程序，请使用 office 相关 feature 构建：
+该软件包安装 `mineru`、`mineru-api` 和 `mineru-office-convert` 三个二进制文件。转换能力按 feature 可选启用：
 
 ```sh
 cargo install mineru --features office          # docx/pptx/xlsx → PDF + VLM

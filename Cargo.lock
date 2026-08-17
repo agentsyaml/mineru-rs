@@ -3014,7 +3014,7 @@ dependencies = [
 
 [[package]]
 name = "mineru"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anydoc",
  "axum",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "mineru-node"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "mineru",
  "napi",
@@ -3068,7 +3068,7 @@ dependencies = [
 
 [[package]]
 name = "mineru-python"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "mineru",
  "pyo3",

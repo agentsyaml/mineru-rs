@@ -183,8 +183,8 @@ cargo install mineru
 mineru --help
 ```
 
-The package installs the `mineru` and `mineru-api` binaries. To also install
-the `mineru-office-convert` conversion helper, build with the office features:
+The package installs the `mineru`, `mineru-api`, and `mineru-office-convert`
+binaries. The conversion capabilities are opt-in features:
 
 ```sh
 cargo install mineru --features office          # docx/pptx/xlsx → PDF + VLM

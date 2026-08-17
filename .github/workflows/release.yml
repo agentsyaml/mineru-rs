@@ -120,7 +120,7 @@ jobs:
           cargo test --manifest-path "$RUNNER_TEMP/crate-unpacked/mineru-$VERSION/Cargo.toml" \
             --lib --locked -- --test-threads=1
           cargo install --path "$RUNNER_TEMP/crate-unpacked/mineru-$VERSION" --root "$RUNNER_TEMP/crate-install" \
-            --locked --features office --bins
+            --locked --features office,legacy-office --bins
           "$RUNNER_TEMP/crate-install/bin/mineru" --help
       - name: Upload crate evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -431,8 +431,8 @@ jobs:
               install -d -m 700 -o "$HOST_UID" -g "$HOST_GID" /tmp/mineru-home /tmp/mineru-cargo
               install -d -m 755 -o "$HOST_UID" -g "$HOST_GID" /workspace/target
               export HOME=/tmp/mineru-home CARGO_HOME=/tmp/mineru-cargo
-              setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo build --locked --release -p mineru --features office --bins --target "$TARGET"
-              setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo test --locked --release -p mineru --features office --target "$TARGET" --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+              setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo build --locked --release -p mineru --features office,legacy-office --bins --target "$TARGET"
+              setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo test --locked --release -p mineru --features office,legacy-office --target "$TARGET" --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
               chmod -R a+rX "/workspace/target/$TARGET/release"
               cd "/workspace/target/$TARGET/release"
               for binary in mineru mineru-api mineru-office-convert; do
@@ -451,7 +451,7 @@ jobs:
           rustup toolchain install 1.89.0 --profile minimal
           rustup default 1.89.0
           rustup target add ${{ matrix.target }}
-          cargo build --locked --release -p mineru --features office --bin mineru --bin mineru-office-convert --target ${{ matrix.target }}
+          cargo build --locked --release -p mineru --features office,legacy-office --bin mineru --bin mineru-office-convert --target ${{ matrix.target }}
       - name: Validate packaged binaries and Office helper E2E
         shell: bash
         env:
@@ -462,7 +462,7 @@ jobs:
           test "$("$bin/mineru${{ runner.os == 'Windows' && '.exe' || '' }}" --version)" = "mineru $VERSION"
           "$bin/mineru${{ runner.os == 'Windows' && '.exe' || '' }}" --help >/dev/null
           if [ "${{ runner.os }}" != Linux ]; then
-            cargo test --locked --release -p mineru --features office --target ${{ matrix.target }} --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+            cargo test --locked --release -p mineru --features office,legacy-office --target ${{ matrix.target }} --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
           fi
           if [ "${{ runner.os }}" == Linux ]; then
             for binary in mineru mineru-api mineru-office-convert; do

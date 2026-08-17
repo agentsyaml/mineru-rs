@@ -79,7 +79,7 @@ jobs:
         # Explicit feature set, not --all-features: the union of every optional
         # backend is not a single supported runtime configuration, so CI pins the
         # exact feature combo this runner is responsible for.
-        run: cargo +1.89.0 test --locked -p mineru --all-targets --features office -- --test-threads=4
+        run: cargo +1.89.0 test --locked -p mineru --all-targets --features office,legacy-office -- --test-threads=4
       - name: Run hermetic API process end-to-end tests
         run: |
           cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --ignored --test-threads=1
@@ -239,12 +239,13 @@ jobs:
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=4
       - name: Test Windows Office helper containment and conversion
         run: |
-          cargo +1.89.0 test --locked -p mineru --features office --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --features office --target x86_64-pc-windows-msvc --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --features office,legacy-office --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --features office,legacy-office --target x86_64-pc-windows-msvc --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+          cargo +1.89.0 test --locked -p mineru --features legacy-office --target x86_64-pc-windows-msvc --test legacy_office_convert_helper -- --test-threads=1
       - name: Check ARM64 Windows tests
         run: |
           cargo +1.89.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
-          cargo +1.89.0 check --locked -p mineru --features office --bin mineru-office-convert --target aarch64-pc-windows-msvc
+          cargo +1.89.0 check --locked -p mineru --features office,legacy-office --bin mineru-office-convert --target aarch64-pc-windows-msvc
 
   python-binding:
     name: Python 3.9 binding
