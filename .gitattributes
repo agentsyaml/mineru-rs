@@ -1,2 +1,3 @@
 *.pdf binary
 tests/fixtures/official/** whitespace=-trailing-space
+tests/fixtures/legacy/** -text
