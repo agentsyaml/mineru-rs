@@ -30,7 +30,7 @@ use std::{
 const WARNING_CAP: usize = 64;
 const TEXT_CAP: usize = 512;
 const FAILURE_CAP: usize = 4096;
-const ENV_NAMES: [&str; 93] = [
+const ENV_NAMES: [&str; 94] = [
     "MINERU_LOG_LEVEL",
     "MINERU_PROCESSING_WINDOW_SIZE",
     "MINERU_OFFICIAL_PAGE_CONCURRENCY",
@@ -121,6 +121,7 @@ const ENV_NAMES: [&str; 93] = [
     "MINERU_VLM_MAX_IMAGES_PER_REQUEST",
     "MINERU_VLM_MAX_REDIRECTS",
     "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES",
+    "MINERU_VLM_TEMPERATURE_RETRY",
     "TERM",
     "CI",
     "NO_COLOR",
@@ -801,6 +802,11 @@ fn remote_local_transport_error(
         "MINERU_VL_DEBUG_ENABLE",
         core.vlm_debug.is_some(),
     );
+    push(
+        "--temperature-retry",
+        "MINERU_VLM_TEMPERATURE_RETRY",
+        core.temperature_retry.is_some(),
+    );
     (!controls.is_empty()).then(|| {
         format!(
             "local VLM transport controls cannot configure a remote API server: {}",
@@ -1127,6 +1133,16 @@ pub struct Cli {
     max_redirects: Option<String>,
     #[arg(long)]
     http_max_response_bytes: Option<String>,
+    /// Retry buffered official PDF layout/semantic replies at warmer temperatures.
+    #[arg(
+        long,
+        action = ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        value_name = "true|false"
+    )]
+    temperature_retry: Option<bool>,
     #[arg(long)]
     vlm_debug: Option<bool>,
     #[arg(long, action = ArgAction::Set)]
@@ -1500,6 +1516,7 @@ fn cli_core_overrides(cli: &Cli) -> Result<env::CoreOverrides, String> {
     core.table = cli.table;
     core.image_analysis = cli.image_analysis;
     core.vlm_debug = cli.vlm_debug;
+    core.temperature_retry = cli.temperature_retry;
     Ok(core)
 }
 
@@ -1906,6 +1923,38 @@ mod tests {
         assert!(
             Cli::try_parse_from(["mineru", "-p", "a", "-o", "b", "--vlm-debug", "true"]).is_ok()
         );
+        assert!(
+            Cli::try_parse_from(["mineru", "-p", "a", "-o", "b", "--temperature-retry"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn temperature_retry_cli_forms_preserve_environment_precedence() {
+        let bare =
+            Cli::try_parse_from(["mineru", "-p", "a", "-o", "b", "--temperature-retry"]).unwrap();
+        assert_eq!(
+            cli_core_overrides(&bare).unwrap().temperature_retry,
+            Some(true)
+        );
+
+        let disabled =
+            Cli::try_parse_from(["mineru", "-p", "a", "-o", "b", "--temperature-retry=false"])
+                .unwrap();
+        assert_eq!(
+            cli_core_overrides(&disabled).unwrap().temperature_retry,
+            Some(false)
+        );
+
+        let absent = Cli::try_parse_from(["mineru", "-p", "a", "-o", "b"]).unwrap();
+        let absent = cli_core_overrides(&absent).unwrap();
+        assert_eq!(absent.temperature_retry, None);
+        let environment =
+            |name: &str| (name == "MINERU_VLM_TEMPERATURE_RETRY").then(|| OsString::from("true"));
+        assert!(env::resolve_temperature_retry(&environment, &absent).unwrap());
+        assert!(
+            !env::resolve_temperature_retry(&environment, &cli_core_overrides(&disabled).unwrap())
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1978,6 +2027,7 @@ mod tests {
             "32",
             "--http-max-response-bytes",
             "33",
+            "--temperature-retry",
         ])
         .unwrap();
         let core = cli_core_overrides(&cli).unwrap();
@@ -1994,6 +2044,7 @@ mod tests {
         assert_eq!(core.http_max_concurrency, Some(23));
         assert_eq!(core.http_retry_backoff_factor, Some(0.5));
         assert_eq!(core.max_decoded_pixels, Some(30));
+        assert_eq!(core.temperature_retry, Some(true));
         // The batch flag genuinely feeds the inference admission field.
         let resolved = env::resolve_core(|_| None, &core).unwrap();
         assert_eq!(resolved.route.max_requests_per_batch, 17);
@@ -2357,6 +2408,9 @@ mod tests {
                 "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES",
                 |c| c.http_max_response_bytes = Some(1024),
             ),
+            ("--temperature-retry", "MINERU_VLM_TEMPERATURE_RETRY", |c| {
+                c.temperature_retry = Some(false)
+            }),
             ("--vlm-debug", "MINERU_VL_DEBUG_ENABLE", |c| {
                 c.vlm_debug = Some(true)
             }),

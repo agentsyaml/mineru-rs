@@ -50,6 +50,7 @@ fn mineru() -> Command {
     command.env_remove("MINERU_VLM_MAX_IMAGES_PER_REQUEST");
     command.env_remove("MINERU_VLM_MAX_REDIRECTS");
     command.env_remove("MINERU_VLM_HTTP_MAX_RESPONSE_BYTES");
+    command.env_remove("MINERU_VLM_TEMPERATURE_RETRY");
     command.env_remove("MINERU_VL_DEBUG_ENABLE");
     command.env_remove("MINERU_OFFICE_FAKE_CHILD");
     command.env_remove("MINERU_OFFICE_FAKE_MODE");
@@ -358,6 +359,7 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
             "--log-level <LOG_LEVEL>",
             "--processing-window-size <PROCESSING_WINDOW_SIZE>",
             "--page-concurrency <PAGE_CONCURRENCY>",
+            "--concurrency-model <CONCURRENCY_MODEL>",
             "--render-workers <RENDER_WORKERS>",
             "--render-timeout-seconds <RENDER_TIMEOUT_SECONDS>",
             "--max-pdf-bytes <MAX_PDF_BYTES>",
@@ -386,6 +388,7 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
             "--max-images-per-request <MAX_IMAGES_PER_REQUEST>",
             "--max-redirects <MAX_REDIRECTS>",
             "--http-max-response-bytes <HTTP_MAX_RESPONSE_BYTES>",
+            "--temperature-retry[=<true|false>]",
             "--vlm-debug <VLM_DEBUG>",
             "--vlm-text-before-image <VLM_TEXT_BEFORE_IMAGE>",
             "--vlm-allow-truncated-content <VLM_ALLOW_TRUNCATED_CONTENT>",

@@ -798,10 +798,11 @@ impl VlmBackend {
         cap: usize,
         budget: Option<Arc<ByteBudget>>,
         deadline: tokio::time::Instant,
+        stage: &'static str,
     ) -> VlmResult<(String, usize, Vec<String>)> {
         let Self::Http(client) = self;
         client
-            .predict_official_budgeted(request, cap, budget, deadline)
+            .predict_official_budgeted_with_stage(request, cap, budget, deadline, stage)
             .await
     }
 
@@ -1065,6 +1066,7 @@ impl MinerUVlmClient {
                     self.image_config.max_response_bytes,
                     Some(raw_budget.clone()),
                     tokio::time::Instant::from_std(deadline),
+                    "layout",
                 )
                 .await?;
             drop(_permit);
@@ -1292,7 +1294,7 @@ impl MinerUVlmClient {
                             operation: "official PDF",
                             message: "layout semaphore closed".into(),
                         })?;
-                        match backend.predict_official_budgeted(request, max_response_bytes, Some(raw_budget), tokio::time::Instant::from_std(deadline)).await {
+                        match backend.predict_official_budgeted(request, max_response_bytes, Some(raw_budget), tokio::time::Instant::from_std(deadline), "semantic").await {
                             // Only parse-class (Protocol) malformation of the LLM reply degrades
                             // to empty content for this block. Resource/configuration failures and
                             // service failures (Http/Transport/Timeout) stay fatal so a wrong key
@@ -1646,6 +1648,7 @@ impl MinerUVlmClient {
                         max_response_bytes,
                         Some(raw_budget),
                         tokio::time::Instant::from_std(deadline),
+                        "semantic",
                     )
                     .await
                 {
@@ -1843,11 +1846,36 @@ impl MinerUVlmClient {
     }
 
     pub async fn connect(http: VlmHttpConfig, config: MinerUVlmConfig) -> VlmResult<Self> {
-        Self::connect_for_task(http, config, TaskWorkLease::default()).await
+        Self::connect_with_temperature_retry(http, config, false).await
     }
+
+    pub async fn connect_with_temperature_retry(
+        http: VlmHttpConfig,
+        config: MinerUVlmConfig,
+        temperature_retry: bool,
+    ) -> VlmResult<Self> {
+        Self::connect_for_task_with_temperature_retry(
+            http,
+            config,
+            temperature_retry,
+            TaskWorkLease::default(),
+        )
+        .await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn connect_for_task(
         http: VlmHttpConfig,
         config: MinerUVlmConfig,
+        task_work_lease: TaskWorkLease,
+    ) -> VlmResult<Self> {
+        Self::connect_for_task_with_temperature_retry(http, config, false, task_work_lease).await
+    }
+
+    pub(crate) async fn connect_for_task_with_temperature_retry(
+        http: VlmHttpConfig,
+        config: MinerUVlmConfig,
+        temperature_retry: bool,
         task_work_lease: TaskWorkLease,
     ) -> VlmResult<Self> {
         // The tokio semaphore capacity is a legitimate representability bound. An impossible
@@ -1873,7 +1901,12 @@ impl MinerUVlmClient {
         let image_config = Arc::new(http.clone());
         Ok(Self {
             backend: VlmBackend::Http(
-                VlmHttpClient::connect_for_task(http, task_work_lease.clone()).await?,
+                VlmHttpClient::connect_for_task_with_temperature_retry(
+                    http,
+                    temperature_retry,
+                    task_work_lease.clone(),
+                )
+                .await?,
             ),
             image_config,
             max_decoded_pixels,

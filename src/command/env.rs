@@ -43,6 +43,7 @@ pub struct CoreOverrides {
     pub http_keepalive_expiry: Option<Duration>,
     pub http_max_retries: Option<usize>,
     pub http_retry_backoff_factor: Option<f32>,
+    pub temperature_retry: Option<bool>,
     pub max_remote_image_bytes: Option<usize>,
     pub max_decoded_pixels: Option<u64>,
     pub max_images_per_request: Option<usize>,
@@ -162,6 +163,10 @@ pub fn parse_core_overrides(
         http_retry_backoff_factor: finite_nonnegative_f32(
             lookup("MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR"),
             "MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR",
+        )?,
+        temperature_retry: temperature_retry_bool(
+            lookup("MINERU_VLM_TEMPERATURE_RETRY"),
+            "MINERU_VLM_TEMPERATURE_RETRY",
         )?,
         max_remote_image_bytes: positive_usize(
             lookup("MINERU_VLM_MAX_IMAGE_BYTES"),
@@ -347,6 +352,17 @@ fn apply_core(
     Ok(())
 }
 
+pub fn resolve_temperature_retry(
+    lookup: &impl Fn(&str) -> Option<OsString>,
+    cli: &CoreOverrides,
+) -> Result<bool, String> {
+    let environment = temperature_retry_bool(
+        lookup("MINERU_VLM_TEMPERATURE_RETRY"),
+        "MINERU_VLM_TEMPERATURE_RETRY",
+    )?;
+    Ok(cli.temperature_retry.or(environment).unwrap_or(false))
+}
+
 fn validate_http(http: &VlmHttpConfig) -> Result<(), String> {
     if http.max_concurrency == 0 || http.max_concurrency > tokio::sync::Semaphore::MAX_PERMITS {
         return Err(
@@ -517,6 +533,22 @@ pub(crate) fn finite_nonnegative_f32(
     Ok(Some(number))
 }
 
+/// Opt-in boolean grammar for the temperature retry knob. `1` is accepted because this setting is
+/// commonly enabled from container environments; `0`, `true`, and `false` remain explicit.
+fn temperature_retry_bool(value: Option<OsString>, name: &str) -> Result<Option<bool>, String> {
+    let Some(value) = value else { return Ok(None) };
+    let text = value
+        .to_str()
+        .ok_or_else(|| format!("{name} must be 0, 1, true, or false"))?
+        .trim()
+        .to_ascii_lowercase();
+    match text.as_str() {
+        "1" | "true" => Ok(Some(true)),
+        "0" | "false" => Ok(Some(false)),
+        _ => Err(format!("{name} must be 0, 1, true, or false")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +595,7 @@ mod tests {
             ("MINERU_VLM_HTTP_KEEPALIVE_EXPIRY", "15"),
             ("MINERU_VLM_HTTP_MAX_RETRIES", "0"),
             ("MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR", "0.25"),
+            ("MINERU_VLM_TEMPERATURE_RETRY", "1"),
             ("MINERU_VLM_MAX_IMAGE_BYTES", "1048576"),
             ("MINERU_VLM_MAX_DECODED_PIXELS", "100000000"),
             ("MINERU_VLM_MAX_IMAGES_PER_REQUEST", "16"),
@@ -606,6 +639,7 @@ mod tests {
         );
         assert_eq!(overrides.http_max_retries, Some(0));
         assert_eq!(overrides.http_retry_backoff_factor, Some(0.25));
+        assert_eq!(overrides.temperature_retry, Some(true));
         assert_eq!(overrides.max_remote_image_bytes, Some(1_048_576));
         assert_eq!(overrides.max_decoded_pixels, Some(100_000_000));
         assert_eq!(overrides.max_images_per_request, Some(16));
@@ -648,6 +682,7 @@ mod tests {
             ("MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR", "NaN"),
             ("MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR", "inf"),
             ("MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR", "-0.5"),
+            ("MINERU_VLM_TEMPERATURE_RETRY", "maybe"),
             ("MINERU_VLM_MAX_IMAGE_BYTES", "0"),
             ("MINERU_VLM_MAX_DECODED_PIXELS", "0"),
             ("MINERU_VLM_MAX_IMAGES_PER_REQUEST", "0"),
@@ -730,6 +765,25 @@ mod tests {
         };
         let resolved = resolve_core(|_| None, &cli).unwrap();
         assert_eq!(resolved.concurrency_model, ConcurrencyModel::Classic);
+    }
+
+    #[test]
+    fn temperature_retry_resolves_without_mutating_http_config() {
+        let environment = lookup_map(&[("MINERU_VLM_TEMPERATURE_RETRY", "true")]);
+        assert!(resolve_temperature_retry(&environment, &CoreOverrides::default()).unwrap());
+        let cli = CoreOverrides {
+            temperature_retry: Some(false),
+            ..Default::default()
+        };
+        assert!(!resolve_temperature_retry(&environment, &cli).unwrap());
+        assert!(!resolve_temperature_retry(&|_| None, &CoreOverrides::default()).unwrap());
+        assert!(
+            resolve_temperature_retry(
+                &lookup_map(&[("MINERU_VLM_TEMPERATURE_RETRY", "bad")]),
+                &CoreOverrides::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]

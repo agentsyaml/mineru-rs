@@ -178,13 +178,14 @@ VLM transport knobs (each also has an environment spelling):
 | `--max-images-per-request <n>` | `64` | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` |
 | `--max-redirects <n>` | `3` | `MINERU_VLM_MAX_REDIRECTS` |
 | `--http-max-response-bytes <n>` | `10485760` | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` |
+| `--temperature-retry[=<true\|false>]` | Off | Opt-in quality retry for buffered official PDF layout/semantic requests: keeps the base temperature first, then adds `0.2` per retry up to `1.0`. Retry bodies only widen existing positive `top_k` to at least `40` and `top_p` to at least `0.9`; omitted fields and `top_k<=0` unlimited values are left untouched. Bare `--temperature-retry` means `true`, explicit `=false` overrides `MINERU_VLM_TEMPERATURE_RETRY`, and an omitted CLI flag preserves the environment value. It does not affect ordinary `predict`, batch, streaming, legacy-office, or API-form requests. |
 | `--vlm-debug <true\|false>` | `false` | Sends `vllm_xargs.debug` in the VLM request body. Overrides `MINERU_VL_DEBUG_ENABLE`. |
 
 Diagnostic/human-output truncation caps remain compiled and are not configurable. The existing `--max-input-bytes`, `--max-encoded-document-bytes`, and `--max-output-bytes` pairs are unchanged.
 
 In direct mode, non-default values for `--method`, `--effort`, and `--lang` produce a warning and are ignored. `--client-side-output-generation=true` is rejected in API mode.
 
-In API mode, the local VLM transport knobs (`--page-concurrency`, `--concurrency-model`, `--processing-window-size`, `--render-*`, `--batch-size`, all `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--vlm-debug` and their environment spellings) fail explicitly, because the remote server performs parsing and those controls would have no consumer; `MINERU_VL_SERVER` is submitted as the per-task `server_url` when `--url` is absent.
+In API mode, the local VLM transport knobs (`--page-concurrency`, `--concurrency-model`, `--processing-window-size`, `--render-*`, `--batch-size`, all `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--temperature-retry`/`--vlm-debug` and their environment spellings) fail explicitly, because the remote server performs parsing and those controls would have no consumer; `MINERU_VL_SERVER` is submitted as the per-task `server_url` when `--url` is absent.
 
 ---
 
@@ -313,6 +314,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` | `64` | Images per request cap. |
 | `MINERU_VLM_MAX_REDIRECTS` | `3` | Redirect cap. |
 | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP response cap. |
+| `MINERU_VLM_TEMPERATURE_RETRY` | Off | Accepts `1`/`true` to enable (or `0`/`false` to disable) buffered official PDF layout/semantic quality retries. The base temperature is sent first, then retries use `+0.2` up to `1.0`; the setting has its own retry budget and shares the official deadline and response-byte budget. |
 | `MINERU_VLM_TEXT_BEFORE_IMAGE` | Off | Place text before the image in the request. |
 | `MINERU_VLM_ALLOW_TRUNCATED_CONTENT` | Off | Accept truncated VLM response content. |
 | `MINERU_VLM_ALLOW_REMOTE_IMAGES` | Off | Allow fetching images by remote URL. |
@@ -327,7 +329,7 @@ Prefix note: `MINERU_VL_*` is the legacy prefix (core VLM service-connection
 settings such as the server URL, model ID, and API key); new transport knobs
 uniformly use the `MINERU_VLM_*` prefix.
 
-For the canonical CLI, every numeric and boolean variable is strict: booleans accept only case-insensitive `true`/`false` (`1`, `yes`, `on` now fail instead of silently meaning off); malformed, non-finite, zero-where-invalid, overflowing, or unrepresentable numeric values fail before any network or output work rather than falling back. (Exception: only the three server booleans `MINERU_API_PUBLIC_BIND_EXPOSED` / `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` / `MINERU_API_SHUTDOWN_ON_STDIN_EOF` still accept `1`/`true`/`yes`/`on`.)
+For the canonical CLI, every numeric and boolean variable is strict: booleans accept only case-insensitive `true`/`false` (`1`, `yes`, `on` now fail instead of silently meaning off); `MINERU_VLM_TEMPERATURE_RETRY` additionally accepts `0`/`1` for this opt-in switch. Malformed, non-finite, zero-where-invalid, overflowing, or unrepresentable numeric values fail before any network or output work rather than falling back. (Exception: the three server booleans `MINERU_API_PUBLIC_BIND_EXPOSED` / `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` / `MINERU_API_SHUTDOWN_ON_STDIN_EOF` still accept `1`/`true`/`yes`/`on`.)
 
 ### HTTP interface
 

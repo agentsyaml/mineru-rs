@@ -483,7 +483,12 @@ async fn stage_window(
         let (snapshot, cleaned, _raw, _encoded, warnings) =
             snapshots.next().expect("snapshots match rendered pages");
         for warning in warnings {
-            crate::progress_events::emit(events, ProgressEvent::VlmWarning { message: warning });
+            crate::progress_events::emit(
+                events,
+                ProgressEvent::VlmWarning {
+                    message: official_vlm_warning(stem, page.index, warning),
+                },
+            );
         }
 
         let preview_page = PageResult {
@@ -580,6 +585,10 @@ async fn stage_window(
         );
     }
     Ok(StagedWindow { stage, completed })
+}
+
+fn official_vlm_warning(document: &str, page_index: usize, warning: String) -> String {
+    format!("document={document} page={page_index} {warning}")
 }
 
 /// Stages one page whose render failed: an empty preview page plus a minimal blank prepared

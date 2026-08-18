@@ -155,6 +155,7 @@ fn main() -> ExitCode {
         .concurrency_model(env.concurrency_model)
         .document_limits(env.document_limits)
         .http_config(env.http)
+        .temperature_retry(env.temperature_retry)
         .image_analysis(env.image_analysis)
         .public_policy(env.public_bind_exposed, env.allow_public_http_client)
         .task_lifecycle(
@@ -250,6 +251,7 @@ struct StartupEnv {
     shutdown_on_stdin_eof: bool,
     route: mineru::OfficialPdfOptions,
     http: mineru::VlmHttpConfig,
+    temperature_retry: bool,
     formula: Option<bool>,
     table: Option<bool>,
     image_analysis: Option<bool>,
@@ -261,7 +263,7 @@ struct StartupEnv {
 /// timing, API transport timing, result-archive entries/ratio) are not read here; no worker may
 /// re-read a drifting process environment after startup. The VLM transport identity names are
 /// consumed as the frozen base `VlmHttpConfig` resolved at startup.
-const CONSUMED_NAMES: [&str; 85] = [
+const CONSUMED_NAMES: [&str; 86] = [
     "MINERU_API_OUTPUT_ROOT",
     "MINERU_API_MAX_CONCURRENT_REQUESTS",
     "MINERU_API_PUBLIC_BIND_EXPOSED",
@@ -312,6 +314,7 @@ const CONSUMED_NAMES: [&str; 85] = [
     "MINERU_VLM_MAX_IMAGES_PER_REQUEST",
     "MINERU_VLM_MAX_REDIRECTS",
     "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES",
+    "MINERU_VLM_TEMPERATURE_RETRY",
     "MINERU_MAX_INPUT_BYTES",
     "MINERU_MAX_ENCODED_DOCUMENT_BYTES",
     "MINERU_MAX_OUTPUT_BYTES",
@@ -389,6 +392,7 @@ fn startup_config(args: &Args) -> Result<StartupEnv, String> {
         &lookup,
     )?;
     let core = mineru::command::env::resolve_core(&lookup, &core_cli)?;
+    let temperature_retry = mineru::command::env::resolve_temperature_retry(&lookup, &core_cli)?;
     let service = service::resolve_service(&lookup, &service_cli, document_limits)?;
     Ok(StartupEnv {
         output_root: args
@@ -425,6 +429,7 @@ fn startup_config(args: &Args) -> Result<StartupEnv, String> {
         ) || args.shutdown_on_stdin_eof,
         route: core.route,
         http: core.http,
+        temperature_retry,
         formula: env_or_cli_bool(&frozen, core_cli.formula, "MINERU_FORMULA_ENABLE")?,
         table: env_or_cli_bool(&frozen, core_cli.table, "MINERU_TABLE_ENABLE")?,
         image_analysis: env_or_cli_bool(
@@ -1055,6 +1060,7 @@ mod tests {
                 ("MINERU_VL_MODEL_NAME", "frozen-model"),
                 ("MINERU_VL_API_KEY", "frozen-key"),
                 ("MINERU_VLM_END_TOKEN", "frozen-end"),
+                ("MINERU_VLM_TEMPERATURE_RETRY", "true"),
             ],
             &args(&[]),
         )
@@ -1066,6 +1072,7 @@ mod tests {
         assert_eq!(env.http.model_name.as_deref(), Some("frozen-model"));
         assert_eq!(env.http.api_key.as_deref(), Some("frozen-key"));
         assert_eq!(env.http.end_token, "frozen-end");
+        assert!(env.temperature_retry);
     }
 
     #[test]

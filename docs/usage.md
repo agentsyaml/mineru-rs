@@ -175,13 +175,14 @@ VLM 传输旋钮（每个都有对应的环境拼写）：
 | `--max-images-per-request <n>` | `64` | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` |
 | `--max-redirects <n>` | `3` | `MINERU_VLM_MAX_REDIRECTS` |
 | `--http-max-response-bytes <n>` | `10485760` | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` |
+| `--temperature-retry[=<true\|false>]` | 关闭 | 仅对可完整缓冲的 official PDF layout/semantic 请求启用质量重试：先使用基础温度，之后每次 `+0.2`，上限 `1.0`。升温重试 body 仅将已存在的正数 `top_k` 放宽到至少 `40`、`top_p` 放宽到至少 `0.9`；不添加缺失字段或改写 `top_k<=0` 的不限值。`--temperature-retry` 等同于 `true`，显式 `=false` 覆盖 `MINERU_VLM_TEMPERATURE_RETRY`；未提供 CLI 值时沿用环境变量。不影响普通 `predict`、批量、流式、legacy-office 或 API 表单请求。 |
 | `--vlm-debug <true\|false>` | `false` | 在 VLM 请求体中发送 `vllm_xargs.debug`。覆盖 `MINERU_VL_DEBUG_ENABLE`。 |
 
 诊断/人类输出截断上限保持编译固定、不可配置。现有 `--max-input-bytes`、`--max-encoded-document-bytes`、`--max-output-bytes` 三组不变。
 
 直接模式下 `--method`、`--effort`、`--lang` 的非默认值会产生警告并被忽略。`--client-side-output-generation=true` 在 API 模式下会被拒绝。
 
-API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--concurrency-model`、`--processing-window-size`、`--render-*`、`--batch-size`、全部 `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--vlm-debug` 及其环境拼写）会显式报错，因为远程服务器执行解析、这些配置不会有任何消费者；`MINERU_VL_SERVER` 在未传 `--url` 时作为任务级 `server_url` 提交。
+API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--concurrency-model`、`--processing-window-size`、`--render-*`、`--batch-size`、全部 `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--temperature-retry`/`--vlm-debug` 及其环境拼写）会显式报错，因为远程服务器执行解析、这些配置不会有任何消费者；`MINERU_VL_SERVER` 在未传 `--url` 时作为任务级 `server_url` 提交。
 
 ---
 
@@ -309,6 +310,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` | `64` | 每请求图像数上限。 |
 | `MINERU_VLM_MAX_REDIRECTS` | `3` | 重定向上限。 |
 | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP 响应上限。 |
+| `MINERU_VLM_TEMPERATURE_RETRY` | 关闭 | 取值 `1`/`true` 开启（`0`/`false` 关闭）可完整缓冲的 official PDF layout/semantic 质量重试。先发基础温度，之后每次 `+0.2`，上限 `1.0`；使用独立重试预算，并共享 official deadline 与响应字节预算。 |
 | `MINERU_VLM_TEXT_BEFORE_IMAGE` | 关闭 | 请求中文本置于图像之前。 |
 | `MINERU_VLM_ALLOW_TRUNCATED_CONTENT` | 关闭 | 允许截断的 VLM 响应内容。 |
 | `MINERU_VLM_ALLOW_REMOTE_IMAGES` | 关闭 | 允许按 URL 拉取远程图像。 |
@@ -321,7 +323,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 
 前缀说明：`MINERU_VL_*` 为遗留前缀（VLM 服务连接核心配置：服务地址、模型 ID、API 密钥），新的传输旋钮统一使用 `MINERU_VLM_*` 前缀。
 
-对规范 CLI，每个数值与布尔变量均为严格解析：布尔只接受不区分大小写的 `true`/`false`（`1`、`yes`、`on` 会报错，不再静默视为关闭）；数值的非法、非有限、不应为零却为零、溢出或平台不可表示的值会在任何网络/输出工作前失败，不再回落到默认值。（例外：仅 `MINERU_API_PUBLIC_BIND_EXPOSED` / `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` / `MINERU_API_SHUTDOWN_ON_STDIN_EOF` 三个服务端布尔仍接受 `1`/`true`/`yes`/`on`。）
+对规范 CLI，每个数值与布尔变量均为严格解析：布尔只接受不区分大小写的 `true`/`false`（`1`、`yes`、`on` 会报错，不再静默视为关闭）；`MINERU_VLM_TEMPERATURE_RETRY` 这个 opt-in 开关额外接受 `0`/`1`。数值的非法、非有限、不应为零却为零、溢出或平台不可表示的值会在任何网络/输出工作前失败，不再回落到默认值。（例外：三个服务端布尔 `MINERU_API_PUBLIC_BIND_EXPOSED` / `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` / `MINERU_API_SHUTDOWN_ON_STDIN_EOF` 仍接受 `1`/`true`/`yes`/`on`。）
 
 ### HTTP 接口
 

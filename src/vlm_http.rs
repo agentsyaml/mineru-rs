@@ -78,6 +78,7 @@ impl futures_core::Stream for FailFastBatch {
 #[derive(Clone)]
 pub struct VlmHttpClient {
     config: Arc<VlmHttpConfig>,
+    temperature_retry: bool,
     http: Client,
     base: Url,
     model: String,
@@ -93,11 +94,24 @@ impl std::fmt::Debug for VlmHttpClient {
 
 impl VlmHttpClient {
     pub async fn connect(config: VlmHttpConfig) -> VlmResult<Self> {
-        Self::connect_for_task(config, TaskWorkLease::default()).await
+        Self::connect_with_temperature_retry(config, false).await
     }
 
-    pub(crate) async fn connect_for_task(
+    pub async fn connect_with_temperature_retry(
         config: VlmHttpConfig,
+        temperature_retry: bool,
+    ) -> VlmResult<Self> {
+        Self::connect_for_task_with_temperature_retry(
+            config,
+            temperature_retry,
+            TaskWorkLease::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_for_task_with_temperature_retry(
+        config: VlmHttpConfig,
+        temperature_retry: bool,
         task_work_lease: TaskWorkLease,
     ) -> VlmResult<Self> {
         if config.invalid_server_url {
@@ -121,6 +135,7 @@ impl VlmHttpClient {
         let http = builder.build().map_err(|e| transport("connect", &e))?;
         let client = Self {
             config: Arc::new(config),
+            temperature_retry,
             http,
             base,
             model: String::new(),
@@ -157,12 +172,25 @@ impl VlmHttpClient {
     pub async fn predict(&self, request: VlmRequest) -> VlmResult<String> {
         self.complete(request, false).await
     }
+    #[cfg(test)]
     pub(crate) async fn predict_official_budgeted(
         &self,
         request: VlmRequest,
         cap: usize,
         budget: Option<Arc<ByteBudget>>,
         deadline: tokio::time::Instant,
+    ) -> VlmResult<(String, usize, Vec<String>)> {
+        self.predict_official_budgeted_with_stage(request, cap, budget, deadline, "official")
+            .await
+    }
+
+    pub(crate) async fn predict_official_budgeted_with_stage(
+        &self,
+        request: VlmRequest,
+        cap: usize,
+        budget: Option<Arc<ByteBudget>>,
+        deadline: tokio::time::Instant,
+        quality_stage: &'static str,
     ) -> VlmResult<(String, usize, Vec<String>)> {
         let config = self.config.clone();
         let model = self.model.clone();
@@ -189,7 +217,7 @@ impl VlmHttpClient {
         let body = json_body(body, Some(deadline), &self.task_work_lease).await?;
         tokio::time::timeout_at(
             deadline,
-            self.complete_limited(body, cap, budget, Some(deadline), true),
+            self.complete_limited(body, cap, budget, Some(deadline), true, Some(quality_stage)),
         )
         .await
         .map_err(|_| VlmError::Timeout {
@@ -292,9 +320,16 @@ impl VlmHttpClient {
         // surface as protocol errors instead of silently empty strings. The official route
         // degrades them via `predict_official_budgeted`.
         let body = json_body(self.body(r, streaming).await?, None, &self.task_work_lease).await?;
-        self.complete_limited(body, self.config.max_response_bytes, None, None, false)
-            .await
-            .map(|x| x.0)
+        self.complete_limited(
+            body,
+            self.config.max_response_bytes,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .map(|x| x.0)
     }
     async fn complete_limited(
         &self,
@@ -303,47 +338,119 @@ impl VlmHttpClient {
         budget: Option<Arc<ByteBudget>>,
         deadline: Option<tokio::time::Instant>,
         degrade: bool,
+        quality_stage: Option<&'static str>,
     ) -> VlmResult<(String, usize, Vec<String>)> {
-        let mut retries_used = 0;
-        let (v, bytes) = self
-            .send_json_limited(
-                "chat",
-                self.url("chat/completions")?,
-                Some(body.clone()),
-                cap,
-                budget.clone(),
-                deadline,
-                &mut retries_used,
+        let quality_enabled = degrade && self.temperature_retry && quality_stage.is_some();
+        let base_temperature = if quality_enabled {
+            let body = body.clone();
+            Some(
+                json_worker(deadline, "chat", &self.task_work_lease, move || {
+                    Ok(body_temperature(&body))
+                })
+                .await?,
             )
-            .await?;
-        let total_bytes = bytes;
-        let (text, warnings) = if deadline.is_some() {
-            let allow_truncated_content = self.config.allow_truncated_content;
-            let end_token = self.config.end_token.clone();
-            json_worker(deadline, "chat", &self.task_work_lease, move || {
-                let mut warnings = Vec::new();
+        } else {
+            None
+        }
+        .flatten();
+        let mut request_body = body;
+        let mut total_bytes: usize = 0;
+        let mut quality_retries = 0;
+        let mut warnings = Vec::new();
+        loop {
+            if let Some(deadline) = deadline
+                && tokio::time::Instant::now() >= deadline
+            {
+                return Err(VlmError::Timeout {
+                    operation: "official PDF",
+                });
+            }
+            let mut transport_retries_used = 0;
+            let (v, bytes) = self
+                .send_json_limited(
+                    "chat",
+                    self.url("chat/completions")?,
+                    Some(request_body.clone()),
+                    cap,
+                    budget.clone(),
+                    deadline,
+                    &mut transport_retries_used,
+                )
+                .await?;
+            total_bytes = total_bytes.saturating_add(bytes);
+            let (text, response_warnings) = if deadline.is_some() {
+                let allow_truncated_content = self.config.allow_truncated_content;
+                let end_token = self.config.end_token.clone();
+                json_worker(deadline, "chat", &self.task_work_lease, move || {
+                    let mut response_warnings = Vec::new();
+                    let text = completion_text(
+                        v,
+                        allow_truncated_content,
+                        &end_token,
+                        &mut response_warnings,
+                        degrade,
+                    )?;
+                    Ok((text, response_warnings))
+                })
+                .await?
+            } else {
+                let mut response_warnings = Vec::new();
                 let text = completion_text(
                     v,
-                    allow_truncated_content,
-                    &end_token,
-                    &mut warnings,
+                    self.config.allow_truncated_content,
+                    &self.config.end_token,
+                    &mut response_warnings,
                     degrade,
                 )?;
-                Ok((text, warnings))
-            })
-            .await?
-        } else {
-            let mut warnings = Vec::new();
-            let text = completion_text(
-                v,
-                self.config.allow_truncated_content,
-                &self.config.end_token,
-                &mut warnings,
-                degrade,
-            )?;
-            (text, warnings)
-        };
-        Ok((text, total_bytes, warnings))
+                (text, response_warnings)
+            };
+            warnings.extend(
+                response_warnings
+                    .into_iter()
+                    .map(|warning| stage_warning(quality_stage, warning)),
+            );
+            let Some(reason) = quality_enabled
+                .then(|| quality_failure(&text, quality_stage.expect("quality stage is present")))
+                .flatten()
+            else {
+                return Ok((text, total_bytes, warnings));
+            };
+            let Some(base_temperature) = base_temperature else {
+                return Ok((text, total_bytes, warnings));
+            };
+            let Some(next_temperature) = next_retry_temperature(base_temperature, quality_retries)
+            else {
+                return Ok((text, total_bytes, warnings));
+            };
+            if let Some(deadline) = deadline
+                && tokio::time::Instant::now() >= deadline
+            {
+                return Err(VlmError::Timeout {
+                    operation: "official PDF",
+                });
+            }
+            let next_body = self
+                .temperature_body(request_body.clone(), next_temperature, deadline)
+                .await?;
+            warnings.push(stage_warning(
+                quality_stage,
+                format!("temperature retry: temperature={next_temperature:.1} quality={reason}"),
+            ));
+            request_body = next_body;
+            quality_retries = quality_retries.saturating_add(1);
+        }
+    }
+
+    async fn temperature_body(
+        &self,
+        body: Bytes,
+        temperature: f32,
+        deadline: Option<tokio::time::Instant>,
+    ) -> VlmResult<Bytes> {
+        json_worker(deadline, "chat", &self.task_work_lease, move || {
+            replace_temperature(body, temperature)
+        })
+        .await
     }
     fn url(&self, suffix: &str) -> VlmResult<Url> {
         let mut u = self.base.clone();
@@ -702,6 +809,160 @@ impl VlmHttpClient {
         }
     }
 }
+const TEMPERATURE_RETRY_STEP: f32 = 0.2;
+const TEMPERATURE_RETRY_MAX: f32 = 1.0;
+const MAX_TEMPERATURE_RETRIES: usize = 5;
+// Retry-only sampling floors: widen restrictive values without inventing omitted fields or
+// replacing server-specific unlimited top_k values (0 and negative values).
+const TEMPERATURE_RETRY_MIN_TOP_K: i64 = 40;
+const TEMPERATURE_RETRY_MIN_TOP_P: f64 = 0.9;
+// This bounds only the repetition quality heuristic's UTF-8-safe prefix and scratch table;
+// it does not change the response/HTTP byte cap. Repetition after this prefix may be missed.
+const MAX_REPEATED_FRAGMENT_SCAN_BYTES: usize = 16 * 1024;
+const MIN_REPEATED_FRAGMENT_CHARS: usize = 8;
+const REPEATED_FRAGMENT_COUNT: usize = 3;
+const MIN_REPEATED_TOKEN_CHARS: usize = 8;
+const REPEATED_TOKEN_COUNT: usize = 6;
+const MIN_REPEATED_LINE_CHARS: usize = 8;
+const REPEATED_LINE_COUNT: usize = 4;
+
+/// Conservative quality guard for official buffered completions. Short text is
+/// deliberately exempt: only whitespace, replacement characters, non-whitespace controls, or
+/// repetitions crossing the documented thresholds fail.
+fn quality_failure(text: &str, stage: &str) -> Option<&'static str> {
+    if stage != "layout" && text.trim().is_empty() {
+        return Some("blank");
+    }
+    if text.contains('\u{FFFD}') {
+        return Some("replacement-character");
+    }
+    if text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Some("control-character");
+    }
+    if repeated_whole_fragment(text) || repeated_tokens(text) || repeated_lines(text) {
+        return Some("repetition");
+    }
+    None
+}
+
+fn repeated_whole_fragment(text: &str) -> bool {
+    let trimmed = text.trim();
+    let mut scan_len = trimmed.len().min(MAX_REPEATED_FRAGMENT_SCAN_BYTES);
+    while !trimmed.is_char_boundary(scan_len) {
+        scan_len -= 1;
+    }
+    let bytes = &trimmed.as_bytes()[..scan_len];
+    if bytes.len() < MIN_REPEATED_FRAGMENT_CHARS * REPEATED_FRAGMENT_COUNT {
+        return false;
+    }
+    let mut prefix = [0usize; MAX_REPEATED_FRAGMENT_SCAN_BYTES];
+    for index in 1..bytes.len() {
+        let mut length = prefix[index - 1];
+        while length > 0 && bytes[index] != bytes[length] {
+            length = prefix[length - 1];
+        }
+        if bytes[index] == bytes[length] {
+            length += 1;
+        }
+        prefix[index] = length;
+    }
+    let period = bytes.len() - prefix[bytes.len() - 1];
+    trimmed.is_char_boundary(period)
+        && trimmed[..period].chars().count() >= MIN_REPEATED_FRAGMENT_CHARS
+        && bytes.len() / period >= REPEATED_FRAGMENT_COUNT
+}
+
+fn stage_warning(stage: Option<&'static str>, warning: String) -> String {
+    match stage {
+        Some(stage) => format!("stage={stage} {warning}"),
+        None => warning,
+    }
+}
+
+fn repeated_tokens(text: &str) -> bool {
+    let mut previous = None;
+    let mut run = 0;
+    for token in text.split_whitespace() {
+        let long_enough = token.chars().count() >= MIN_REPEATED_TOKEN_CHARS;
+        if long_enough && previous == Some(token) {
+            run += 1;
+        } else {
+            run = usize::from(long_enough);
+        }
+        if run >= REPEATED_TOKEN_COUNT {
+            return true;
+        }
+        previous = long_enough.then_some(token);
+    }
+    false
+}
+
+fn repeated_lines(text: &str) -> bool {
+    let mut previous = None;
+    let mut run = 0;
+    for line in text.lines() {
+        let line = line.trim();
+        let long_enough = line.chars().count() >= MIN_REPEATED_LINE_CHARS;
+        if long_enough && previous == Some(line) {
+            run += 1;
+        } else {
+            run = usize::from(long_enough);
+        }
+        if run >= REPEATED_LINE_COUNT {
+            return true;
+        }
+        previous = long_enough.then_some(line);
+    }
+    false
+}
+
+fn body_temperature(body: &Bytes) -> Option<f32> {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| body.get("temperature").and_then(Value::as_f64))
+        .map(|temperature| temperature as f32)
+        .filter(|temperature| temperature.is_finite())
+}
+
+fn next_retry_temperature(base: f32, retries_used: usize) -> Option<f32> {
+    if !(0.0..TEMPERATURE_RETRY_MAX).contains(&base) || retries_used >= MAX_TEMPERATURE_RETRIES {
+        return None;
+    }
+    let current = (base + retries_used as f32 * TEMPERATURE_RETRY_STEP).min(TEMPERATURE_RETRY_MAX);
+    if current >= TEMPERATURE_RETRY_MAX {
+        return None;
+    }
+    let step = retries_used.saturating_add(1) as f32 * TEMPERATURE_RETRY_STEP;
+    Some((base + step).min(TEMPERATURE_RETRY_MAX)).filter(|temperature| *temperature > current)
+}
+
+fn replace_temperature(body: Bytes, temperature: f32) -> VlmResult<Bytes> {
+    let mut value: Value = serde_json::from_slice(&body)
+        .map_err(|_| protocol("chat", "request JSON serialization failed"))?;
+    value["temperature"] = json!(temperature);
+    widen_sampling_for_retry(&mut value);
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|_| protocol("chat", "request JSON serialization failed"))
+}
+
+fn widen_sampling_for_retry(body: &mut Value) {
+    if let Some(top_k) = body.get("top_k").and_then(Value::as_i64)
+        && top_k > 0
+        && top_k < TEMPERATURE_RETRY_MIN_TOP_K
+    {
+        body["top_k"] = json!(TEMPERATURE_RETRY_MIN_TOP_K);
+    }
+    if let Some(top_p) = body.get("top_p").and_then(Value::as_f64)
+        && top_p < TEMPERATURE_RETRY_MIN_TOP_P
+    {
+        body["top_p"] = json!(TEMPERATURE_RETRY_MIN_TOP_P);
+    }
+}
+
 fn completion_text(
     mut response: Value,
     allow_truncated_content: bool,
@@ -1325,22 +1586,28 @@ fn sse_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        ByteBudget, VlmHttpClient, build_body, completion_text, global, json_worker,
-        model_candidates, retry_after_hint, retry_backoff, strip_end,
+        ByteBudget, MAX_REPEATED_FRAGMENT_SCAN_BYTES, TEMPERATURE_RETRY_MIN_TOP_K,
+        TEMPERATURE_RETRY_MIN_TOP_P, VlmHttpClient, build_body, completion_text, global,
+        json_worker, model_candidates, next_retry_temperature, quality_failure,
+        repeated_whole_fragment, replace_temperature, retry_after_hint, retry_backoff, strip_end,
     };
     use crate::{
         SamplingParams, TaskWorkLease, VlmError, VlmHttpConfig, VlmImageInput, VlmRequest,
         vlm_image::admit_local,
     };
-    use axum::{Router, routing::post};
+    use axum::{Json, Router, http::StatusCode, routing::post};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use bytes::Bytes;
     use image::{DynamicImage, ImageFormat};
     use reqwest::Client;
+    use serde_json::{Value, json};
     use std::{
         io::Cursor,
         net::{IpAddr, Ipv4Addr},
-        sync::Arc,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, SystemTime},
     };
     use url::Url;
@@ -1366,6 +1633,151 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    async fn official_sequence_client(
+        replies: Vec<Value>,
+        temperature_retry: bool,
+    ) -> (VlmHttpClient, Arc<Mutex<Vec<Value>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let remaining = Arc::new(Mutex::new(replies));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let requests = Arc::clone(&requests);
+                let remaining = Arc::clone(&remaining);
+                move |Json(request): Json<Value>| {
+                    let requests = Arc::clone(&requests);
+                    let remaining = Arc::clone(&remaining);
+                    async move {
+                        requests.lock().unwrap().push(request);
+                        Json(remaining.lock().unwrap().remove(0))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = VlmHttpClient::connect_with_temperature_retry(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                ..Default::default()
+            },
+            temperature_retry,
+        )
+        .await
+        .unwrap();
+        (client, requests)
+    }
+
+    fn official_request(temperature: f32) -> VlmRequest {
+        official_request_with_sampling(SamplingParams {
+            temperature: Some(temperature),
+            top_p: Some(0.01),
+            top_k: Some(1),
+            presence_penalty: Some(0.0),
+            frequency_penalty: Some(0.0),
+            repetition_penalty: Some(1.0),
+            no_repeat_ngram_size: Some(100),
+            ..Default::default()
+        })
+    }
+
+    fn official_request_with_sampling(sampling: SamplingParams) -> VlmRequest {
+        VlmRequest {
+            sampling: Some(sampling),
+            ..Default::default()
+        }
+    }
+
+    fn official_reply(text: &str) -> Value {
+        json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": text}}]
+        })
+    }
+
+    #[test]
+    fn official_quality_guard_uses_conservative_fixed_thresholds() {
+        assert_eq!(quality_failure(" \n\t\r", "semantic"), Some("blank"));
+        assert_eq!(quality_failure(" \n\t\r", "layout"), None);
+        assert_eq!(quality_failure("short", "semantic"), None);
+        assert_eq!(quality_failure("valid\ntext\tvalue", "semantic"), None);
+        assert_eq!(
+            quality_failure("replacement\u{FFFD}", "semantic"),
+            Some("replacement-character")
+        );
+        assert_eq!(
+            quality_failure("clean\u{0001}text", "semantic"),
+            Some("control-character")
+        );
+
+        // Repetition requires either three whole fragments of at least eight characters, six
+        // identical tokens of at least eight characters, or four identical lines of at least eight
+        // characters. Four ordinary repeated JSON fields stay below the token/line thresholds.
+        assert_eq!(
+            quality_failure("abcdefghabcdefghabcdefgh", "semantic"),
+            Some("repetition")
+        );
+        assert_eq!(
+            quality_failure(
+                "repeatme repeatme repeatme repeatme repeatme repeatme",
+                "semantic",
+            ),
+            Some("repetition")
+        );
+        assert_eq!(
+            quality_failure("same line\nsame line\nsame line\nsame line", "semantic",),
+            Some("repetition")
+        );
+        assert_eq!(
+            quality_failure(
+                r#"{"type":"text","type":"text","type":"text","type":"text"}"#,
+                "semantic",
+            ),
+            None
+        );
+        assert_eq!(
+            quality_failure("abcdefghabcdefghabcdefghabcd", "semantic"),
+            Some("repetition")
+        );
+    }
+
+    #[test]
+    fn whole_fragment_quality_scan_is_bounded_to_a_fixed_prefix() {
+        let repeated = "abcdefgh".repeat(MAX_REPEATED_FRAGMENT_SCAN_BYTES / "abcdefgh".len());
+        let text = format!("{repeated}suffix outside the scan window");
+
+        assert!(text.len() > MAX_REPEATED_FRAGMENT_SCAN_BYTES);
+        assert!(repeated_whole_fragment(&text));
+    }
+
+    #[test]
+    fn temperature_retry_sequence_is_fixed_and_capped() {
+        let temperatures = (0..6)
+            .filter_map(|retries| next_retry_temperature(0.0, retries))
+            .collect::<Vec<_>>();
+        assert_eq!(temperatures, [0.2, 0.4, 0.6, 0.8, 1.0]);
+        assert_eq!(next_retry_temperature(0.0, 5), None);
+        assert_eq!(next_retry_temperature(0.9, 0), Some(1.0));
+        assert_eq!(next_retry_temperature(1.0, 0), None);
+    }
+
+    #[test]
+    fn temperature_replacement_preserves_the_buffered_request() {
+        let body = Bytes::from_static(br#"{"temperature":0.0,"messages":[]}"#);
+        let replaced = replace_temperature(body.clone(), 0.2).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["temperature"],
+            0.0
+        );
+        let temperature = serde_json::from_slice::<Value>(&replaced).unwrap()["temperature"]
+            .as_f64()
+            .unwrap();
+        assert!((temperature - 0.2).abs() < 0.000_001);
     }
 
     #[test]
@@ -1564,6 +1976,348 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn official_temperature_retry_is_opt_in_and_keeps_the_first_body() {
+        let (client, requests) =
+            official_sequence_client(vec![official_reply("usable")], false).await;
+        let (text, _, warnings) = client
+            .predict_official_budgeted(
+                official_request(0.0),
+                1024,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(text, "usable");
+        assert!(warnings.is_empty());
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["temperature"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn official_temperature_retry_widens_sampling_only_on_retry() {
+        let (client, requests) =
+            official_sequence_client(vec![official_reply(""), official_reply("usable")], true)
+                .await;
+        client
+            .predict_official_budgeted(
+                official_request(0.0),
+                1024,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests[0]["top_k"], 1);
+            assert!((requests[0]["top_p"].as_f64().unwrap() - 0.01).abs() < 0.000_001);
+            assert_eq!(requests[1]["top_k"], TEMPERATURE_RETRY_MIN_TOP_K);
+            assert!(
+                (requests[1]["top_p"].as_f64().unwrap() - TEMPERATURE_RETRY_MIN_TOP_P).abs()
+                    < 0.000_001
+            );
+        }
+
+        let (client, requests) =
+            official_sequence_client(vec![official_reply(""), official_reply("usable")], true)
+                .await;
+        client
+            .predict_official_budgeted(
+                official_request_with_sampling(SamplingParams {
+                    temperature: Some(0.0),
+                    top_p: Some(0.95),
+                    top_k: Some(80),
+                    ..Default::default()
+                }),
+                1024,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0]["top_k"], 80);
+        assert_eq!(requests[1]["top_k"], 80);
+        assert!((requests[0]["top_p"].as_f64().unwrap() - 0.95).abs() < 0.000_001);
+        assert!((requests[1]["top_p"].as_f64().unwrap() - 0.95).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn temperature_retry_does_not_add_unlimited_sampling_fields() {
+        let missing = replace_temperature(
+            Bytes::from_static(br#"{"temperature":0.0,"messages":[]}"#),
+            0.2,
+        )
+        .unwrap();
+        let missing: Value = serde_json::from_slice(&missing).unwrap();
+        assert!(missing.get("top_k").is_none());
+        assert!(missing.get("top_p").is_none());
+
+        let unlimited =
+            replace_temperature(Bytes::from_static(br#"{"temperature":0.0,"top_k":0}"#), 0.2)
+                .unwrap();
+        let unlimited: Value = serde_json::from_slice(&unlimited).unwrap();
+        assert_eq!(unlimited["top_k"], 0);
+        assert!(unlimited.get("top_p").is_none());
+    }
+
+    #[tokio::test]
+    async fn official_layout_blank_response_is_accepted_without_a_temperature_retry() {
+        let (client, requests) = official_sequence_client(vec![official_reply("")], true).await;
+        let (text, _, warnings) = client
+            .predict_official_budgeted_with_stage(
+                official_request(0.0),
+                1024,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+                "layout",
+            )
+            .await
+            .unwrap();
+        assert_eq!(text, "");
+        assert!(warnings.is_empty());
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn official_semantic_blank_response_still_retries_when_enabled() {
+        let (client, requests) =
+            official_sequence_client(vec![official_reply(""), official_reply("usable")], true)
+                .await;
+        let (text, _, warnings) = client
+            .predict_official_budgeted_with_stage(
+                official_request(0.0),
+                1024,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+                "semantic",
+            )
+            .await
+            .unwrap();
+        assert_eq!(text, "usable");
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("stage=semantic"))
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_retry_budget_resets_for_each_temperature_request() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let requests = Arc::clone(&requests);
+                let attempts = Arc::clone(&attempts);
+                move |Json(request): Json<Value>| {
+                    let requests = Arc::clone(&requests);
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        requests.lock().unwrap().push(request);
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        let reply = if attempt == 1 {
+                            official_reply("")
+                        } else {
+                            official_reply("usable")
+                        };
+                        if matches!(attempt, 0 | 2) {
+                            (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                Json(json!({"error": "retry"})),
+                            )
+                        } else {
+                            (StatusCode::OK, Json(reply))
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = VlmHttpClient::connect_with_temperature_retry(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 1,
+                retry_backoff_factor: 0.0,
+                ..Default::default()
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        let (_, _, warnings) = client
+            .predict_official_budgeted_with_stage(
+                official_request(0.0),
+                1024,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(5),
+                "semantic",
+            )
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0]["temperature"], 0.0);
+        assert_eq!(requests[1]["temperature"], 0.0);
+        assert!((requests[2]["temperature"].as_f64().unwrap() - 0.2).abs() < 0.000_001);
+        assert!((requests[3]["temperature"].as_f64().unwrap() - 0.2).abs() < 0.000_001);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("stage=semantic"));
+    }
+
+    #[tokio::test]
+    async fn ordinary_predict_ignores_the_official_temperature_retry() {
+        let (client, requests) =
+            official_sequence_client(vec![official_reply(""), official_reply("")], true).await;
+        assert_eq!(client.predict(official_request(0.0)).await.unwrap(), "");
+        assert_eq!(
+            client
+                .batch_predict(vec![official_request(0.0)])
+                .await
+                .unwrap(),
+            [""]
+        );
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn official_temperature_retry_warms_in_fixed_steps_and_stops_on_success() {
+        let (client, requests) =
+            official_sequence_client(vec![official_reply(""), official_reply("usable")], true)
+                .await;
+        let (_, _, warnings) = client
+            .predict_official_budgeted(
+                official_request(0.0),
+                1024,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        let temperatures = requests
+            .iter()
+            .map(|request| request["temperature"].as_f64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(temperatures.len(), 2);
+        assert!((temperatures[0] - 0.0).abs() < 0.000_001);
+        assert!((temperatures[1] - 0.2).abs() < 0.000_001);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("stage=official"));
+    }
+
+    #[tokio::test]
+    async fn official_temperature_retry_covers_quality_failures_and_temperature_boundaries() {
+        for bad in [
+            "",
+            "replacement\u{FFFD}",
+            "clean\u{0001}text",
+            "abcdefghabcdefghabcdefgh",
+        ] {
+            let (client, requests) =
+                official_sequence_client(vec![official_reply(bad), official_reply("usable")], true)
+                    .await;
+            client
+                .predict_official_budgeted(
+                    official_request(0.9),
+                    1024,
+                    None,
+                    tokio::time::Instant::now() + Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!((requests[0]["temperature"].as_f64().unwrap() - 0.9).abs() < 0.000_001);
+            assert!((requests[1]["temperature"].as_f64().unwrap() - 1.0).abs() < 0.000_001);
+        }
+
+        let (client, requests) = official_sequence_client(vec![official_reply("")], true).await;
+        client
+            .predict_official_budgeted(
+                official_request(1.0),
+                1024,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn official_temperature_retry_stops_at_one_after_all_failures() {
+        let (client, requests) =
+            official_sequence_client((0..6).map(|_| official_reply("")).collect(), true).await;
+        client
+            .predict_official_budgeted(
+                official_request(0.0),
+                1024,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 6);
+        assert_eq!(requests[5]["temperature"], 1.0);
+    }
+
+    #[tokio::test]
+    async fn official_temperature_retry_does_not_start_after_deadline() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let hits = Arc::clone(&hits);
+                move || {
+                    let hits = Arc::clone(&hits);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Json(official_reply(""))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = VlmHttpClient::connect_with_temperature_retry(
+            VlmHttpConfig {
+                server_url: Some(format!("http://{address}").parse().unwrap()),
+                model_name: Some("mock".into()),
+                skip_model_name_checking: true,
+                max_retries: 0,
+                ..Default::default()
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            client
+                .predict_official_budgeted(
+                    official_request(0.0),
+                    1024,
+                    None,
+                    tokio::time::Instant::now() + Duration::from_millis(20),
+                )
+                .await,
+            Err(VlmError::Timeout { .. })
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn official_response_cap_and_shared_raw_budget_are_independent() {
         let body = serde_json::json!({"choices":[{"finish_reason":"stop","message":{"content":"x".repeat(128)}}]}).to_string();
         let oversized = official_test_client(body.clone(), body.len() - 1).await;
@@ -1644,6 +2398,7 @@ mod tests {
         ] {
             let client = VlmHttpClient {
                 config: Arc::new(VlmHttpConfig::default()),
+                temperature_retry: false,
                 http: Client::new(),
                 base: Url::parse(base).unwrap(),
                 model: String::new(),
@@ -1657,6 +2412,7 @@ mod tests {
     fn vlm_urls_preserve_encoded_prefix_authority_and_query() {
         let client = VlmHttpClient {
             config: Arc::new(VlmHttpConfig::default()),
+            temperature_retry: false,
             http: Client::new(),
             base: Url::parse("https://user:pass@example.com:8443/proxy%2Ftenant?token=a%2Fb")
                 .unwrap(),

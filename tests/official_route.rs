@@ -70,6 +70,29 @@ async fn configured_client(app: Router, max_concurrency: usize) -> MinerUVlmClie
     .unwrap()
 }
 
+async fn configured_temperature_retry_client(app: Router) -> MinerUVlmClient {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    MinerUVlmClient::connect_with_temperature_retry(
+        VlmHttpConfig {
+            server_url: Some(format!("http://{address}").parse().unwrap()),
+            model_name: Some("mock".into()),
+            skip_model_name_checking: true,
+            max_retries: 0,
+            max_concurrency: 2,
+            ..Default::default()
+        },
+        MinerUVlmConfig {
+            layout_image_size: (8, 8),
+            ..Default::default()
+        },
+        true,
+    )
+    .await
+    .unwrap()
+}
+
 fn route_options(window: usize) -> OfficialPdfOptions {
     OfficialPdfOptions {
         processing_window_size: window,
@@ -2187,6 +2210,80 @@ async fn route_recovers_failed_semantic_replies_with_warning_and_completes() {
         messages.iter().any(|m| m.contains("missing choices")),
         "{messages:?}"
     );
+}
+
+#[tokio::test]
+async fn official_vlm_warnings_identify_document_page_and_stage() {
+    let semantic_calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let semantic_calls = Arc::clone(&semantic_calls);
+            move |Json(request): Json<Value>| {
+                let semantic_calls = Arc::clone(&semantic_calls);
+                async move {
+                    let layout = request.to_string().contains("Layout Detection");
+                    let response = if layout {
+                        json!({"choices":[{"finish_reason":"content_filter","message":{"content":"<|box_start|>0 0 1000 1000<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>"}}]})
+                    } else if semantic_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        json!({"choices":[]})
+                    } else {
+                        json!({"choices":[{"finish_reason":"stop","message":{"content":"usable"}}]})
+                    };
+                    Json(response)
+                }
+            }
+        }),
+    );
+    let client = configured_temperature_retry_client(app).await;
+    let output = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let callback: ProgressCallback = {
+        let events = Arc::clone(&events);
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    };
+    let pdf = tiny_pdf(1);
+    client
+        .parse_and_write_prepared_pdf_with_events(
+            PreparedPdf {
+                bytes: pdf.clone(),
+                kind: DocumentKind::Pdf,
+                original: pdf,
+            },
+            route_options(1),
+            output.path(),
+            "retry-warning",
+            Some(callback),
+        )
+        .await
+        .unwrap();
+    let messages: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            ProgressEvent::VlmWarning { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(messages.iter().any(|message| {
+        message.contains("document=retry-warning")
+            && message.contains("page=0")
+            && message.contains("stage=layout")
+            && message.contains("content_filter")
+    }));
+    assert!(messages.iter().any(|message| {
+        message.contains("document=retry-warning")
+            && message.contains("page=0")
+            && message.contains("stage=semantic")
+            && message.contains("missing choices")
+    }));
+    assert!(messages.iter().any(|message| {
+        message.contains("document=retry-warning")
+            && message.contains("page=0")
+            && message.contains("stage=semantic")
+            && message.contains("temperature retry")
+    }));
 }
 
 #[tokio::test]

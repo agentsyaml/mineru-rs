@@ -761,6 +761,9 @@ async fn run_inner(
     service: &super::service::ResolvedService,
 ) -> Result<(), DirectError> {
     let mut resolved = resolved_route(options, env, overrides)?;
+    let temperature_retry =
+        super::env::resolve_temperature_retry(&|name| env.os(name), &overrides.core)
+            .map_err(err)?;
     apply_document_limits(
         &mut resolved.route,
         options.document_limits,
@@ -866,12 +869,13 @@ async fn run_inner(
         None
     } else {
         Some(
-            MinerUVlmClient::connect(
+            MinerUVlmClient::connect_with_temperature_retry(
                 http,
                 MinerUVlmConfig {
                     concurrency_model: resolved.concurrency_model,
                     ..Default::default()
                 },
+                temperature_retry,
             )
             .await?,
         )

@@ -88,6 +88,7 @@ struct App {
     events: Option<ProgressCallback>,
     /// Frozen VLM transport base config, resolved once at startup.
     http_config: VlmHttpConfig,
+    temperature_retry: bool,
     #[cfg(test)]
     test_http: Option<VlmHttpConfig>,
 }
@@ -275,6 +276,7 @@ struct WorkerContext {
     /// Frozen VLM transport base config; the worker clones this instead of re-reading the
     /// ambient environment per task.
     http_config: VlmHttpConfig,
+    temperature_retry: bool,
     #[cfg(test)]
     test_http: Option<VlmHttpConfig>,
 }
@@ -305,6 +307,7 @@ pub struct ServiceConfig {
     /// Frozen VLM transport base config resolved once at startup; workers must not re-read the
     /// ambient environment per task.
     http_config: VlmHttpConfig,
+    temperature_retry: bool,
     #[doc(hidden)]
     progress_callback: Option<ProgressCallback>,
     #[cfg(test)]
@@ -356,6 +359,7 @@ impl ServiceConfig {
                 document_limits: None,
                 progress_callback: None,
                 http_config: VlmHttpConfig::default(),
+                temperature_retry: false,
                 #[cfg(test)]
                 test_http: None,
                 #[cfg(test)]
@@ -397,6 +401,11 @@ impl ServiceConfig {
     #[doc(hidden)]
     pub fn http_config(mut self, config: VlmHttpConfig) -> Self {
         self.http_config = config;
+        self
+    }
+    #[doc(hidden)]
+    pub fn temperature_retry(mut self, enabled: bool) -> Self {
+        self.temperature_retry = enabled;
         self
     }
     /// Operator pin for image analysis, mirroring the `formula`/`table` pins: when `Some`, the
@@ -634,6 +643,7 @@ pub async fn serve(
         vlm_allow_private_remote_images: config.vlm_allow_private_remote_images,
         events: config.progress_callback,
         http_config: config.http_config,
+        temperature_retry: config.temperature_retry,
         #[cfg(test)]
         test_http: config.test_http,
     };
@@ -1309,6 +1319,7 @@ fn worker_context(app: &App) -> WorkerContext {
         vlm_allow_remote_images: app.vlm_allow_remote_images,
         vlm_allow_private_remote_images: app.vlm_allow_private_remote_images,
         http_config: app.http_config.clone(),
+        temperature_retry: app.temperature_retry,
         #[cfg(test)]
         test_http: app.test_http.clone(),
     }
@@ -1681,12 +1692,13 @@ async fn run_task(
     .map_err(|error| format!("page concurrency: {error}"))?;
     let client = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        MinerUVlmClient::connect_for_task(
+        MinerUVlmClient::connect_for_task_with_temperature_retry(
             config,
             MinerUVlmConfig {
                 concurrency_model: app.concurrency_model,
                 ..Default::default()
             },
+            app.temperature_retry,
             task_work_lease.clone(),
         ),
     )
@@ -3273,6 +3285,7 @@ mod tests {
             vlm_allow_remote_images: false,
             vlm_allow_private_remote_images: false,
             http_config: VlmHttpConfig::default(),
+            temperature_retry: false,
             test_http: None,
         };
         let (sender, receiver) = oneshot::channel();
@@ -4128,6 +4141,7 @@ mod tests {
             vlm_allow_remote_images: false,
             vlm_allow_private_remote_images: false,
             http_config: VlmHttpConfig::default(),
+            temperature_retry: false,
             test_http: None,
         };
         let permit = reserve(&app);
@@ -4346,6 +4360,7 @@ mod tests {
                 vlm_allow_remote_images: false,
                 vlm_allow_private_remote_images: false,
                 http_config: VlmHttpConfig::default(),
+                temperature_retry: false,
                 test_http: None,
             },
             gate_record.clone(),
@@ -4598,6 +4613,7 @@ mod tests {
             vlm_allow_remote_images: false,
             vlm_allow_private_remote_images: false,
             http_config: VlmHttpConfig::default(),
+            temperature_retry: false,
             test_http: None,
         };
         let guard = spawn_sync_worker(&none, context, guard, &None, "input".into()).unwrap_err();
