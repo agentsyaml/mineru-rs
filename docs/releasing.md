@@ -158,7 +158,7 @@ manifests just to prepare the workflow.
 ## Local preflight
 
 The temporary `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` (`quick-xml`) exception is mitigated reachability, not fixed or unreachable: mandatory full OOXML preflight runs before Office conversion. It expires on 2026-09-30 and must be reviewed or removed then. Native macOS has no reliable no-entitlement hard memory cap, so hostile Office processing there requires an external VM or container memory boundary.
-The registry-reported yanked transitive `arrayref` 0.3.9 is a reviewed lock exception. It expires on 2026-09-30 and must be reviewed or removed then.
+The reviewed lock exception for registry-reported yanked transitive `arrayref` 0.3.9 was removed after crates.io unyanked it.
 
 Run from the repository root unless a subshell changes directory:
 

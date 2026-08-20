@@ -111,7 +111,7 @@ pub(super) struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
 #[cfg(windows)]
 impl WindowsJob {
     pub(super) fn attach(child: &Child) -> Result<Self, String> {
-        use std::{mem::size_of, os::windows::io::AsRawHandle};
+        use std::mem::size_of;
         use windows_sys::Win32::{
             Foundation::INVALID_HANDLE_VALUE,
             System::JobObjects::{
@@ -135,13 +135,25 @@ impl WindowsJob {
                 size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             )
         };
-        let assigned = unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as _) };
+        let process_handle = child
+            .raw_handle()
+            .ok_or_else(|| "official worker process handle unavailable".to_owned())?;
+        let assigned = unsafe { AssignProcessToJobObject(job.0, process_handle as _) };
         if set == 0 || assigned == 0 {
             return Err("official worker job assignment failed".into());
         }
         Ok(job)
     }
 }
+
+#[cfg(windows)]
+// SAFETY: A Windows HANDLE is a process-local reference to a kernel object and
+// may be used from any thread in that process. WindowsJob uniquely owns this
+// handle; it is not Clone or Copy, and Drop is the only place that closes it.
+unsafe impl Send for WindowsJob {}
+
+#[cfg(windows)]
+unsafe impl Sync for WindowsJob {}
 
 #[cfg(windows)]
 impl Drop for WindowsJob {
