@@ -1,6 +1,8 @@
 #[cfg(feature = "legacy-office")]
 use anydoc::Format as AnyDocFormat;
 use mineru::command::service::OfficeLimits;
+#[cfg(feature = "legacy-office")]
+use mineru::legacy_office;
 #[cfg(feature = "office")]
 use office2pdf::config::{ConvertOptions, Format as PdfFormat};
 use std::io::Read;
@@ -15,12 +17,25 @@ fn main() {
     let mut args = std::env::args_os();
     let _ = args.next();
     let first = args.next();
-    let value = match (first.as_deref(), args.next()) {
-        (Some(value), None) => value,
-        _ => fail(
-            "usage: mineru-office-convert <docx|pptx|xlsx|doc|ppt|xls|odt|rtf|epub|ods|odp|csv>",
-        ),
+    let mode = std::env::var("MINERU_OFFICE_CONVERT_MODE").unwrap_or_default();
+    let native_request = if mode == "native-pdf" {
+        let max_pages = native_request_arg(args.next());
+        let max_output_bytes = native_request_arg(args.next());
+        if args.next().is_some() {
+            fail("invalid native PDF request");
+        }
+        Some((max_pages, max_output_bytes))
+    } else {
+        if args.next().is_some() {
+            fail(
+                "usage: mineru-office-convert <docx|pptx|xlsx|doc|ppt|xls|odt|rtf|epub|ods|odp|csv>",
+            );
+        }
+        None
     };
+    let value = first.unwrap_or_else(|| {
+        fail("usage: mineru-office-convert <docx|pptx|xlsx|doc|ppt|xls|odt|rtf|epub|ods|odp|csv>")
+    });
     let requested = match value.to_str() {
         Some(value) => value,
         None => fail("invalid format"),
@@ -34,18 +49,50 @@ fn main() {
     {
         fail("input too large");
     }
-    convert(requested, &input, limits);
+    if let Some((max_pages, max_output_bytes)) = native_request {
+        if requested != "pdf"
+            || max_pages.is_none()
+            || max_output_bytes.is_none()
+            || max_output_bytes.is_some_and(|cap| cap > limits.output_bytes)
+        {
+            fail("invalid native PDF request");
+        }
+        convert_native_pdf(
+            limits,
+            &input,
+            max_pages.unwrap_or_default(),
+            max_output_bytes.unwrap_or_default(),
+        );
+    } else {
+        convert(requested, &input, limits, mode == "legacy-pdf");
+    }
     #[cfg(windows)]
     _containment.finish();
 }
 
-/// Dispatch on the requested format name. The format alone decides the output kind: the OOXML
-/// family converts to PDF, the legacy family to Markdown. The helper never takes a mode.
+fn native_request_arg(value: Option<std::ffi::OsString>) -> Option<usize> {
+    value
+        .as_deref()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+}
+
+/// Dispatch on the requested format name. OOXML always converts to PDF; legacy formats use
+/// Markdown for the compatibility lane or a bounded text PDF when the parent selects the
+/// non-local VLM lane.
 #[cfg_attr(
     not(any(feature = "office", feature = "legacy-office")),
     allow(unused_variables)
 )]
-fn convert(requested: &str, input: &[u8], limits: OfficeLimits) {
+fn convert(requested: &str, input: &[u8], limits: OfficeLimits, legacy_pdf: bool) {
+    if legacy_pdf {
+        #[cfg(feature = "legacy-office")]
+        if let Some((kind, format)) = text_format(requested) {
+            return convert_legacy_pdf(limits, kind, format, input);
+        }
+        fail("legacy PDF conversion is unavailable");
+    }
     #[cfg(feature = "office")]
     if let Some((kind, format)) = pdf_format(requested) {
         return convert_pdf(limits, kind, format, input);
@@ -71,18 +118,8 @@ fn pdf_format(requested: &str) -> Option<(&'static str, PdfFormat)> {
 /// The requested legacy format; `xls` shares the Excel parser with the OOXML family.
 #[cfg(feature = "legacy-office")]
 fn text_format(requested: &str) -> Option<(&'static str, AnyDocFormat)> {
-    Some(match requested {
-        "doc" => ("doc", AnyDocFormat::Doc),
-        "ppt" => ("ppt", AnyDocFormat::Ppt),
-        "xls" => ("xls", AnyDocFormat::Excel),
-        "odt" => ("odt", AnyDocFormat::Odt),
-        "rtf" => ("rtf", AnyDocFormat::Rtf),
-        "epub" => ("epub", AnyDocFormat::Epub),
-        "ods" => ("ods", AnyDocFormat::Ods),
-        "odp" => ("odp", AnyDocFormat::Odp),
-        "csv" => ("csv", AnyDocFormat::Csv),
-        _ => return None,
-    })
+    let kind = legacy_office::kind_from_name(requested)?;
+    Some((kind.suffix(), legacy_office::format_for_kind(kind)?))
 }
 
 /// Content cross-validation for the legacy family. CSV carries no file signature, so it is
@@ -90,13 +127,10 @@ fn text_format(requested: &str) -> Option<(&'static str, AnyDocFormat)> {
 /// BOM (written by LibreOffice/Word for non-ASCII text) is not part of any signature, so it is
 /// skipped for detection.
 #[cfg(feature = "legacy-office")]
-fn format_matches(requested_kind: &str, format: AnyDocFormat, input: &[u8]) -> bool {
-    requested_kind == "csv"
-        || anydoc::Format::from_bytes(input).or_else(|| {
-            input
-                .strip_prefix(b"\xef\xbb\xbf")
-                .and_then(anydoc::Format::from_bytes)
-        }) == Some(format)
+#[cfg(test)]
+fn format_matches(requested_kind: &str, _format: AnyDocFormat, input: &[u8]) -> bool {
+    legacy_office::kind_from_name(requested_kind)
+        .is_some_and(|kind| legacy_office::format_matches(kind, input))
 }
 
 #[cfg(feature = "office")]
@@ -127,23 +161,69 @@ fn convert_pdf(limits: OfficeLimits, requested_kind: &str, format: PdfFormat, in
 }
 
 #[cfg(feature = "legacy-office")]
-fn convert_text(limits: OfficeLimits, requested_kind: &str, format: AnyDocFormat, input: &[u8]) {
-    // A UTF-8 BOM is not part of any legacy container signature; strip it before parsing so
-    // BOM-prefixed RTF (written by LibreOffice/Word for non-ASCII text) converts, not just
-    // passes validation.
-    let input = input.strip_prefix(b"\xef\xbb\xbf").unwrap_or(input);
-    if !format_matches(requested_kind, format, input) {
-        fail("input format does not match requested format");
+fn convert_text(limits: OfficeLimits, requested_kind: &str, _format: AnyDocFormat, input: &[u8]) {
+    let kind =
+        legacy_office::kind_from_name(requested_kind).unwrap_or_else(|| fail("invalid format"));
+    // No image assets are written: embedded images are referenced but not extracted.
+    let markdown = legacy_office::to_markdown_bytes(kind, input, limits).unwrap_or_else(|error| {
+        if matches!(
+            error.as_str(),
+            "input format does not match requested format" | "conversion produced oversized output"
+        ) {
+            fail(&error);
+        }
+        fail("conversion failed");
+    });
+    if std::io::stdout().write_all(&markdown).is_err() {
+        fail("output failed");
     }
-    // `to_markdown_bytes` returns a `String`, so the output is valid UTF-8 by construction;
-    // the parent's owner re-validates the raw stdout bytes regardless. No image assets are
-    // written: embedded images are referenced but not extracted.
-    let markdown = anydoc::to_markdown_bytes(input, Some(format))
-        .unwrap_or_else(|_| fail("conversion failed"));
-    if markdown.len() > limits.output_bytes {
-        fail("conversion produced oversized output");
+}
+
+#[cfg_attr(not(feature = "legacy-office"), allow(unused_variables))]
+fn convert_native_pdf(
+    limits: OfficeLimits,
+    input: &[u8],
+    max_pages: usize,
+    max_output_bytes: usize,
+) {
+    #[cfg(feature = "legacy-office")]
+    {
+        let markdown = legacy_office::native_pdf_to_markdown(input, max_pages, max_output_bytes)
+            .unwrap_or_else(|error| fail(&error));
+        if markdown.len() > max_output_bytes {
+            fail("native PDF assessment produced oversized output");
+        }
+        if std::io::stdout().write_all(&markdown).is_err() {
+            fail("output failed");
+        }
     }
-    if std::io::stdout().write_all(markdown.as_bytes()).is_err() {
+    #[cfg(not(feature = "legacy-office"))]
+    fail("native PDF conversion is unavailable");
+}
+
+#[cfg(feature = "legacy-office")]
+fn convert_legacy_pdf(
+    limits: OfficeLimits,
+    requested_kind: &str,
+    _format: AnyDocFormat,
+    input: &[u8],
+) {
+    let kind =
+        legacy_office::kind_from_name(requested_kind).unwrap_or_else(|| fail("invalid format"));
+    let pdf = legacy_office::to_pdf_bytes(kind, input, limits).unwrap_or_else(|error| {
+        fail(&format!(
+            "{error}; {}; {}",
+            legacy_office::LEGACY_PDF_WARNING,
+            legacy_office::LEGACY_PDF_RECOMMENDATION
+        ))
+    });
+    if !pdf.starts_with(b"%PDF-") {
+        fail("conversion produced invalid PDF");
+    }
+    if pdf.len() > limits.output_bytes {
+        fail("conversion produced oversized PDF");
+    }
+    if std::io::stdout().write_all(&pdf).is_err() {
         fail("output failed");
     }
 }

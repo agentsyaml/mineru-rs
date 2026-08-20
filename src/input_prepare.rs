@@ -367,6 +367,82 @@ pub(crate) async fn prepare_with_warning_and_ooxml(
     ))
 }
 
+/// Non-local legacy preparation: use the isolated helper's best-effort PDF fallback, then expose
+/// the result through the same prepared-PDF seam used by OOXML and image inputs.
+#[cfg(feature = "legacy-office")]
+pub(crate) async fn prepare_legacy_with_warning(
+    bytes: impl Into<Bytes>,
+    declared: DocumentKind,
+    options: &OfficialPdfOptions,
+    workers: &OfficeWorkers,
+    remaining: Duration,
+) -> Result<(PreparedPdf, Option<String>), String> {
+    let bytes = bytes.into();
+    let original = bytes.clone();
+    let deadline = Instant::now()
+        .checked_add(remaining)
+        .ok_or("input preparation deadline overflow")?;
+    if !declared.is_legacy_office() {
+        return Err(legacy_pdf_failure("legacy office kind required"));
+    }
+    if bytes.len() > options.max_pdf_bytes {
+        return Err(legacy_pdf_failure(format!(
+            "input exceeds resident preparation limit ({} bytes; limit {} bytes); raise with --max-pdf-bytes or MINERU_MAX_PDF_BYTES",
+            bytes.len(),
+            options.max_pdf_bytes
+        )));
+    }
+    if remaining.is_zero() {
+        return Err(legacy_pdf_failure("input preparation deadline expired"));
+    }
+    let timeout = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|timeout| !timeout.is_zero())
+        .ok_or_else(|| legacy_pdf_failure("input preparation deadline expired"))?;
+    let (pdf, helper_warning) = workers
+        .convert_legacy_pdf_with_warning(declared.suffix(), bytes, timeout)
+        .await
+        .map_err(|error| legacy_pdf_failure(error.to_string()))?;
+    validate_prepared_pdf(&pdf, options).map_err(legacy_pdf_failure)?;
+    deadline_expired(deadline).map_err(legacy_pdf_failure)?;
+    let warning = match helper_warning {
+        Some(helper_warning) => Some(format!(
+            "{}; {}. Helper warning: {helper_warning}",
+            crate::legacy_office::LEGACY_PDF_WARNING,
+            crate::legacy_office::LEGACY_PDF_RECOMMENDATION
+        )),
+        None => Some(format!(
+            "{}; {}.",
+            crate::legacy_office::LEGACY_PDF_WARNING,
+            crate::legacy_office::LEGACY_PDF_RECOMMENDATION
+        )),
+    };
+    Ok((
+        PreparedPdf {
+            bytes: pdf.into(),
+            // Keep the declared legacy kind so the official route publishes the original input
+            // under the VLM target while ignoring non-PDF page-range controls.
+            kind: declared,
+            original,
+        },
+        warning,
+    ))
+}
+
+#[cfg(feature = "legacy-office")]
+fn legacy_pdf_failure(error: impl std::fmt::Display) -> String {
+    let error = error.to_string();
+    if error.contains(crate::legacy_office::LEGACY_PDF_RECOMMENDATION) {
+        format!("legacy best-effort PDF conversion failed: {error}")
+    } else {
+        format!(
+            "legacy best-effort PDF conversion failed: {error}; {}; {}",
+            crate::legacy_office::LEGACY_PDF_WARNING,
+            crate::legacy_office::LEGACY_PDF_RECOMMENDATION
+        )
+    }
+}
+
 fn deadline_expired(deadline: Instant) -> Result<(), String> {
     if Instant::now() >= deadline {
         Err("input preparation deadline expired".into())
@@ -659,6 +735,53 @@ mod tests {
         .unwrap();
         assert_eq!(prepared.kind, DocumentKind::Pdf);
         assert_eq!(warning, None);
+    }
+
+    #[cfg(feature = "legacy-office")]
+    #[tokio::test]
+    async fn legacy_preparation_validates_a_pdf_and_emits_the_fallback_warning() {
+        let workers = OfficeWorkers::with_test_executable(std::env::current_exe().unwrap());
+        let (prepared, warning) = prepare_legacy_with_warning(
+            Bytes::from_static(b"fake legacy input"),
+            DocumentKind::Doc,
+            &OfficialPdfOptions::default(),
+            &workers,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.kind, DocumentKind::Doc);
+        assert!(prepared.bytes.starts_with(b"%PDF-"));
+        assert_eq!(
+            Document::load_mem(&prepared.bytes)
+                .unwrap()
+                .get_pages()
+                .len(),
+            1
+        );
+        let warning = warning.unwrap();
+        assert!(warning.contains("text-only") && warning.contains("may be lost"));
+        assert!(warning.contains("non-ASCII") && warning.contains("?"));
+        assert!(warning.contains("Microsoft Office"));
+        workers.drain().await;
+    }
+
+    #[cfg(feature = "legacy-office")]
+    #[tokio::test]
+    async fn legacy_preparation_failure_recommends_office_conversion() {
+        let workers = OfficeWorkers::with_executable("missing-legacy-helper".into());
+        let error = prepare_legacy_with_warning(
+            Bytes::from_static(b"fake legacy input"),
+            DocumentKind::Doc,
+            &OfficialPdfOptions::default(),
+            &workers,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("legacy best-effort PDF conversion failed"));
+        assert!(error.contains("text-only") && error.contains("non-ASCII"));
+        assert!(error.contains("Microsoft Office or LibreOffice"));
     }
 
     #[tokio::test]

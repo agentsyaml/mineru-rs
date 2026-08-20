@@ -26,6 +26,34 @@ mod office_fixtures;
 fn mineru() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mineru"));
     command.env("MINERU_VL_MODEL_NAME", "mock");
+    for name in [
+        "MINERU_VL_SERVER",
+        "MINERU_VL_API_KEY",
+        "MINERU_MODEL_STACK",
+        "MINERU_OFFICIAL_PYTHON",
+        "MINERU_OFFICIAL_WORKER_MODE",
+        "MINERU_MODEL_BASE_DIR",
+        "MINERU_CONFIG",
+        "MINERU_VLM_END_TOKEN",
+        "MINERU_VLM_TEXT_BEFORE_IMAGE",
+        "MINERU_VLM_ALLOW_TRUNCATED_CONTENT",
+        "MINERU_VLM_ALLOW_REMOTE_IMAGES",
+        "MINERU_VLM_ALLOW_PRIVATE_REMOTE_IMAGES",
+        "MINERU_OFFICE_INPUT_BYTES",
+        "MINERU_OFFICE_OUTPUT_BYTES",
+        "MINERU_OFFICE_STDERR_BYTES",
+        "MINERU_OFFICE_WALL_SECONDS",
+        "MINERU_OFFICE_CPU_SECONDS",
+        "MINERU_OFFICE_NOFILE",
+        "MINERU_OFFICE_ADDRESS_SPACE_BYTES",
+        "MINERU_OFFICE_ACTIVE_PROCESS_LIMIT",
+        "MINERU_OFFICE_PROCESS_MEMORY_BYTES",
+        "MINERU_OFFICE_JOB_MEMORY_BYTES",
+        "MINERU_OFFICE_PROCESS_TIME_SECONDS",
+        "MINERU_OFFICE_JOB_TIME_SECONDS",
+    ] {
+        command.env_remove(name);
+    }
     command.env_remove("MINERU_LOG_LEVEL");
     command.env_remove("MINERU_PROCESSING_WINDOW_SIZE");
     command.env_remove("MINERU_API_MAX_CONCURRENT_REQUESTS");
@@ -56,6 +84,444 @@ fn mineru() -> Command {
     command.env_remove("MINERU_OFFICE_FAKE_MODE");
     command.env_remove("MINERU_OFFICE_FAKE_READY");
     command
+}
+
+#[cfg(feature = "legacy-office")]
+fn bundled_office_helper() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_mineru-office-convert"))
+}
+
+#[cfg(unix)]
+fn fake_official_python(root: &std::path::Path) -> std::path::PathBuf {
+    fake_official_python_with_background(root, false)
+}
+
+#[cfg(unix)]
+fn fake_official_python_with_background(
+    root: &std::path::Path,
+    background: bool,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = root.join("fake-official-python");
+    let background = background
+        .then(|| {
+            format!(
+                "sleep 30 &\nbackground_pid=$!\nprintf '%s' \"$background_pid\" > \"{}\"",
+                root.join("background-pid").display()
+            )
+        })
+        .unwrap_or_default();
+    std::fs::write(
+        &script,
+        format!(r##"#!/bin/sh
+request=$(cat)
+id=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+bundle=$(printf '%s' "$request" | sed -n 's/.*"bundle_path":"\([^"]*\)".*/\1/p')
+effort=$(printf '%s' "$request" | sed -n 's/.*"effort":"\([^"]*\)".*/\1/p')
+page=$(printf '%s' "$request" | sed -n 's/.*"page_range":"\([^"]*\)".*/\1/p')
+{background}
+printf '%s\n' "$$" >> "{pid_file}"
+mkdir -p "$bundle"
+printf 'effort=%s page=%s\n' "$effort" "$page" > "$bundle/markdown.md"
+printf '%s' '{{"schema_version":"1.0","pages":[{{}}],"_backend":"hybrid"}}' > "$bundle/middle_json.json"
+printf '%s' '[]' > "$bundle/content_list.json"
+printf '%s' '{{}}' > "$bundle/structured_content.json"
+printf '{{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.0a6","schema_version":"1.0","backend":"hybrid-http-client","bundle_name":"hybrid-v4"}}\n' "$id"
+"##,
+            background = background,
+            pid_file = root.join("official-worker-pids").display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&script, permissions).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn fake_official_failure(root: &std::path::Path, mode: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = root.join(format!("fake-official-{mode}"));
+    let (protocol, request_id, package, schema, backend) = match mode {
+        "protocol" => ("wrong", "$id", "4.0.0a6", "1.0", "hybrid-http-client"),
+        "request" => (
+            "mineru-rs-official-worker/1",
+            "wrong",
+            "4.0.0a6",
+            "1.0",
+            "hybrid-http-client",
+        ),
+        "package" => (
+            "mineru-rs-official-worker/1",
+            "$id",
+            "3.4.5",
+            "1.0",
+            "hybrid-http-client",
+        ),
+        "schema" => (
+            "mineru-rs-official-worker/1",
+            "$id",
+            "4.0.0a6",
+            "0.9",
+            "hybrid-http-client",
+        ),
+        "backend" => (
+            "mineru-rs-official-worker/1",
+            "$id",
+            "4.0.0a6",
+            "1.0",
+            "hybrid-engine",
+        ),
+        _ => (
+            "mineru-rs-official-worker/1",
+            "$id",
+            "4.0.0a6",
+            "1.0",
+            "hybrid-http-client",
+        ),
+    };
+    let body = if mode == "stdout" {
+        "dd if=/dev/zero bs=65536 count=2 2>/dev/null".to_owned()
+    } else if mode == "stderr" {
+        "dd if=/dev/zero bs=65536 count=2 1>&2 2>/dev/null".to_owned()
+    } else if mode == "timeout" {
+        "sleep 5".to_owned()
+    } else if mode == "crash" {
+        "exit 7".to_owned()
+    } else {
+        let response_id = if request_id == "$id" {
+            "%s"
+        } else {
+            request_id
+        };
+        format!(
+            "printf '{{\"protocol\":\"{protocol}\",\"request_id\":\"{response_id}\",\"status\":\"ok\",\"package_version\":\"{package}\",\"schema_version\":\"{schema}\",\"backend\":\"{backend}\",\"bundle_name\":\"hybrid-v4\"}}\\n' \"$id\""
+        )
+    };
+    let script_body = format!(
+        r##"#!/bin/sh
+request=$(cat)
+id=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^" ]*\)".*/\1/p')
+{body}
+"##
+    );
+    std::fs::write(&script, script_body).unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&script, permissions).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn fake_official_shim_python(
+    root: &std::path::Path,
+    version: &str,
+    oversize: bool,
+) -> std::path::PathBuf {
+    fake_official_shim_python_with_asset(root, version, oversize, None)
+}
+
+#[cfg(unix)]
+fn fake_official_asset_shim_python(root: &std::path::Path, asset_path: &str) -> std::path::PathBuf {
+    fake_official_shim_python_with_asset(root, "4.0.0a6", false, Some(asset_path))
+}
+
+#[cfg(unix)]
+fn fake_official_shim_python_with_asset(
+    root: &std::path::Path,
+    version: &str,
+    oversize: bool,
+    asset_path: Option<&str>,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let package_root = root.join("fake-mineru-package");
+    let package = package_root.join("mineru");
+    let metadata = package_root.join(format!("mineru-{version}.dist-info"));
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::create_dir_all(&metadata).unwrap();
+    std::fs::write(
+        package.join("__init__.py"),
+        "print('fake mineru import stdout')\nfrom . import parser\n",
+    )
+    .unwrap();
+    let record = serde_json::to_string(
+        &root
+            .join("fake-mineru-record.json")
+            .to_string_lossy()
+            .to_string(),
+    )
+    .unwrap();
+    let payload = if oversize { "200000" } else { "0" };
+    let asset_save = asset_path
+        .map(|path| {
+            let path_literal = serde_json::to_string(path).unwrap();
+            let markdown = serde_json::to_string(&format!("![figure]({path})\n")).unwrap();
+            let middle = format!(
+                r#"{{"schema_version":"1.0","pages":[{{"image_path":{path},{path}:"ordinary-key"}}],"_backend":"hybrid"}}"#,
+                path = path_literal
+            );
+            let middle = serde_json::to_string(&middle).unwrap();
+            let content =
+                serde_json::to_string(&format!(r#"[{{"img_path":{path}}}]"#, path = path_literal))
+                    .unwrap();
+            format!(
+                "writer.write_string(\"markdown.md\", {markdown})\n        writer.write_string(\"middle_json.json\", {middle})\n        writer.write_string(\"content_list.json\", {content})\n        writer.write(\"structured_content.json\", b'{{}}')\n        writer.write({path}, b'\\xff\\xd8\\x00\\xff\\xd9')",
+                markdown = markdown,
+                middle = middle,
+                content = content,
+                path = path_literal,
+            )
+        })
+        .unwrap_or_else(|| {
+            "writer.write_string(\"markdown.md\", \"x\" * PAYLOAD if PAYLOAD else \"shim result\\n\")\n        writer.write(\"middle_json.json\", b'{\"schema_version\":\"1.0\",\"pages\":[{}],\"_backend\":\"hybrid\"}')\n        writer.write_string(\"content_list.json\", \"[]\")\n        writer.write(\"structured_content.json\", b'{}')\n        writer.write(\"images/fake.png\", b\"png\")".to_owned()
+        });
+    let parser = r##"import asyncio
+import json
+import os
+
+print("fake parser import stdout")
+RECORD = __RECORD__
+PAYLOAD = __PAYLOAD__
+
+class Result:
+    def save(self, writer):
+        print("fake result.save stdout")
+        __ASSET_SAVE__
+
+async def parse_async(path, **kwargs):
+    print("fake parse_async stdout")
+    supported = {"backend", "effort", "server_url", "method", "lang", "image_analysis"}
+    if kwargs.get("page_range") is not None:
+        supported.add("page_range")
+    if set(kwargs) != supported:
+        raise RuntimeError("unsupported parse_async kwargs: " + repr(sorted(kwargs)))
+    with open(RECORD, "w", encoding="utf-8") as output:
+        json.dump({"kwargs": kwargs, "env": {name: os.environ.get(name) for name in (
+            "MINERU_MODEL_STACK", "MINERU_MODEL_BASE_DIR", "MINERU_CONFIG",
+            "MINERU_VL_API_KEY", "MINERU_VL_MODEL_NAME")}}, output, sort_keys=True)
+    return Result()
+"##
+    .replace("__RECORD__", &record)
+    .replace("__PAYLOAD__", payload)
+    .replace("__ASSET_SAVE__", &asset_save);
+    std::fs::write(package.join("parser.py"), parser).unwrap();
+    std::fs::write(
+        &metadata.join("METADATA"),
+        format!("Metadata-Version: 2.1\nName: mineru\nVersion: {version}\n"),
+    )
+    .unwrap();
+
+    let script = root.join("fake-official-shim-python");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" >> \"{}\"\nexport PYTHONPATH=\"{}\"\nexec python3 \"$@\"\n",
+            root.join("persistent-pids").display(),
+            package_root.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&script, permissions).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn fake_persistent_python(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let python = fake_official_shim_python(root, "4.0.0a6", false);
+    let package = root.join("fake-mineru-package/mineru");
+    let record = root.join("persistent-record.json");
+    let record_literal = serde_json::to_string(&record.to_string_lossy().to_string()).unwrap();
+    let init = r##"from pathlib import Path
+import json
+import sys
+
+print("persistent mineru import stdout")
+print("persistent mineru import stderr", file=sys.stderr)
+RECORD = __RECORD__
+marker = Path(RECORD + ".init")
+count = int(marker.read_text() or "0") if marker.exists() else 0
+marker.write_text(str(count + 1))
+from . import parser
+"##
+    .replace("__RECORD__", &record_literal);
+    std::fs::write(package.join("__init__.py"), init).unwrap();
+    let parser = r##"import json
+import os
+import sys
+from pathlib import Path
+
+print("persistent parser import stdout")
+print("persistent parser import stderr", file=sys.stderr)
+RECORD = __RECORD__
+PARSE_MARKER = Path(RECORD + ".parse")
+OVERSIZED_FAILURE = Path(RECORD + ".oversized-failure")
+
+class Result:
+    def __init__(self, number):
+        self.number = number
+
+    def save(self, writer):
+        print("persistent result.save stdout")
+        print("persistent result.save stderr", file=sys.stderr)
+        writer.write_string("markdown.md", "request-%d\\n" % self.number + "x" * 200)
+        writer.write("middle_json.json", b'{"schema_version":"1.0","pages":[{}],"_backend":"hybrid"}')
+        writer.write_string("content_list.json", "[]")
+        writer.write("structured_content.json", b'{}')
+
+async def parse_async(path, **kwargs):
+    print("persistent parse_async stdout")
+    print("persistent parse_async stderr", file=sys.stderr)
+    supported = {"backend", "effort", "server_url", "method", "lang", "image_analysis"}
+    if kwargs.get("page_range") is not None:
+        supported.add("page_range")
+    if set(kwargs) != supported:
+        raise RuntimeError("unsupported parse_async kwargs")
+    number = int(PARSE_MARKER.read_text() or "0") + 1 if PARSE_MARKER.exists() else 1
+    PARSE_MARKER.write_text(str(number))
+    if OVERSIZED_FAILURE.exists() and number == 1:
+        print("captured parser diagnostic " + "d" * 100000, file=sys.stderr)
+        raise RuntimeError("parser error " + "e" * 100000)
+    entries = []
+    record_path = Path(RECORD)
+    if record_path.exists():
+        entries = json.loads(record_path.read_text())
+    entries.append({"path": path, "kwargs": kwargs, "env": {name: os.environ.get(name) for name in (
+        "MINERU_MODEL_STACK", "MINERU_MODEL_BASE_DIR", "MINERU_CONFIG",
+        "MINERU_VL_API_KEY", "MINERU_VL_MODEL_NAME")}})
+    record_path.write_text(json.dumps(entries, sort_keys=True))
+    return Result(number)
+"##
+        .replace("__RECORD__", &record_literal);
+    std::fs::write(package.join("parser.py"), parser).unwrap();
+    (python, record)
+}
+
+#[cfg(unix)]
+fn fake_persistent_oversized_error_python(
+    root: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (python, record) = fake_persistent_python(root);
+    std::fs::write(format!("{}.oversized-failure", record.display()), b"").unwrap();
+    (python, record)
+}
+
+#[cfg(unix)]
+fn fake_persistent_bad_handshake(root: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = root.join("fake-persistent-bad-handshake");
+    let pids = root.join("persistent-pids");
+    std::fs::write(
+        &script,
+        format!(
+            r##"#!/bin/sh
+read -r startup || exit 3
+printf '%s\n' "$$" >> "{}"
+printf '%s\n' '{{"type":"handshake","protocol":"wrong","status":"ready","package_version":"4.0.0a6","schema_version":"1.0","backend":"hybrid-http-client","max_in_flight":1,"capabilities":{{"efforts":["medium","high","xhigh"],"model_stacks":["auto","light","full"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}}}'
+"##,
+            pids.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&script, permissions).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn persistent_capabilities() -> Value {
+    json!({
+        "efforts": ["medium", "high", "xhigh"],
+        "model_stacks": ["auto", "light", "full"],
+        "input_formats": ["pdf", "png", "jpeg", "jpg", "jp2", "webp", "gif", "bmp", "tiff"],
+        "bundle_name": "hybrid-v4",
+        "cancellation": "process-terminate",
+    })
+}
+
+#[cfg(unix)]
+fn persistent_start(root: &std::path::Path, capabilities: Value) -> Value {
+    json!({
+        "type": "start",
+        "protocol": "mineru-rs-official-worker/2",
+        "package_version": "4.0.0a6",
+        "schema_version": "1.0",
+        "backend": "hybrid-http-client",
+        "model_stack": "full",
+        "model_base_dir": root.join("models").to_str().unwrap(),
+        "config": root.join("config.toml").to_str().unwrap(),
+        "vl_api_key": "persistent-key",
+        "vl_model_name": "persistent-model",
+        "capabilities": capabilities,
+    })
+}
+
+#[cfg(unix)]
+fn persistent_request(
+    root: &std::path::Path,
+    request_id: &str,
+    sequence: usize,
+    effort: &str,
+    page_range: Option<&str>,
+) -> Value {
+    let mut request = json!({
+        "type": "request",
+        "protocol": "mineru-rs-official-worker/2",
+        "request_id": request_id,
+        "sequence": sequence,
+        "package_version": "4.0.0a6",
+        "schema_version": "1.0",
+        "backend": "hybrid-http-client",
+        "effort": effort,
+        "server_url": if effort == "medium" { Value::Null } else { json!("http://model.example/v1") },
+        "method": "ocr",
+        "lang": "en",
+        "image_analysis": false,
+        "bundle_name": "hybrid-v4",
+        "input_path": root.join(format!("input-{sequence}.pdf")).to_str().unwrap(),
+        "bundle_path": root.join(format!("bundle-{sequence}")).to_str().unwrap(),
+        "max_bundle_bytes": 1024,
+    });
+    if let Some(page_range) = page_range {
+        request["page_range"] = json!(page_range);
+    }
+    request
+}
+
+#[cfg(unix)]
+fn run_persistent(python: &std::path::Path, frames: &[Value]) -> std::process::Output {
+    use std::io::Write;
+
+    let shim = std::fs::canonicalize("python/mineru_official_worker.py").unwrap();
+    let mut child = Command::new(python)
+        .args([shim.to_str().unwrap(), "--persistent"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for frame in frames {
+        if serde_json::to_writer(&mut stdin, frame).is_err() || stdin.write_all(b"\n").is_err() {
+            break;
+        }
+    }
+    drop(stdin);
+    child.wait_with_output().unwrap()
+}
+
+#[cfg(unix)]
+fn persistent_stdout_frames(output: &std::process::Output) -> Vec<Value> {
+    String::from_utf8(output.stdout.clone())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
 }
 
 /// Strip the `[+HH:MM:SS] ` run-elapsed stamp that the CLI plain renderer
@@ -279,6 +745,7 @@ struct ApiState {
     third_after_layouts: bool,
 }
 
+#[cfg(feature = "office")]
 fn result_zip(stem: &str, kind: &str, extension: &str, origin: &[u8]) -> Vec<u8> {
     use std::io::Write;
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
@@ -321,16 +788,117 @@ fn multipage_pdf(path: &std::path::Path) {
     pdf.save(path).unwrap();
 }
 
+#[cfg(feature = "legacy-office")]
+fn native_text_pdf(path: &std::path::Path) {
+    use lopdf::{Document, Object, Stream, dictionary};
+    let mut pdf = Document::with_version("1.5");
+    let pages = pdf.new_object_id();
+    let font = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+    });
+    let contents = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"BT /F1 12 Tf 72 720 Td (Native PDF text contains enough clean words for the conservative native assessment.) Tj 0 -20 Td (second line keeps the document readable and long enough for sparse extraction checks.) Tj 0 -20 Td (third line confirms ordinary text operators and stable extraction.) Tj ET".to_vec(),
+    ));
+    let page = pdf.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }, "Contents" => contents,
+    });
+    pdf.objects.insert(
+        pages,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+        }),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    pdf.trailer.set("Root", catalog);
+    pdf.save(path).unwrap();
+}
+
+#[cfg(feature = "legacy-office")]
+fn low_quality_text_pdf(path: &std::path::Path) {
+    use lopdf::{Document, Object, Stream, dictionary};
+    let mut pdf = Document::with_version("1.5");
+    let pages = pdf.new_object_id();
+    let font = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+    });
+    let contents = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"BT /F1 12 Tf 72 720 Td (x) Tj 0 -20 Td (x) Tj 0 -20 Td (x) Tj ET".to_vec(),
+    ));
+    let page = pdf.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }, "Contents" => contents,
+    });
+    pdf.objects.insert(
+        pages,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+        }),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    pdf.trailer.set("Root", catalog);
+    pdf.save(path).unwrap();
+}
+
+#[cfg(feature = "legacy-office")]
+fn mixed_text_image_pdf(path: &std::path::Path, image_page: usize) {
+    use lopdf::{Document, Object, Stream, dictionary};
+    let mut pdf = Document::with_version("1.5");
+    let pages = pdf.new_object_id();
+    let font = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+    });
+    let image = pdf.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Image", "Width" => 100, "Height" => 100,
+            "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+        },
+        [220, 40, 40].repeat(100 * 100),
+    ));
+    let mut page_ids = Vec::new();
+    for index in 0..10 {
+        let contents = if index == image_page {
+            "q 612 0 0 792 0 0 cm /Im1 Do Q".to_owned()
+        } else {
+            format!(
+                "BT /F1 12 Tf 72 720 Td (Page {index} contains enough native text for conservative checks.) Tj 0 -20 Td (Second line keeps its text layer reliable for assessment.) Tj 0 -20 Td (Third line is ordinary text.) Tj ET"
+            )
+        };
+        let contents = pdf.add_object(Stream::new(dictionary! {}, contents.into_bytes()));
+        let resources = if index == image_page {
+            dictionary! {
+                "Font" => dictionary! { "F1" => font },
+                "XObject" => dictionary! { "Im1" => image },
+            }
+        } else {
+            dictionary! { "Font" => dictionary! { "F1" => font } }
+        };
+        page_ids.push(pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => resources, "Contents" => contents,
+        }));
+    }
+    pdf.objects.insert(pages, Object::Dictionary(dictionary! {
+        "Type" => "Pages", "Kids" => page_ids.into_iter().map(Object::Reference).collect::<Vec<_>>(), "Count" => 10,
+    }));
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    pdf.trailer.set("Root", catalog);
+    pdf.save(path).unwrap();
+}
+
 #[test]
 #[ignore = "CLI process contract e2e"]
-fn help_advertises_mixed_inputs_without_api_or_local_engines() {
+fn help_advertises_mixed_inputs_and_the_local_anydoc_lane() {
     let output = mineru().arg("--help").output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    assert!(help.contains("external VLM-HTTP subset"));
+    assert!(help.contains("AnyDoc-supported inputs"));
     assert!(help.contains("PDF, image, and Office"));
     assert!(help.contains("--start") && help.contains("--end"));
-    assert!(help.contains("--backend") && help.contains("VLM-HTTP subset"));
+    assert!(help.contains("--backend") && help.contains("VLM-HTTP"));
     assert_eq!(
         help.lines()
             .map(str::trim)
@@ -345,6 +913,11 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
             "-m, --method <METHOD>",
             "-b, --backend <BACKEND>",
             "--effort <EFFORT>",
+            "--model-stack <MODEL_STACK>",
+            "--official-worker-mode <OFFICIAL_WORKER_MODE>",
+            "--official-python <OFFICIAL_PYTHON>",
+            "--official-model-dir <OFFICIAL_MODEL_DIR>",
+            "--official-config <OFFICIAL_CONFIG>",
             "-l, --lang <LANG>",
             "-u, --url <URL>",
             "-s, --start <START>",
@@ -434,8 +1007,9 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
     );
     for values in [
         "[possible values: auto, txt, ocr]",
-        "[possible values: vlm-http-client, hybrid-http-client]",
-        "[possible values: medium, high]",
+        "[possible values: vlm-http-client, hybrid-http-client, local]",
+        "[possible values: medium, high, xhigh]",
+        "[possible values: per-document, persistent]",
         "[possible values: ch, ch_server, korean, ta, te, ka, th, el, arabic, east_slavic, cyrillic, devanagari, en, japan, chinese_cht, latin]",
         "[possible values: true, false]",
     ] {
@@ -446,7 +1020,28 @@ fn help_advertises_mixed_inputs_without_api_or_local_engines() {
             && help.contains("--log-level")
             && help.contains("--batch-size")
             && !help.contains("--server-url")
-            && !help.contains("--model")
+            && !help
+                .lines()
+                .any(|line| line.trim_start().starts_with("--model "))
+    );
+}
+
+#[test]
+fn cli_accepts_local_backend_as_a_distinct_choice() {
+    let matches = mineru::command::cli_command()
+        .try_get_matches_from([
+            "mineru",
+            "-p",
+            "input.doc",
+            "-o",
+            "out",
+            "--backend",
+            "local",
+        ])
+        .unwrap();
+    assert_eq!(
+        matches.get_one::<String>("backend").map(String::as_str),
+        Some("local")
     );
 }
 
@@ -460,6 +1055,7 @@ fn help_documents_environment_variables() {
     assert!(help.contains("MINERU_VL_SERVER"));
     assert!(help.contains("MINERU_VL_MODEL_NAME"));
     assert!(help.contains("MINERU_VL_API_KEY"));
+    assert!(help.contains("MINERU_OFFICIAL_WORKER_MODE"));
     assert!(help.contains("preferred over --api-key"));
     assert!(help.contains("docs/usage.en.md"));
 }
@@ -635,29 +1231,121 @@ async fn non_pdf_ranges_are_ignored_by_the_direct_consumer() {
 
 #[cfg(feature = "legacy-office")]
 #[tokio::test]
-async fn legacy_office_single_file_extracts_markdown_without_any_vlm_server() {
+async fn non_local_legacy_converts_to_pdf_and_uses_the_vlm_route() {
     let input = tempfile::tempdir().unwrap();
     let output = tempfile::tempdir().unwrap();
     std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    let (url, seen) = mock().await;
     let mut cmd = mineru();
     cmd.args(["-p"])
         .arg(input.path().join("old.doc"))
         .args(["-o"])
-        .arg(output.path());
+        .arg(output.path())
+        .args(["--url", &url]);
     let result = command(cmd).await;
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let markdown = std::fs::read_to_string(output.path().join("old/office/old.md")).unwrap();
-    assert!(markdown.contains("Legacy DOC fixture") && markdown.contains("中文测试"));
-    assert!(!markdown.contains('\u{fffd}'));
+    assert!(output.path().join("old/vlm/old.md").is_file());
+    assert!(output.path().join("old/vlm/old_origin.doc").is_file());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("text-only") && stderr.contains("non-ASCII"));
+    assert!(stderr.contains("Microsoft Office or LibreOffice"));
+    assert_eq!(
+        seen.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _, _)| kind == "completion")
+            .count(),
+        1
+    );
 }
 
 #[cfg(feature = "legacy-office")]
 #[tokio::test]
-async fn all_legacy_batch_never_connects_to_a_vlm_server() {
+async fn multiple_legacy_warnings_keep_document_scope_and_one_recommendation() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    std::fs::write(input.path().join("notes.rtf"), legacy_fixtures::rtf()).unwrap();
+    let (url, seen) = mock().await;
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path())
+        .args(["-o"])
+        .arg(output.path())
+        .args(["--url", &url]);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(
+        stderr.matches("text-only best-effort PDF fallback").count(),
+        2
+    );
+    assert_eq!(
+        stderr
+            .matches("non-ASCII characters may be replaced with '?'")
+            .count(),
+        2
+    );
+    assert_eq!(stderr.matches("Microsoft Office or LibreOffice").count(), 1);
+    assert!(output.path().join("old/vlm/old.md").is_file());
+    assert!(output.path().join("notes/vlm/notes.md").is_file());
+    assert_eq!(
+        seen.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _, _)| kind == "completion")
+            .count(),
+        2
+    );
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn legacy_conversion_failure_is_reported_before_vlm_connection() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    // The extension is recognized, but the bytes cannot be a DOC. A dead URL proves that the
+    // helper conversion is attempted before the VLM client can make a request.
+    std::fs::write(input.path().join("broken.doc"), b"not a legacy document").unwrap();
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path().join("broken.doc"))
+        .args(["-o"])
+        .arg(output.path())
+        .args(["--url", "http://127.0.0.1:1"]);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("legacy best-effort PDF conversion failed"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("text-only") && stderr.contains("non-ASCII"),
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("Microsoft Office or LibreOffice").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("request connection failed"), "{stderr}");
+    assert!(!output.path().join("broken").exists());
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn local_backend_extracts_legacy_markdown_without_a_vlm_request() {
     let input = tempfile::tempdir().unwrap();
     let output = tempfile::tempdir().unwrap();
     std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
@@ -666,8 +1354,32 @@ async fn all_legacy_batch_never_connects_to_a_vlm_server() {
         .arg(input.path().join("old.doc"))
         .args(["-o"])
         .arg(output.path())
-        // A dead port proves the VLM client is never constructed for an all-legacy batch.
-        .args(["--url", "http://127.0.0.1:1"]);
+        .args(["--backend", "local", "--url", "not a URL"]);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let markdown = std::fs::read_to_string(output.path().join("old/office/old.md")).unwrap();
+    assert!(markdown.contains("Legacy DOC fixture"));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("request connection failed"));
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn local_backend_ignores_invalid_vlm_environment() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path().join("old.doc"))
+        .args(["-o"])
+        .arg(output.path())
+        .args(["--backend", "local"])
+        .env("MINERU_VL_SERVER", "not a URL")
+        .env("MINERU_VL_API_KEY", "invalid\nkey");
     let result = command(cmd).await;
     assert!(
         result.status.success(),
@@ -677,38 +1389,308 @@ async fn all_legacy_batch_never_connects_to_a_vlm_server() {
     assert!(output.path().join("old/office/old.md").is_file());
 }
 
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn local_backend_ignores_invalid_vlm_transport_environment() {
+    let input = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    for (index, (name, value)) in [
+        ("MINERU_VLM_HTTP_TIMEOUT", "not-a-duration"),
+        ("MINERU_VLM_ALLOW_REMOTE_IMAGES", "maybe"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = input.path().join(format!("out-{index}"));
+        let mut cmd = mineru();
+        cmd.args(["-p"])
+            .arg(input.path().join("old.doc"))
+            .args(["-o"])
+            .arg(&output)
+            .args(["--backend", "local"])
+            .env(name, value);
+        let result = command(cmd).await;
+        assert!(
+            result.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(output.join("old/office/old.md").is_file());
+    }
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn non_local_still_rejects_invalid_vlm_transport_environment() {
+    let input = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    for (index, (name, value)) in [
+        ("MINERU_VLM_HTTP_TIMEOUT", "not-a-duration"),
+        ("MINERU_VLM_ALLOW_REMOTE_IMAGES", "maybe"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = input.path().join(format!("out-{index}"));
+        let mut cmd = mineru();
+        cmd.args(["-p"])
+            .arg(input.path().join("old.doc"))
+            .args(["-o"])
+            .arg(&output)
+            .env(name, value);
+        let result = command(cmd).await;
+        assert!(!result.status.success(), "{name}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(name),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!output.exists());
+    }
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn local_backend_rejects_helper_only_limits_from_flag_or_environment() {
+    let input = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    for (index, env_name) in [(0, None), (1, Some("MINERU_OFFICE_CPU_SECONDS"))] {
+        let output = input.path().join(format!("out-{index}"));
+        let mut cmd = mineru();
+        cmd.args(["-p"])
+            .arg(input.path().join("old.doc"))
+            .args(["-o"])
+            .arg(&output)
+            .args(["--backend", "local"]);
+        if let Some(name) = env_name {
+            cmd.env(name, "1");
+        } else {
+            cmd.args(["--office-wall-seconds", "1"]);
+        }
+        let result = command(cmd).await;
+        assert!(!result.status.success(), "case {index}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("backend=local") && stderr.contains("helper-only"),
+            "{stderr}"
+        );
+        assert!(!output.join("old").exists());
+    }
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn non_local_legacy_still_validates_invalid_url() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path().join("old.doc"))
+        .args(["-o"])
+        .arg(output.path())
+        .args(["--url", "not a URL"]);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("best-effort"),
+        "conversion warning was not emitted before VLM failure: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!output.path().join("old").exists());
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn local_backend_uses_bounded_helper_for_legacy_conversion_without_vlm() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    let mut options = mineru::RunOptions::new(input.path().join("old.doc"), output.path());
+    options.backend = "local".into();
+    options.url = Some("http://127.0.0.1:1".into());
+    let context =
+        mineru::command::RunContext::with_office_executable(bundled_office_helper()).unwrap();
+    let result = mineru::command::run_with_context(options, context).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(output.path().join("old/office/old.md").is_file());
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn local_backend_extracts_clean_pdf_native_markdown_through_bounded_helper_without_vlm() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let pdf = input.path().join("document.pdf");
+    native_text_pdf(&pdf);
+    let options = mineru::RunOptions {
+        path: pdf,
+        output: output.path().to_owned(),
+        backend: "local".into(),
+        url: Some("not a URL".into()),
+        ..mineru::RunOptions::new("unused", "unused")
+    };
+    let context =
+        mineru::command::RunContext::with_office_executable(bundled_office_helper()).unwrap();
+    let result = mineru::command::run_with_context(options, context).await;
+    assert!(result.is_ok(), "{result:?}");
+    let native = output.path().join("document/native/document.md");
+    assert!(
+        std::fs::read_to_string(native)
+            .unwrap()
+            .contains("Native PDF text")
+    );
+    assert!(!output.path().join("document/vlm").exists());
+    assert!(!output.path().join("document/document.json").exists());
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn local_backend_rejects_low_quality_pdf_without_vlm_fallback() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let pdf = input.path().join("sparse.pdf");
+    low_quality_text_pdf(&pdf);
+    let options = mineru::RunOptions {
+        path: pdf,
+        output: output.path().to_owned(),
+        backend: "local".into(),
+        url: Some("http://127.0.0.1:1".into()),
+        ..mineru::RunOptions::new("unused", "unused")
+    };
+    let result = mineru::command::run_with_context(
+        options,
+        mineru::command::RunContext::with_office_executable(bundled_office_helper()).unwrap(),
+    )
+    .await;
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("native PDF Markdown unavailable"), "{error}");
+    assert!(
+        error.contains("low_confidence") || error.contains("ocr_required"),
+        "{error}"
+    );
+    assert!(!error.contains("request connection failed"));
+    assert!(!output.path().join("sparse").exists());
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn local_backend_rejects_ten_page_mixed_text_image_pdf() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let pdf = input.path().join("mixed.pdf");
+    mixed_text_image_pdf(&pdf, 7);
+    let options = mineru::RunOptions {
+        path: pdf,
+        output: output.path().to_owned(),
+        backend: "local".into(),
+        ..mineru::RunOptions::new("unused", "unused")
+    };
+    let error = mineru::command::run_with_context(
+        options,
+        mineru::command::RunContext::with_office_executable(bundled_office_helper()).unwrap(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("mixed_pdf"), "{error}");
+    assert!(error.contains("images_present"), "{error}");
+    assert!(!output.path().join("mixed").exists());
+}
+
+#[cfg(not(feature = "legacy-office"))]
+#[tokio::test]
+async fn local_backend_rejects_pdf_without_native_feature() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let pdf = input.path().join("document.pdf");
+    std::fs::copy("tests/fixtures/pdf/minimal.pdf", &pdf).unwrap();
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(&pdf)
+        .args(["-o"])
+        .arg(output.path())
+        .args(["--backend", "local", "--url", "http://127.0.0.1:1"]);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("native PDF Markdown requires the legacy-office feature"));
+    assert!(!stderr.contains("request connection failed"));
+    assert!(!output.path().join("document").exists());
+}
+
+#[cfg(feature = "legacy-office")]
+#[tokio::test]
+async fn all_legacy_batch_uses_the_vlm_route_after_conversion() {
+    let input = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
+    let (url, seen) = mock().await;
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(input.path().join("old.doc"))
+        .args(["-o"])
+        .arg(output.path())
+        .args(["--url", &url]);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(output.path().join("old/vlm/old.md").is_file());
+    assert_eq!(
+        seen.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _, _)| kind == "completion")
+            .count(),
+        1
+    );
+}
+
 #[cfg(all(feature = "office", feature = "legacy-office"))]
 #[tokio::test]
-async fn legacy_batch_with_doomed_ooxml_candidate_still_converts_offline() {
-    // A preflight-doomed non-legacy candidate must not force a VLM connection for an otherwise
-    // all-legacy batch: the .doc converts offline even when a sibling .docx trips the office
-    // input limit (dead port: any connect attempt would fail the whole batch up front).
+async fn legacy_batch_with_doomed_ooxml_candidate_still_reaches_vlm() {
+    // A preflight-doomed OOXML candidate must not prevent the surviving legacy document from
+    // reaching the VLM route after its best-effort PDF conversion.
     let input = tempfile::tempdir().unwrap();
     let output = tempfile::tempdir().unwrap();
     std::fs::write(input.path().join("old.doc"), legacy_fixtures::doc()).unwrap();
     std::fs::write(input.path().join("huge.docx"), vec![0u8; 64 * 1024]).unwrap();
+    let (url, seen) = mock().await;
     let mut cmd = mineru();
     cmd.args(["-p"])
         .arg(input.path())
         .args(["-o"])
         .arg(output.path())
-        .args(["--url", "http://127.0.0.1:1"])
+        .args(["--url", &url])
         .env("MINERU_OFFICE_INPUT_BYTES", "32768");
     let result = command(cmd).await;
     let stderr = String::from_utf8_lossy(&result.stderr);
     // The doomed .docx is announced in the preflight (the batch fails as a whole), but the
-    // legacy document must have converted offline: no VLM connect error may appear.
+    // legacy document must still reach the VLM route.
     assert!(
         stderr.contains("exceeds office conversion input limit"),
         "{stderr}"
     );
     assert!(
-        !stderr.contains("request connection failed"),
-        "a VLM connection was attempted: {stderr}"
+        !stderr.contains("legacy best-effort PDF conversion failed"),
+        "legacy conversion failed: {stderr}"
     );
     assert!(
-        output.path().join("old/office/old.md").is_file(),
+        output.path().join("old/vlm/old.md").is_file(),
         "legacy document did not convert: {stderr}"
+    );
+    assert_eq!(
+        seen.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _, _)| kind == "completion")
+            .count(),
+        1
     );
 }
 
@@ -730,7 +1712,8 @@ async fn legacy_office_directory_input_extracts_every_format() {
     cmd.args(["-p"])
         .arg(input.path())
         .args(["-o"])
-        .arg(output.path());
+        .arg(output.path())
+        .args(["--backend", "local"]);
     let result = command(cmd).await;
     assert!(
         result.status.success(),
@@ -783,9 +1766,9 @@ async fn mixed_legacy_and_ooxml_batch_handles_both_kinds_in_order() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    // The legacy doc takes the text lane: extracted markdown, no VLM completion.
-    let markdown = std::fs::read_to_string(output.path().join("old/office/old.md")).unwrap();
-    assert!(markdown.contains("Legacy DOC fixture"));
+    // The legacy doc takes the best-effort PDF lane and is parsed by the VLM too.
+    let _markdown = std::fs::read_to_string(output.path().join("old/vlm/old.md")).unwrap();
+    assert!(output.path().join("old/vlm/old_origin.doc").is_file());
     assert_eq!(
         seen.0
             .lock()
@@ -793,7 +1776,7 @@ async fn mixed_legacy_and_ooxml_batch_handles_both_kinds_in_order() {
             .iter()
             .filter(|(kind, _, _)| kind == "completion")
             .count(),
-        1
+        2
     );
     // The OOXML doc still takes the PDF -> VLM lane with its origin preserved.
     assert!(output.path().join("word/office/word_origin.docx").is_file());
@@ -844,14 +1827,7 @@ async fn declared_image_mismatch_preserves_existing_target_without_a_completion(
     );
     assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"old");
     assert!(!target.join("bad_origin.jpg").exists());
-    assert!(
-        !seen
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(kind, _, _)| kind == "completion")
-    );
+    assert!(seen.0.lock().unwrap().is_empty());
     assert!(!output.path().join("bad").read_dir().unwrap().any(|entry| {
         entry
             .unwrap()
@@ -924,121 +1900,1123 @@ async fn behaviorless_options_warn_once_with_canonical_progress() {
 }
 
 #[tokio::test]
-async fn direct_mode_hybrid_backend_warns_honestly_and_succeeds() {
-    // hybrid-http-client is an alias for vlm-http-client in direct mode: every run must warn
-    // that this build has no local models, then succeed through the VLM pipeline.
+async fn default_vlm_client_keeps_pdf_on_vlm_route() {
     let dir = tempfile::tempdir().unwrap();
     let pdf = input(&dir);
     let output = dir.path().join("out");
     let (url, seen) = mock().await;
     let mut cmd = mineru();
-    cmd.args(["-p"]).arg(pdf).args(["-o"]).arg(&output).args([
-        "--url",
-        &url,
-        "--backend",
-        "hybrid-http-client",
-    ]);
+    cmd.args(["-p"])
+        .arg(pdf)
+        .args(["-o"])
+        .arg(&output)
+        .args(["--url", &url])
+        .env("MINERU_OFFICIAL_WORKER_MODE", "invalid");
     let result = command(cmd).await;
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(result.stdout, b"");
-    let stderr = String::from_utf8(result.stderr).unwrap();
     assert!(
-        stderr.contains(
-            "warning: backend=hybrid-http-client: this build has no local layout/OCR/formula models; falling back to the vlm-http-client pipeline (identical behavior)"
-        ),
-        "{stderr}"
+        seen.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(kind, _, _)| kind == "completion")
     );
-    assert!(
-        unstamped(stderr.as_bytes()).contains(&"document completed: document".to_owned()),
-        "{stderr}"
-    );
-    assert!(!seen.0.lock().unwrap().is_empty());
     assert!(output.join("document/vlm/document.md").is_file());
+    assert!(!output.join("document/native").exists());
 }
 
 #[tokio::test]
-async fn api_mode_passes_hybrid_backend_through_verbatim_without_warning() {
-    // Pure pass-through: the backend field reaches the server untouched (the server decides the
-    // semantics), and the direct-mode alias warning must NOT appear in api mode.
+async fn direct_mode_hybrid_backend_uses_the_official_boundary() {
     let dir = tempfile::tempdir().unwrap();
     let pdf = input(&dir);
     let output = dir.path().join("out");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let recorded = Arc::new(Mutex::new(Vec::<String>::new()));
-    let app = Router::new()
-        .route(
-            "/health",
-            get(|| async {
-                Json(
-                    json!({"status":"healthy","protocol_version":2,"max_concurrent_requests":2,"processing_window_size":64}),
-                )
-            }),
-        )
-        .route(
-            "/tasks",
-            post({
-                let base = base.clone();
-                let record = Arc::clone(&recorded);
-                move |mut multipart: Multipart| async move {
-                    let mut backend = None;
-                    while let Some(field) = multipart.next_field().await.unwrap() {
-                        if field.name() == Some("backend") {
-                            backend = Some(field.text().await.unwrap());
-                        }
-                    }
-                    record.lock().unwrap().push(backend.unwrap());
-                    (
-                        StatusCode::ACCEPTED,
-                        Json(
-                            json!({"task_id":format!("{base}/task/x"),"status_url":format!("{base}/status/x"),"result_url":format!("{base}/result/x")}),
-                        ),
-                    )
-                }
-            }),
-        )
-        .route("/status/x", get(|| async { Json(json!({"status":"completed"})) }))
-        .route(
-            "/result/x",
-            get(|| async {
-                let origin = std::fs::read("tests/fixtures/pdf/minimal.pdf").unwrap();
-                let archive = result_zip("document", "vlm", "pdf", &origin);
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/zip")],
-                    archive,
-                )
-                    .into_response()
-            }),
-        );
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let mut cmd = mineru();
-    cmd.args(["-p"]).arg(pdf).args(["-o"]).arg(&output).args([
-        "--api-url",
-        &base,
-        "--backend",
-        "hybrid-http-client",
-    ]);
+    let python = std::env::current_exe().unwrap();
+    cmd.args(["-p"])
+        .arg(pdf)
+        .args(["-o"])
+        .arg(&output)
+        .args(["--backend", "hybrid-http-client", "--official-python"])
+        .arg(python);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    assert_eq!(result.stdout, b"");
+    let stderr = unstamped(&result.stderr).join("\n");
+    assert!(!stderr.contains("local-model worker is integrated"));
+    assert!(
+        stderr.contains("official worker") || stderr.contains("official Python"),
+        "{stderr}"
+    );
+    assert!(!output.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn direct_hybrid_medium_propagates_options_without_a_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let python = fake_official_python(dir.path());
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(pdf)
+        .args(["-o"])
+        .arg(&output)
+        .args([
+            "--backend",
+            "hybrid-http-client",
+            "--effort",
+            "medium",
+            "--method",
+            "ocr",
+            "--lang",
+            "en",
+            "--image-analysis",
+            "false",
+            "--model-stack",
+            "light",
+            "--start",
+            "0",
+            "--end",
+            "4",
+            "--official-python",
+        ])
+        .arg(python);
     let result = command(cmd).await;
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    assert_eq!(
+        std::fs::read_to_string(output.join("document/hybrid-v4/markdown.md")).unwrap(),
+        "effort=medium page=1~5\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn direct_hybrid_persistent_mode_reuses_one_worker_for_two_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let inputs = dir.path().join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    for stem in ["first", "second"] {
+        std::fs::copy(
+            "tests/fixtures/pdf/minimal.pdf",
+            inputs.join(format!("{stem}.pdf")),
+        )
+        .unwrap();
+    }
+    let output = dir.path().join("out");
+    let (python, record) = fake_persistent_python(dir.path());
+    let model_dir = dir.path().join("models");
+    let config = dir.path().join("mineru.toml");
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(&inputs)
+        .args(["-o", output.to_str().unwrap()])
+        .args([
+            "--backend",
+            "hybrid-http-client",
+            "--official-worker-mode",
+            "persistent",
+            "--effort",
+            "medium",
+            "--method",
+            "ocr",
+            "--lang",
+            "en",
+            "--image-analysis",
+            "false",
+            "--model-stack",
+            "full",
+            "--official-python",
+        ])
+        .arg(&python)
+        .args(["--official-model-dir", model_dir.to_str().unwrap()])
+        .args(["--official-config", config.to_str().unwrap()])
+        .env("MINERU_MODEL_STACK", "light")
+        .env("MINERU_VL_API_KEY", "persistent-key")
+        .env("MINERU_VL_MODEL_NAME", "persistent-model");
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let entries: Vec<Value> = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert_eq!(entries.len(), 2);
+    for entry in &entries {
+        assert_eq!(entry["kwargs"]["backend"], "hybrid-http-client");
+        assert_eq!(entry["kwargs"]["effort"], "medium");
+        assert!(entry["kwargs"]["server_url"].is_null());
+        assert_eq!(entry["kwargs"]["method"], "ocr");
+        assert_eq!(entry["kwargs"]["lang"], "en");
+        assert_eq!(entry["kwargs"]["image_analysis"], false);
+        assert_eq!(entry["env"]["MINERU_MODEL_STACK"], "full");
+        assert_eq!(
+            entry["env"]["MINERU_MODEL_BASE_DIR"],
+            model_dir.to_str().unwrap()
+        );
+        assert_eq!(entry["env"]["MINERU_CONFIG"], config.to_str().unwrap());
+        assert_eq!(entry["env"]["MINERU_VL_API_KEY"], "persistent-key");
+        assert_eq!(entry["env"]["MINERU_VL_MODEL_NAME"], "persistent-model");
+    }
+    assert_ne!(entries[0]["path"], entries[1]["path"]);
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.init", record.display())).unwrap(),
+        "1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.parse", record.display())).unwrap(),
+        "2"
+    );
+    let pids = std::fs::read_to_string(dir.path().join("persistent-pids")).unwrap();
+    assert_eq!(pids.lines().collect::<Vec<_>>().len(), 1);
+    for stem in ["first", "second"] {
+        let markdown = output.join(format!("{stem}/hybrid-v4/markdown.md"));
+        assert!(markdown.is_file(), "missing {}", markdown.display());
+        assert!(
+            std::fs::read_to_string(markdown)
+                .unwrap()
+                .contains("request-")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn direct_hybrid_default_mode_keeps_one_shot_worker_per_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let inputs = dir.path().join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    for stem in ["first", "second"] {
+        std::fs::copy(
+            "tests/fixtures/pdf/minimal.pdf",
+            inputs.join(format!("{stem}.pdf")),
+        )
+        .unwrap();
+    }
+    let output = dir.path().join("out");
+    let python = fake_official_python(dir.path());
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(&inputs)
+        .args(["-o", output.to_str().unwrap()])
+        .args(["--backend", "hybrid-http-client", "--official-python"])
+        .arg(python);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("official-worker-pids"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    for stem in ["first", "second"] {
+        assert!(
+            output
+                .join(format!("{stem}/hybrid-v4/markdown.md"))
+                .is_file()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn official_worker_mode_precedence_and_invalid_values_fail_closed() {
+    let env_dir = tempfile::tempdir().unwrap();
+    let env_inputs = env_dir.path().join("inputs");
+    std::fs::create_dir(&env_inputs).unwrap();
+    for stem in ["first", "second"] {
+        std::fs::copy(
+            "tests/fixtures/pdf/minimal.pdf",
+            env_inputs.join(format!("{stem}.pdf")),
+        )
+        .unwrap();
+    }
+    let env_output = env_dir.path().join("out");
+    let (env_python, _) = fake_persistent_python(env_dir.path());
+    let mut env_cmd = mineru();
+    env_cmd
+        .args(["-p"])
+        .arg(&env_inputs)
+        .args(["-o", env_output.to_str().unwrap()])
+        .args(["--backend", "hybrid-http-client", "--official-python"])
+        .arg(&env_python)
+        .env("MINERU_OFFICIAL_WORKER_MODE", "persistent");
+    let env_result = command(env_cmd).await;
+    assert!(
+        env_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&env_result.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(env_dir.path().join("persistent-pids"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+
+    let override_dir = tempfile::tempdir().unwrap();
+    let override_inputs = override_dir.path().join("inputs");
+    std::fs::create_dir(&override_inputs).unwrap();
+    for stem in ["first", "second"] {
+        std::fs::copy(
+            "tests/fixtures/pdf/minimal.pdf",
+            override_inputs.join(format!("{stem}.pdf")),
+        )
+        .unwrap();
+    }
+    let override_output = override_dir.path().join("out");
+    let override_python = fake_official_python(override_dir.path());
+    let mut override_cmd = mineru();
+    override_cmd
+        .args(["-p"])
+        .arg(&override_inputs)
+        .args(["-o", override_output.to_str().unwrap()])
+        .args([
+            "--backend",
+            "hybrid-http-client",
+            "--official-worker-mode",
+            "per-document",
+            "--official-python",
+        ])
+        .arg(&override_python)
+        .env("MINERU_OFFICIAL_WORKER_MODE", "persistent");
+    let override_result = command(override_cmd).await;
+    assert!(
+        override_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&override_result.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(override_dir.path().join("official-worker-pids"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+
+    let invalid_env_dir = tempfile::tempdir().unwrap();
+    let invalid_env_pdf = input(&invalid_env_dir);
+    let invalid_env_output = invalid_env_dir.path().join("out");
+    let invalid_env_python = fake_official_python(invalid_env_dir.path());
+    let mut invalid_env_cmd = mineru();
+    invalid_env_cmd
+        .args(["-p"])
+        .arg(invalid_env_pdf)
+        .args(["-o", invalid_env_output.to_str().unwrap()])
+        .args(["--backend", "hybrid-http-client", "--official-python"])
+        .arg(invalid_env_python)
+        .env("MINERU_OFFICIAL_WORKER_MODE", "unexpected");
+    let invalid_env_result = command(invalid_env_cmd).await;
+    assert!(!invalid_env_result.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid_env_result.stderr).contains("MINERU_OFFICIAL_WORKER_MODE")
+    );
+    assert!(!invalid_env_dir.path().join("official-worker-pids").exists());
+    assert!(!invalid_env_output.exists());
+
+    let invalid_cli_dir = tempfile::tempdir().unwrap();
+    let invalid_cli_pdf = input(&invalid_cli_dir);
+    let invalid_cli_output = invalid_cli_dir.path().join("out");
+    let mut invalid_cli_cmd = mineru();
+    invalid_cli_cmd.args(["-p"]).arg(invalid_cli_pdf).args([
+        "-o",
+        invalid_cli_output.to_str().unwrap(),
+        "--backend",
+        "hybrid-http-client",
+        "--official-worker-mode",
+        "unexpected",
+    ]);
+    let invalid_cli_result = command(invalid_cli_cmd).await;
+    assert!(!invalid_cli_result.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid_cli_result.stderr).contains("invalid value 'unexpected'")
+    );
+    assert!(!invalid_cli_output.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_cli_handshake_failure_never_falls_back_to_one_shot() {
+    let dir = tempfile::tempdir().unwrap();
+    let inputs = dir.path().join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    for stem in ["first", "second"] {
+        std::fs::copy(
+            "tests/fixtures/pdf/minimal.pdf",
+            inputs.join(format!("{stem}.pdf")),
+        )
+        .unwrap();
+    }
+    let output = dir.path().join("out");
+    let python = fake_persistent_bad_handshake(dir.path());
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(&inputs)
+        .args([
+            "-o",
+            output.to_str().unwrap(),
+            "--backend",
+            "hybrid-http-client",
+            "--official-worker-mode",
+            "persistent",
+            "--official-python",
+        ])
+        .arg(python);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("official persistent handshake mismatch"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("official worker protocol version mismatch"));
+    assert!(!output.exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("persistent-pids"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn official_shim_propagates_exact_kwargs_and_environment() {
+    for effort in ["high", "xhigh"] {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = input(&dir);
+        let output = dir.path().join("out");
+        let python = fake_official_shim_python(dir.path(), "4.0.0a6", false);
+        let model_dir = dir.path().join("models");
+        let config = dir.path().join("mineru.toml");
+        let mut cmd = mineru();
+        cmd.args(["-p"])
+            .arg(pdf)
+            .args(["-o"])
+            .arg(&output)
+            .args([
+                "--backend",
+                "hybrid-http-client",
+                "--effort",
+                effort,
+                "--url",
+                "http://model.example/v1",
+                "--method",
+                "ocr",
+                "--lang",
+                "en",
+                "--image-analysis",
+                "false",
+                "--model-stack",
+                "full",
+                "--start",
+                "2",
+                "--official-python",
+            ])
+            .arg(python)
+            .args(["--official-model-dir"])
+            .arg(&model_dir)
+            .args(["--official-config"])
+            .arg(&config)
+            .env("MINERU_MODEL_STACK", "light")
+            .env("MINERU_VL_API_KEY", "test-key")
+            .env("MINERU_VL_MODEL_NAME", "test-model");
+        let result = command(cmd).await;
+        assert!(
+            result.status.success(),
+            "{effort}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(result.stdout, b"");
+        let record: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("fake-mineru-record.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["kwargs"]["backend"], "hybrid-http-client");
+        assert_eq!(record["kwargs"]["effort"], effort);
+        assert_eq!(record["kwargs"]["server_url"], "http://model.example/v1");
+        assert_eq!(record["kwargs"]["method"], "ocr");
+        assert_eq!(record["kwargs"]["lang"], "en");
+        assert_eq!(record["kwargs"]["image_analysis"], false);
+        assert_eq!(record["kwargs"]["page_range"], "3~-1");
+        assert!(record["kwargs"].get("model_stack").is_none());
+        assert_eq!(record["env"]["MINERU_MODEL_STACK"], "full");
+        assert_eq!(
+            record["env"]["MINERU_MODEL_BASE_DIR"],
+            model_dir.to_str().unwrap()
+        );
+        assert_eq!(record["env"]["MINERU_CONFIG"], config.to_str().unwrap());
+        assert_eq!(record["env"]["MINERU_VL_API_KEY"], "test-key");
+        assert_eq!(record["env"]["MINERU_VL_MODEL_NAME"], "test-model");
+        assert!(output.join("document/hybrid-v4/markdown.md").is_file());
+        assert_eq!(
+            std::fs::read(output.join("document/hybrid-v4/images/fake.png")).unwrap(),
+            b"png"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn official_shim_normalizes_bare_image_assets_and_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let python = fake_official_asset_shim_python(dir.path(), "figure.jpg");
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(pdf)
+        .args([
+            "-o",
+            output.to_str().unwrap(),
+            "--backend",
+            "hybrid-http-client",
+            "--official-python",
+        ])
+        .arg(python);
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let bundle = output.join("document/hybrid-v4");
+    assert_eq!(
+        std::fs::read(bundle.join("images/figure.jpg")).unwrap(),
+        b"\xff\xd8\x00\xff\xd9"
+    );
+    assert_eq!(
+        std::fs::read_to_string(bundle.join("markdown.md")).unwrap(),
+        "![figure](images/figure.jpg)\n"
+    );
+    let middle: Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("middle_json.json")).unwrap()).unwrap();
+    assert_eq!(middle["pages"][0]["image_path"], "images/figure.jpg");
+    assert_eq!(middle["pages"][0]["figure.jpg"], "ordinary-key");
+    let content: Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("content_list.json")).unwrap()).unwrap();
+    assert_eq!(content[0]["img_path"], "images/figure.jpg");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn official_shim_rejects_unsafe_bare_image_paths() {
+    for path in [
+        "/figure.jpg",
+        "../figure.jpg",
+        "nested/figure.jpg",
+        r#"nested\figure.jpg"#,
+        "figure.jpg\0",
+        "figure.jpg.",
+        "CON.jpg",
+        "images/../figure.jpg",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = input(&dir);
+        let output = dir.path().join("out");
+        let python = fake_official_asset_shim_python(dir.path(), path);
+        let mut cmd = mineru();
+        cmd.args(["-p"])
+            .arg(pdf)
+            .args([
+                "-o",
+                output.to_str().unwrap(),
+                "--backend",
+                "hybrid-http-client",
+                "--official-python",
+            ])
+            .arg(python);
+        let result = command(cmd).await;
+        assert!(
+            !result.status.success(),
+            "unsafe path unexpectedly succeeded: {path}"
+        );
+        assert!(!output.exists(), "unsafe path was published: {path}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn official_shim_enforces_package_pin_and_save_cap() {
+    let bad_dir = tempfile::tempdir().unwrap();
+    let bad_pdf = input(&bad_dir);
+    let bad_output = bad_dir.path().join("out");
+    let bad_python = fake_official_shim_python(bad_dir.path(), "3.4.5", false);
+    let mut bad_cmd = mineru();
+    bad_cmd
+        .args(["-p"])
+        .arg(bad_pdf)
+        .args(["-o"])
+        .arg(&bad_output)
+        .args(["--backend", "hybrid-http-client", "--official-python"])
+        .arg(bad_python);
+    let bad_result = command(bad_cmd).await;
+    assert!(!bad_result.status.success());
+    assert!(
+        unstamped(&bad_result.stderr)
+            .join("\n")
+            .contains("package version is not 4.0.0a6")
+    );
+    assert!(!bad_dir.path().join("fake-mineru-record.json").exists());
+    assert!(!bad_output.exists());
+
+    let cap_dir = tempfile::tempdir().unwrap();
+    let cap_pdf = input(&cap_dir);
+    let cap_output = cap_dir.path().join("out");
+    let cap_python = fake_official_shim_python(cap_dir.path(), "4.0.0a6", true);
+    let mut cap_cmd = mineru();
+    cap_cmd
+        .args(["-p"])
+        .arg(cap_pdf)
+        .args(["-o"])
+        .arg(&cap_output)
+        .args(["--backend", "hybrid-http-client", "--official-python"])
+        .arg(cap_python)
+        .args(["--max-output-bytes", "1024"]);
+    let cap_result = command(cap_cmd).await;
+    assert!(!cap_result.status.success());
+    assert!(
+        unstamped(&cap_result.stderr)
+            .join("\n")
+            .contains("official bundle exceeds configured byte limit"),
+        "{}",
+        String::from_utf8_lossy(&cap_result.stderr)
+    );
+    assert!(!cap_output.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_auto_model_stack_overrides_environment_in_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let python = fake_official_shim_python(dir.path(), "4.0.0a6", false);
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(pdf)
+        .args(["-o"])
+        .arg(&output)
+        .args([
+            "--backend",
+            "hybrid-http-client",
+            "--model-stack",
+            "auto",
+            "--official-python",
+        ])
+        .arg(python)
+        .env("MINERU_MODEL_STACK", "full");
+    let result = command(cmd).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("fake-mineru-record.json")).unwrap())
+            .unwrap();
+    assert_eq!(record["env"]["MINERU_MODEL_STACK"], "auto");
+    assert!(record["kwargs"].get("page_range").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn persistent_c2a_handshake_and_two_requests_are_hermetic() {
+    let dir = tempfile::tempdir().unwrap();
+    let (python, record) = fake_persistent_python(dir.path());
+    let start = persistent_start(dir.path(), persistent_capabilities());
+    let mut first = persistent_request(dir.path(), "c2a-1", 1, "high", Some("2~3"));
+    first["max_bundle_bytes"] = json!(384);
+    let mut second = persistent_request(dir.path(), "c2a-2", 2, "xhigh", None);
+    second["max_bundle_bytes"] = json!(384);
+    let output = run_persistent(&python, &[start, first, second]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let frames = persistent_stdout_frames(&output);
+    assert_eq!(frames.len(), 3, "stdout contained a non-protocol print");
+    assert_eq!(frames[0]["type"], "handshake");
+    assert_eq!(frames[0]["protocol"], "mineru-rs-official-worker/2");
+    assert_eq!(frames[0]["status"], "ready");
+    assert_eq!(frames[0]["package_version"], "4.0.0a6");
+    assert_eq!(frames[0]["schema_version"], "1.0");
+    assert_eq!(frames[0]["backend"], "hybrid-http-client");
+    assert_eq!(frames[0]["max_in_flight"], 1);
+    assert_eq!(frames[0]["capabilities"], persistent_capabilities());
+    assert!(
+        frames[0]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("persistent parser import stderr")
+    );
+    for (frame, request_id, sequence) in [(&frames[1], "c2a-1", 1), (&frames[2], "c2a-2", 2)] {
+        assert_eq!(frame["type"], "result");
+        assert_eq!(frame["protocol"], "mineru-rs-official-worker/2");
+        assert_eq!(frame["status"], "ok");
+        assert_eq!(frame["request_id"], request_id);
+        assert_eq!(frame["sequence"], sequence);
+        assert_eq!(frame["package_version"], "4.0.0a6");
+        assert_eq!(frame["schema_version"], "1.0");
+        assert_eq!(frame["backend"], "hybrid-http-client");
+        assert_eq!(frame["bundle_name"], "hybrid-v4");
+        assert!(
+            frame["diagnostic"]
+                .as_str()
+                .unwrap()
+                .contains("persistent result.save stderr")
+        );
+    }
+
+    let entries: Vec<Value> = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["kwargs"]["effort"], "high");
+    assert_eq!(entries[0]["kwargs"]["page_range"], "2~3");
+    assert!(entries[1]["kwargs"].get("page_range").is_none());
+    assert_eq!(entries[1]["kwargs"]["effort"], "xhigh");
+    assert_eq!(entries[0]["env"]["MINERU_MODEL_STACK"], "full");
+    assert_eq!(
+        entries[0]["env"]["MINERU_MODEL_BASE_DIR"],
+        dir.path().join("models").to_str().unwrap()
+    );
+    assert_eq!(
+        entries[0]["env"]["MINERU_CONFIG"],
+        dir.path().join("config.toml").to_str().unwrap()
+    );
+    assert_eq!(entries[0]["env"]["MINERU_VL_API_KEY"], "persistent-key");
+    assert_eq!(
+        entries[0]["env"]["MINERU_VL_MODEL_NAME"],
+        "persistent-model"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.init", record.display())).unwrap(),
+        "1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.parse", record.display())).unwrap(),
+        "2"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("bundle-1/markdown.md")).unwrap(),
+        format!("request-1\\n{}", "x".repeat(200))
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("bundle-2/markdown.md")).unwrap(),
+        format!("request-2\\n{}", "x".repeat(200))
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("persistent mineru import stdout"));
+    assert!(stderr.contains("persistent parser import stdout"));
+    assert!(stderr.contains("persistent parse_async stdout"));
+    assert!(stderr.contains("persistent result.save stdout"));
+}
+
+#[cfg(unix)]
+#[test]
+fn persistent_c2a_rejects_bad_startup_and_frames() {
+    let mut cases = Vec::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (python, _) = fake_persistent_python(dir.path());
+    let mut bad_package = persistent_start(dir.path(), persistent_capabilities());
+    bad_package["package_version"] = json!("3.4.5");
+    cases.push((dir, python, vec![bad_package], false));
+
+    let dir = tempfile::tempdir().unwrap();
+    let (python, _) = fake_persistent_python(dir.path());
+    let mut bad_capabilities = persistent_capabilities();
+    bad_capabilities["cancellation"] = json!("retry");
+    let start = persistent_start(dir.path(), bad_capabilities);
+    cases.push((dir, python, vec![start], false));
+
+    let dir = tempfile::tempdir().unwrap();
+    let (python, _) = fake_persistent_python(dir.path());
+    let start = persistent_start(dir.path(), persistent_capabilities());
+    cases.push((
+        dir,
+        python,
+        vec![
+            start,
+            json!({"type":"unknown","protocol":"mineru-rs-official-worker/2"}),
+        ],
+        true,
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let (python, _) = fake_persistent_python(dir.path());
+    let start = persistent_start(dir.path(), persistent_capabilities());
+    let mut same_path = persistent_request(dir.path(), "same-path", 1, "medium", None);
+    same_path["bundle_path"] = same_path["input_path"].clone();
+    cases.push((dir, python, vec![start, same_path], true));
+
+    let dir = tempfile::tempdir().unwrap();
+    let (python, _) = fake_persistent_python(dir.path());
+    let mut unsupported = persistent_request(dir.path(), "bad-kwargs", 1, "medium", None);
+    unsupported["model_stack"] = json!("full");
+    let start = persistent_start(dir.path(), persistent_capabilities());
+    cases.push((dir, python, vec![start, unsupported], true));
+
+    let dir = tempfile::tempdir().unwrap();
+    let (python, _) = fake_persistent_python(dir.path());
+    let start = persistent_start(dir.path(), persistent_capabilities());
+    cases.push((
+        dir,
+        python,
+        vec![
+            start,
+            json!({
+                "type": "request",
+                "payload": "x".repeat(70 * 1024),
+            }),
+        ],
+        true,
+    ));
+
+    for (_dir, python, frames, has_handshake) in cases {
+        let output = run_persistent(&python, &frames);
+        assert!(!output.status.success());
+        let response = persistent_stdout_frames(&output);
+        if has_handshake {
+            assert_eq!(response.first().unwrap()["type"], "handshake");
+        }
+        assert_eq!(response.last().unwrap()["type"], "error");
+        assert_eq!(response.last().unwrap()["status"], "error");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn persistent_c2a_request_error_does_not_poison_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (python, _) = fake_persistent_python(dir.path());
+    let start = persistent_start(dir.path(), persistent_capabilities());
+    let mut failed = persistent_request(dir.path(), "c2a-error", 1, "medium", None);
+    failed["max_bundle_bytes"] = json!(64);
+    let recovered = persistent_request(dir.path(), "c2a-recovered", 2, "medium", None);
+    let output = run_persistent(&python, &[start, failed, recovered]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let frames = persistent_stdout_frames(&output);
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[0]["type"], "handshake");
+    assert_eq!(frames[1]["request_id"], "c2a-error");
+    assert_eq!(frames[1]["status"], "error");
+    assert_eq!(frames[2]["request_id"], "c2a-recovered");
+    assert_eq!(frames[2]["status"], "ok");
+    assert!(dir.path().join("bundle-2/markdown.md").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn persistent_c2a_oversized_document_error_does_not_poison_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (python, _) = fake_persistent_oversized_error_python(dir.path());
+    let start = persistent_start(dir.path(), persistent_capabilities());
+    let first = persistent_request(dir.path(), "c2a-oversized-error", 1, "medium", None);
+    let second = persistent_request(dir.path(), "c2a-after-oversized-error", 2, "medium", None);
+    let output = run_persistent(&python, &[start, first, second]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .all(|line| line.len() < 64 * 1024)
+    );
+
+    let frames = persistent_stdout_frames(&output);
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[0]["type"], "handshake");
+    assert_eq!(frames[1]["type"], "result");
+    assert_eq!(frames[1]["status"], "error");
+    assert_eq!(frames[1]["request_id"], "c2a-oversized-error");
+    assert!(
+        frames[1]["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("parser error "))
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("captured parser diagnostic"));
+    assert_eq!(frames[2]["type"], "result");
+    assert_eq!(frames[2]["status"], "ok");
+    assert_eq!(frames[2]["request_id"], "c2a-after-oversized-error");
+    assert!(dir.path().join("bundle-2/markdown.md").is_file());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn official_worker_rejects_bad_protocol_and_lifecycle_failures() {
+    for mode in [
+        "protocol", "request", "package", "schema", "backend", "stdout", "stderr", "crash",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = input(&dir);
+        let output = dir.path().join("out");
+        let python = fake_official_failure(dir.path(), mode);
+        let mut cmd = mineru();
+        cmd.args(["-p"])
+            .arg(pdf)
+            .args(["-o"])
+            .arg(&output)
+            .args(["--backend", "hybrid-http-client", "--official-python"])
+            .arg(python);
+        let result = command(cmd).await;
+        assert!(!result.status.success(), "{mode} unexpectedly succeeded");
+        assert!(!output.exists(), "{mode} published output");
+        assert!(
+            !unstamped(&result.stderr)
+                .join("\n")
+                .contains("local-model worker is integrated"),
+            "{mode} took the C0 path"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn official_worker_deadline_terminates_fake_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let python = fake_official_failure(dir.path(), "timeout");
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(pdf)
+        .args(["-o"])
+        .arg(&output)
+        .args(["--backend", "hybrid-http-client", "--official-python"])
+        .arg(python)
+        .args(["--total-deadline-seconds", "1"]);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    assert!(
+        unstamped(&result.stderr)
+            .join("\n")
+            .contains("official worker deadline expired")
+    );
+    assert!(!output.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn official_worker_reaps_successful_child_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let python = fake_official_python_with_background(dir.path(), true);
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(pdf)
+        .args(["-o", output.to_str().unwrap()])
+        .args(["--backend", "hybrid-http-client", "--official-python"])
+        .arg(python);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), command(cmd))
+        .await
+        .expect("successful worker leaked a child holding the protocol pipes");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(output.join("document/hybrid-v4/markdown.md").is_file());
+}
+
+#[tokio::test]
+async fn direct_hybrid_remote_efforts_require_an_explicit_url() {
+    for effort in ["high", "xhigh"] {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = input(&dir);
+        let output = dir.path().join("out");
+        let mut cmd = mineru();
+        cmd.args(["-p"]).arg(pdf).args(["-o"]).arg(&output).args([
+            "--backend",
+            "hybrid-http-client",
+            "--effort",
+            effort,
+        ]);
+        let result = command(cmd).await;
+        assert!(!result.status.success());
+        let stderr = unstamped(&result.stderr).join("\n");
+        assert!(
+            stderr.contains("requires an explicit HTTP(S) URL"),
+            "{effort}: {stderr}"
+        );
+        assert!(!output.exists());
+    }
+}
+
+#[tokio::test]
+async fn direct_hybrid_rejects_v3_transport_controls() {
+    let cases = [
+        ("--http-timeout-seconds", "1", "v3-only transport controls"),
+        ("--vlm-debug", "true", "v3-only transport controls"),
+        (
+            "--client-side-output-generation",
+            "false",
+            "client-side output generation",
+        ),
+    ];
+    for (flag, value, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = input(&dir);
+        let output = dir.path().join("out");
+        let mut cmd = mineru();
+        cmd.args(["-p"]).arg(pdf).args(["-o"]).arg(&output).args([
+            "--backend",
+            "hybrid-http-client",
+            flag,
+            value,
+        ]);
+        let result = command(cmd).await;
+        assert!(!result.status.success(), "{flag} unexpectedly succeeded");
+        assert!(
+            unstamped(&result.stderr).join("\n").contains(expected),
+            "{flag}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!output.exists());
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(pdf)
+        .args(["-o"])
+        .arg(&output)
+        .args(["--backend", "hybrid-http-client"])
+        .env("MINERU_VLM_HTTP_TIMEOUT", "1");
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    assert!(
+        unstamped(&result.stderr)
+            .join("\n")
+            .contains("v3-only transport controls")
+    );
+    assert!(!output.exists());
+}
+
+#[tokio::test]
+async fn direct_hybrid_rejects_invalid_stack_and_relative_official_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let mut invalid_stack = mineru();
+    invalid_stack.args(["-p"]).arg(&pdf).args([
+        "-o",
+        output.to_str().unwrap(),
+        "--backend",
+        "hybrid-http-client",
+        "--model-stack",
+        "bad",
+    ]);
+    assert!(!command(invalid_stack).await.status.success());
+
+    let mut relative_python = mineru();
+    relative_python
+        .args(["-p"])
+        .arg(pdf)
+        .args(["-o"])
+        .arg(&output)
+        .args([
+            "--backend",
+            "hybrid-http-client",
+            "--official-python",
+            "python",
+        ]);
+    let result = command(relative_python).await;
+    assert!(!result.status.success());
+    assert!(
+        unstamped(&result.stderr)
+            .join("\n")
+            .contains("official Python executable path must be absolute")
+    );
+}
+
+#[cfg(feature = "office")]
+#[tokio::test]
+async fn direct_hybrid_rejects_office_before_spawning() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("document.docx"), b"not an Office package").unwrap();
+    let output = dir.path().join("out");
+    let python = std::env::current_exe().unwrap();
+    let mut cmd = mineru();
+    cmd.args(["-p"])
+        .arg(dir.path().join("document.docx"))
+        .args([
+            "-o",
+            output.to_str().unwrap(),
+            "--backend",
+            "hybrid-http-client",
+            "--official-python",
+        ])
+        .arg(python);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    let stderr = unstamped(&result.stderr).join("\n");
+    assert!(
+        stderr.contains("accepts only PDF and official image inputs"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("official worker"),
+        "worker spawned: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn api_mode_hybrid_backend_is_explicitly_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = input(&dir);
+    let output = dir.path().join("out");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    let mut cmd = mineru();
+    cmd.args(["-p"]).arg(pdf).args(["-o"]).arg(&output).args([
+        "--api-url",
+        &api_url,
+        "--backend",
+        "hybrid-http-client",
+        "--official-worker-mode",
+        "persistent",
+    ]);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
     assert_eq!(result.stdout, b"");
     assert_eq!(
-        *recorded.lock().unwrap(),
-        vec!["hybrid-http-client".to_owned()]
+        unstamped(&result.stderr),
+        ["failed: backend=hybrid-http-client is direct-only; API mode does not support Hybrid"]
     );
-    let stderr = String::from_utf8(result.stderr).unwrap();
-    assert!(
-        !stderr.contains("backend=hybrid-http-client:"),
-        "api mode must not warn: {stderr}"
+    assert!(!output.exists());
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
     );
-    assert!(output.join("document/vlm/document_origin.pdf").is_file());
 }
 
 #[tokio::test]

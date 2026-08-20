@@ -93,6 +93,10 @@ CRATE_FIXTURES = {
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg",
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg",
 }
+CRATE_PYTHON_FILES = {
+    "python/mineru_official_worker.py",
+    "python/mineru_official_worker_protocol.py",
+}
 BINARY_TARGETS = {
     "x86_64-unknown-linux-gnu": ("linux", 62),
     "aarch64-unknown-linux-gnu": ("linux", 183),
@@ -504,7 +508,7 @@ def expected_crate_files(source: Path) -> set[str]:
     if has_revision:
         expected.add(".cargo_vcs_info.json")
     expected.update(p.relative_to(source).as_posix() for p in (source / "src").rglob("*") if p.is_file())
-    expected.update(CRATE_FIXTURES)
+    expected.update(CRATE_FIXTURES | CRATE_PYTHON_FILES)
     return expected
 
 
@@ -526,7 +530,7 @@ def validate_crate_manifest(files: dict[str, bytes], version: str) -> None:
     if set(package.get("include", [])) != {
         "Cargo.toml", "Cargo.lock", "src/**", "/README.md", "README.zh-CN.md",
         "LICENSE-MIT", "LICENSE-APACHE",
-        "docs/usage.md", "docs/usage.en.md", "docs/compatibility.md", "!tests/fixtures/input/README.md", *CRATE_FIXTURES,
+        "docs/usage.md", "docs/usage.en.md", "docs/compatibility.md", "!tests/fixtures/input/README.md", *CRATE_FIXTURES, *CRATE_PYTHON_FILES,
     }:
         fail("normalized Cargo.toml include policy differs")
 
@@ -1308,6 +1312,36 @@ def self_test(_: argparse.Namespace) -> None:
         assert local_wheel_hashes(pypi_dir, "mineru-rs", version) == {
             pypi_wheel.name: hashlib.sha256(b"wheel").hexdigest()
         }
+
+        assert CRATE_PYTHON_FILES == {
+            "python/mineru_official_worker.py",
+            "python/mineru_official_worker_protocol.py",
+        }
+        crate_include = {
+            "Cargo.toml", "Cargo.lock", "src/**", "/README.md", "README.zh-CN.md",
+            "LICENSE-MIT", "LICENSE-APACHE", "docs/usage.md", "docs/usage.en.md", "docs/compatibility.md",
+            "!tests/fixtures/input/README.md", *CRATE_FIXTURES, *CRATE_PYTHON_FILES,
+        }
+
+        def crate_manifest(includes: set[str]) -> bytes:
+            entries = "\n".join(f'    "{name}",' for name in sorted(includes))
+            bins = "\n".join(f'[[bin]]\nname = "{name}"' for name in sorted(BINS))
+            return (
+                f'[package]\nname = "mineru"\nversion = "{version}"\nlicense = "{LICENSE}"\n'
+                f'repository = "{REPOSITORY}"\ninclude = [\n{entries}\n]\n{bins}\n'
+            ).encode()
+
+        crate_source = Path(tmp)
+        crate_payload = {name: b"" for name in expected_crate_files(crate_source) | CRATE_PYTHON_FILES}
+        crate_payload["Cargo.toml"] = crate_manifest(crate_include)
+        validate_crate_payload(crate_payload, version, crate_source)
+        for python_file in sorted(CRATE_PYTHON_FILES):
+            missing_payload = dict(crate_payload)
+            del missing_payload[python_file]
+            must_fail(
+                lambda missing_payload=missing_payload: validate_crate_payload(missing_payload, version, crate_source),
+                f"crate without {python_file} was accepted",
+            )
 
         vcs_commit = "1" * 40
         vcs_other = "2" * 40

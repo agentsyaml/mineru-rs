@@ -74,7 +74,7 @@ def validate_zip(payload):
 class Mock:
     def __init__(self):
         self.requests = []
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), self.handler())
+        self.server = ThreadingHTTPServer(("0.0.0.0", 0), self.handler())
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     def handler(self):
@@ -137,22 +137,85 @@ def container_logs(container):
     return (result.stdout + result.stderr).strip()
 
 
+def docker_runtime():
+    try:
+        result = subprocess.run(["docker", "info"], text=True, capture_output=True, timeout=10)
+    except (FileNotFoundError, OSError) as error:
+        raise AssertionError(f"Docker runtime is unavailable: {error}") from error
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError("Docker runtime did not respond to `docker info` within 10 seconds") from error
+    detail = (result.stderr or result.stdout).strip()
+    check(result.returncode == 0, f"Docker runtime is unavailable: {detail or 'docker info failed'}")
+
+
+def image_config(image):
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image], check=True, text=True, capture_output=True,
+        )
+    except (FileNotFoundError, OSError) as error:
+        raise AssertionError(f"Docker image inspection is unavailable: {error}") from error
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout).strip()
+        raise AssertionError(f"Docker image {image!r} cannot be inspected: {detail}") from error
+    return json.loads(result.stdout)[0]["Config"]
+
+
+def assert_non_root_configured_user(config):
+    configured_user = str(config.get("User", "")).strip()
+    check(configured_user, "image has no configured non-root USER")
+    user = configured_user.split(":", 1)[0].strip()
+    check(user and user.lower() != "root", f"image USER is root: {configured_user!r}")
+    if user.isdigit():
+        check(int(user) != 0, f"image USER is root: {configured_user!r}")
+
+
+def runtime_uid(container):
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container, "id", "-u"], check=True, text=True, capture_output=True,
+        )
+    except (FileNotFoundError, OSError) as error:
+        raise AssertionError(f"cannot inspect the container runtime UID: {error}") from error
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout).strip()
+        raise AssertionError(f"cannot inspect the container runtime UID: {detail}") from error
+    value = result.stdout.strip()
+    check(value.isdigit() and int(value) != 0, f"container runtime UID is root or invalid: {value!r}")
+
+
 def run(image, pdf):
     container = "mineru-container-smoke-" + uuid.uuid4().hex[:12]
     output = Path(tempfile.mkdtemp(prefix="mineru-container-output-"))
     mock = Mock()
     port = free_port()
+    mock_started = False
     try:
+        docker_runtime()
+        assert_non_root_configured_user(image_config(image))
+        os.chmod(output, 0o777)
         mock.start()
-        subprocess.run([
-            "docker", "run", "--detach", "--name", container, "--network", "host",
-            "--user", f"{os.getuid()}:{os.getgid()}", "--volume", f"{output}:/app/output",
-            "--env", f"MINERU_VL_SERVER=http://127.0.0.1:{mock.port}",
-            "--env", "MINERU_VL_API_KEY=smoke-key",
-            "--env", "MINERU_API_PUBLIC_BIND_EXPOSED=true",
-            "--env", "MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true", image,
-            "mineru-api", "--host", "0.0.0.0", "--port", str(port),
-        ], check=True)
+        mock_started = True
+        try:
+            subprocess.run([
+                "docker", "run", "--detach", "--name", container,
+                "--network", "bridge",
+                "--add-host", "host.docker.internal:host-gateway",
+                "--publish", f"127.0.0.1:{port}:8000",
+                "--volume", f"{output}:/app/output",
+                "--env", f"MINERU_VL_SERVER=http://host.docker.internal:{mock.port}",
+                "--env", "MINERU_VL_MODEL_NAME=smoke-model",
+                "--env", "MINERU_VL_API_KEY=smoke-key",
+                "--env", "MINERU_API_PUBLIC_BIND_EXPOSED=true",
+                "--env", "MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true", image,
+            ], check=True, text=True, capture_output=True)
+        except (FileNotFoundError, OSError) as error:
+            raise AssertionError(f"Docker could not start the bridge-network smoke container: {error}") from error
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or error.stdout).strip()
+            raise AssertionError(
+                f"Docker could not start the bridge-network smoke container (host-gateway may be unavailable): {detail}"
+            ) from error
         deadline = time.monotonic() + 30
         while True:
             try:
@@ -164,6 +227,7 @@ def run(image, pdf):
             if time.monotonic() >= deadline:
                 raise AssertionError(f"API health did not become ready: {container_logs(container)}")
             time.sleep(0.25)
+        runtime_uid(container)
         running = subprocess.run(
             ["docker", "inspect", "--format", "{{.State.Running}}", container],
             check=True, text=True, capture_output=True,
@@ -190,7 +254,7 @@ def run(image, pdf):
         check(status == 200, f"result download returned {status}")
         validate_zip(result)
         check(any(output.iterdir()), "no output persisted through /app/output mount")
-        expected_host = f"127.0.0.1:{mock.port}"
+        expected_host = f"host.docker.internal:{mock.port}"
         check(mock.requests, "mock provider received no requests")
         check(any(path == "/v1/models" for path, _, _ in mock.requests), "model discovery was not exercised")
         check(any(path == "/v1/chat/completions" for path, _, _ in mock.requests), "completion was not exercised")
@@ -198,12 +262,23 @@ def run(image, pdf):
             check(path in {"/v1/models", "/v1/chat/completions"} and host == expected_host, f"provider request escaped mock origin: {path!r}, {host!r}")
             check(authorization == "Bearer smoke-key", f"provider Authorization missing for {path}")
     finally:
-        subprocess.run(["docker", "rm", "--force", "--volumes", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        mock.close()
+        try:
+            subprocess.run(["docker", "rm", "--force", "--volumes", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+        if mock_started:
+            mock.close()
         shutil.rmtree(output, ignore_errors=True)
 
 
 def self_check():
+    assert_non_root_configured_user({"User": "mineru"})
+    for config in ({}, {"User": "root"}, {"User": "0:0"}):
+        try:
+            assert_non_root_configured_user(config)
+        except AssertionError:
+            continue
+        raise AssertionError(f"non-root image user self-check accepted {config!r}")
     valid = io.BytesIO()
     with zipfile.ZipFile(valid, "w") as archive:
         archive.writestr("result/document.md", "ok")

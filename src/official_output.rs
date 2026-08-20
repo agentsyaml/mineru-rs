@@ -785,7 +785,7 @@ impl OutputTree {
     }
 }
 
-fn open_or_create_root(path: &Path) -> VlmResult<Dir> {
+pub(crate) fn open_or_create_root(path: &Path) -> VlmResult<Dir> {
     #[cfg(windows)]
     let (start, skip) = windows_root_anchor(path)?;
     #[cfg(not(windows))]
@@ -879,7 +879,7 @@ fn open_or_create_relative(parent: &Dir, path: &Path) -> VlmResult<Dir> {
     Ok(dir)
 }
 
-fn open_child_nofollow(parent: Dir, name: impl AsRef<Path>) -> VlmResult<Dir> {
+pub(crate) fn open_child_nofollow(parent: Dir, name: impl AsRef<Path>) -> VlmResult<Dir> {
     Ok(Dir::from_std_file(
         open_dir_nofollow(&parent.into_std_file(), name.as_ref()).map_err(io)?,
     ))

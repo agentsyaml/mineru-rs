@@ -53,10 +53,10 @@ async fn run_documents_impl(
     if options.client_side_output_generation {
         return Err("client-side output generation is unsupported".into());
     }
-    if !matches!(
-        options.backend.as_str(),
-        "vlm-http-client" | "hybrid-http-client"
-    ) {
+    if options.backend == "hybrid-http-client" {
+        return Err(crate::command::HYBRID_HTTP_CLIENT_UNSUPPORTED.into());
+    }
+    if !matches!(options.backend.as_str(), "vlm-http-client") {
         return Err(format!("unsupported backend: {}", options.backend));
     }
     let backend = super::Backend::parse(&options.backend)?;

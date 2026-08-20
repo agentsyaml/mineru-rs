@@ -69,24 +69,24 @@ export MINERU_VL_MODEL_NAME="<model-id>"
 
 ## Canonical `mineru` command (PDF / images / Office)
 
-`mineru` is the canonical product binary, supporting PDF, image, and Office input and an optional `--api-url` remote API server mode. It exposes no local ML backend; `--backend` accepts `vlm-http-client` and `hybrid-http-client` (a protocol alias for the former in direct mode, see below).
+`mineru` is the canonical product binary, supporting PDF, image, and Office input and an optional `--api-url` remote API server mode. `--backend=local` is a project-private AnyDoc native-Markdown lane for supported legacy formats and conservative clean text PDFs, isolated in the bundled Rust `mineru-office-convert` helper; it is not a local ML model, `llama-server`, or the official `hybrid-engine`. The helper invokes no Python, Microsoft Office/LibreOffice, model, or network. Direct `hybrid-http-client` now uses a separate per-document Python boundary for official MinerU 4.0.0a6; it never enters the 3.4.5 VLM or Office routes.
 
-Office-format conversion requires the `mineru-office-convert` helper, which depends on two optional features:
+OOXML conversion requires the `mineru-office-convert` helper. Local legacy and native-PDF extraction also uses this bundled Rust helper; those routes invoke no Python, Microsoft Office/LibreOffice, model, or network. Capabilities depend on two optional features:
 
 ```sh
 # docx/pptx/xlsx → PDF (via office2pdf, then VLM layout parsing)
 cargo build --release --features office
-# legacy formats → Markdown text (via anydoc, no VLM required)
+# legacy formats → best-effort text PDF for the non-local VLM lane; local uses the bundled helper for AnyDoc Markdown
 cargo build --release --features legacy-office
 # both
 cargo build --release --features office,legacy-office
 ```
 
-`mineru` routes by extension: `.docx`/`.pptx`/`.xlsx` are converted to PDF and parsed through the VLM; `.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv` are extracted to Markdown text directly by `anydoc`, with **no VLM service required**. Legacy output is written to `{out}/{stem}/office/{stem}.md` and contains text only — no layout JSON and no assets; image references in the document are kept as unresolved Markdown references. The `mineru-api` server rejects legacy formats (HTTP `422`); only `mineru` direct mode supports them.
+`mineru` routes by extension: `.docx`/`.pptx`/`.xlsx` keep their existing helper PDF conversion and VLM route. For `.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv`, the non-local direct VLM lane first uses the isolated helper to obtain a best-effort, valid text PDF from AnyDoc Markdown, then sends that PDF through the existing PDF/VLM route. This is a text-only fallback and does not preserve Office layout: the original layout, images, tables, formulas, and macros may be lost, and non-ASCII characters may be replaced with `?`. Every successful conversion emits a warning; a batch emits the Office/LibreOffice recommendation once. If conversion cannot produce a valid PDF, the error recommends converting the file with Microsoft Office or LibreOffice to DOCX/XLSX/PPTX first. Explicit `--backend local` runs both legacy AnyDoc Markdown and clean native-PDF extraction in the isolated bundled Rust helper, with no Python, Office application, model, or network. Non-local legacy output is written under `{out}/{stem}/vlm/` with the original legacy input preserved as an origin; local legacy output is `{out}/{stem}/office/{stem}.md`, and local native PDF output is `{out}/{stem}/native/{stem}.md`. The native profile contains only Markdown, not official JSON or assets. Direct Hybrid rejects Office and legacy inputs before spawning; the API path remains fail-closed and does not accept this worker boundary. The `mineru-api` backend semantics otherwise remain unchanged and do not accept `local`.
 
 ### Office helper containment
 
-Before conversion, the helper performs mandatory complete preflight validation of OOXML and limits input to 32 MiB and output to 64 MiB.
+Before conversion, the helper performs mandatory complete preflight validation of OOXML and legacy signatures, and limits input to 32 MiB and output to 64 MiB. Legacy PDF output is a bounded text fallback and does not preserve Office layout.
 
 | Platform | Hard memory limit | Other helper limits |
 | --- | --- | --- |
@@ -100,11 +100,56 @@ Native macOS APIs have no reliable process RSS/address-space hard limit that doe
 
 Without `--api-url`, `mineru` calls the external VLM service directly. The service address and model are supplied by the `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and `MINERU_VL_API_KEY` environment variables or overridden by `--url`.
 
-In direct mode `-b hybrid-http-client` behaves identically to `vlm-http-client` (this build has no local layout/OCR/formula models); every run prints to stderr:
+### Direct official Hybrid 4.0.0a6
+
+Direct `-b hybrid-http-client` requires an installed Python environment containing
+exactly `mineru==4.0.0a6`. The Rust binary embeds its narrow adapter shim; it does
+not bundle Python, MinerU, or model assets. The default `per-document` mode launches
+one fresh subprocess per document, with parent-owned timeout, cancellation, pipe limits,
+and descendant cleanup. Accepted inputs are PDF and official image kinds only; OOXML and
+legacy Office are rejected before the worker starts.
+
+You may explicitly select `--official-worker-mode persistent`, or set
+`MINERU_OFFICIAL_WORKER_MODE=persistent`, to reuse one worker and its loaded model within
+one direct CLI run. This performance mode still admits one active request only: documents
+remain sequential and use independent private snapshots and bundles. Startup and
+handshake happen once; cancellation or a crash makes the next document create a new
+session. A committed request is never automatically retried, and this mode provides no
+hard RSS/GPU isolation. The default remains `per-document`; an explicit CLI value wins
+over the environment, and the environment setting applies only to direct
+`hybrid-http-client`.
+
+`medium` keeps the official `hybrid-http-client` backend and is local-only, so it
+does not require a VLM URL. `high` and `xhigh` use the same official
+`hybrid-http-client` backend and require an
+explicit HTTP(S) `--url` or `MINERU_VL_SERVER`. `model_stack` is `auto`, `light`,
+or `full`; model assets and any `MINERU_MODEL_BASE_DIR`/`MINERU_CONFIG` paths are
+user-supplied. Formula/table disable switches are unsupported by the pinned
+parser. Results are published separately under `{out}/{stem}/hybrid-v4/` with
+`markdown.md`, `middle_json.json`, `content_list.json`, `structured_content.json`,
+optional `model_output.json`, and `images/`; they are never passed through the
+3.4.5 builders. Direct Hybrid rejects the v3-only VLM transport controls
+(`--http-*`, `--max-remote-image-*`, `--max-decoded-pixels`,
+`--max-images-per-request`, `--max-redirects`, `--vlm-debug`,
+`--temperature-retry`, and their environment spellings), as well as
+`--client-side-output-generation`, instead of silently ignoring them. The
+official parser fields and project-owned input/output caps remain available.
+
+The project-owned adapter envelope is `mineru-rs-official-worker/1` in the default mode,
+or internal persistent `mineru-rs-official-worker/2`; neither is an official MinerU
+stdin/stdout protocol.
+Configure the interpreter and official paths only with the fields below. Supplied
+executable, model, and config paths must be absolute.
+
+Selecting `-b hybrid-http-client` with `--api-url` remains fail-closed:
 
 ```text
-warning: backend=hybrid-http-client: this build has no local layout/OCR/formula models; falling back to the vlm-http-client pipeline (identical behavior)
+failed: backend=hybrid-http-client is direct-only; API mode does not support Hybrid
 ```
+
+The default `vlm-http-client` always uses the existing 3.4.5 VLM route. No
+custom AnyDoc/native shortcut, 4.0a effort setting, or fake worker configuration
+is attached to `hybrid-http-client`.
 
 ```sh
 export MINERU_VL_SERVER="https://<server>"
@@ -113,6 +158,31 @@ export MINERU_VL_API_KEY="<your-key>"
 
 ./target/release/mineru -p input.pdf -o output
 ```
+
+### Local AnyDoc mode (`backend=local`)
+
+`local` runs AnyDoc text extraction in the isolated bundled Rust `mineru-office-convert` helper, not in the CLI process and not as a local model. It supports `.doc`, `.ppt`, `.xls`, `.odt`, `.rtf`, `.epub`, `.ods`, `.odp`, `.csv`, and the PDF native Markdown API; build with `legacy-office`:
+
+```sh
+cargo build --release --features legacy-office
+./target/release/mineru -p old.doc -o output --backend local
+```
+
+The legacy output remains `output/old/office/old.md`; a clean native PDF is
+written as `output/old/native/old.md`. Native output is Markdown-only and does
+not create `document.json`, `middle.json`, `content-list`, or assets. The
+assessment rejects scanned, mixed, garbled, empty, low-quality, complex, or
+uncertain PDFs with a clear error; it never calls the VLM or silently falls
+back. The bundled local helper invokes no Python, Microsoft Office/LibreOffice,
+model, or network. Local mode does not use or validate `--url`, `--api-key`, or VLM
+connection environment values for AnyDoc. VLM transport flags such as
+`--http-*`, `--max-remote-image-*`, and `--vlm-debug` are likewise ignored. It
+uses the helper's bounded default policy and currently supports only the input
+and output byte limits, including `--office-input-bytes` and
+`--office-output-bytes`; helper-only stderr, wall, CPU, NOFILE, memory, and
+process-isolation controls are rejected before input work when supplied by flag
+or environment unless explicitly supported. Page selection is not supported by
+the native local PDF API.
 
 ### Remote API server mode
 
@@ -129,9 +199,14 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `-p, --path <path>` | Required | Input file or directory (processed recursively). |
 | `-o, --output <directory>` | Required | Output directory. |
 | `--api-url <URL>` | None | Remote API server address; without it, direct VLM mode is used. |
-| `-m, --method <auto\|txt\|ocr>` | `auto` | Parsing method (ignored in direct mode). |
-| `-b, --backend <vlm-http-client\|hybrid-http-client>` | `vlm-http-client` | Backend. In direct mode `hybrid-http-client` is a protocol alias for `vlm-http-client` (warned on every run); in API mode it is passed through to the server verbatim. |
-| `--effort <medium\|high>` | `medium` | Parsing effort (ignored in direct mode). |
+| `-m, --method <auto\|txt\|ocr>` | `auto` | Parsing method; ignored by direct `vlm-http-client`, forwarded by official direct Hybrid. |
+| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.0.0a6 worker; API Hybrid remains unsupported. |
+| `--effort <medium\|high\|xhigh>` | `medium` | Official direct Hybrid effort. `medium` is local-only; `high`/`xhigh` require an explicit HTTP(S) VLM URL. Other direct backends accept only `medium`/`high`. |
+| `--model-stack <auto\|light\|full>` | `auto` | Official direct Hybrid model stack. An explicitly supplied value, including `auto`, overrides `MINERU_MODEL_STACK`; when omitted, the environment value is used. |
+| `--official-worker-mode <per-document\|persistent>` | `per-document` | Official Hybrid worker lifecycle. `persistent` is an explicit single-worker, single-active-request performance mode and overrides `MINERU_OFFICIAL_WORKER_MODE`. |
+| `--official-python <absolute-path>` | Python `python3`/`python` | Official direct Hybrid interpreter. Overrides `MINERU_OFFICIAL_PYTHON`; the executable is not bundled. |
+| `--official-model-dir <absolute-path>` | None | Official direct Hybrid model root; overrides `MINERU_MODEL_BASE_DIR`. |
+| `--official-config <absolute-path>` | None | Official direct Hybrid config; overrides `MINERU_CONFIG`. |
 | `-l, --lang <language>` | `ch` | Language code. |
 | `-u, --url <URL>` | None | VLM service-address override in direct mode; per-task model-server override in API mode. |
 | `-s, --start <n>` | `0` | Start page, **zero-based**. |
@@ -178,12 +253,12 @@ VLM transport knobs (each also has an environment spelling):
 | `--max-images-per-request <n>` | `64` | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` |
 | `--max-redirects <n>` | `3` | `MINERU_VLM_MAX_REDIRECTS` |
 | `--http-max-response-bytes <n>` | `10485760` | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` |
-| `--temperature-retry[=<true\|false>]` | Off | Opt-in quality retry for buffered official PDF layout/semantic requests: keeps the base temperature first, then adds `0.2` per retry up to `1.0`. Retry bodies only widen existing positive `top_k` to at least `40` and `top_p` to at least `0.9`; omitted fields and `top_k<=0` unlimited values are left untouched. Bare `--temperature-retry` means `true`, explicit `=false` overrides `MINERU_VLM_TEMPERATURE_RETRY`, and an omitted CLI flag preserves the environment value. It does not affect ordinary `predict`, batch, streaming, legacy-office, or API-form requests. |
+| `--temperature-retry[=<true\|false>]` | Off | Opt-in quality retry for buffered official PDF layout/semantic requests: keeps the base temperature first, then adds `0.2` per retry up to `1.0`. Retry bodies only widen existing positive `top_k` to at least `40` and `top_p` to at least `0.9`; omitted fields and `top_k<=0` unlimited values are left untouched. Bare `--temperature-retry` means `true`, explicit `=false` overrides `MINERU_VLM_TEMPERATURE_RETRY`, and an omitted CLI flag preserves the environment value. It does not affect ordinary `predict`, batch, streaming, `backend=local`, or API-form requests. |
 | `--vlm-debug <true\|false>` | `false` | Sends `vllm_xargs.debug` in the VLM request body. Overrides `MINERU_VL_DEBUG_ENABLE`. |
 
 Diagnostic/human-output truncation caps remain compiled and are not configurable. The existing `--max-input-bytes`, `--max-encoded-document-bytes`, and `--max-output-bytes` pairs are unchanged.
 
-In direct mode, non-default values for `--method`, `--effort`, and `--lang` produce a warning and are ignored. `--client-side-output-generation=true` is rejected in API mode.
+For the existing direct `vlm-http-client` lane, non-default values for `--method`, `--effort`, and `--lang` produce a warning and are ignored. Official direct Hybrid forwards these fields to MinerU 4.0.0a6. `--client-side-output-generation` is rejected in both direct Hybrid and API mode.
 
 In API mode, the local VLM transport knobs (`--page-concurrency`, `--concurrency-model`, `--processing-window-size`, `--render-*`, `--batch-size`, all `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--temperature-retry`/`--vlm-debug` and their environment spellings) fail explicitly, because the remote server performs parsing and those controls would have no consumer; `MINERU_VL_SERVER` is submitted as the per-task `server_url` when `--url` is absent.
 
@@ -193,10 +268,37 @@ In API mode, the local VLM transport knobs (`--page-concurrency`, `--concurrency
 
 `mineru-api` is the HTTP API server. The service itself performs no local inference: it accepts documents, calls an external VLM service, then returns archived results.
 
-### Container
+### Published GHCR image
 
-The API server has no published container image; run it from a source build
-(see [Build and prerequisites](#build-and-prerequisites) above).
+The published Rust API image is `ghcr.io/agentsyaml/mineru-cli`. It listens on
+container port `8000`, serves `GET /health`, writes task output below
+`/app/output`, and runs its default command as a non-root user. The release
+binaries include the `office,legacy-office` feature set, but the image bundles
+Rust binaries only: it contains no Python, `mineru==4.0.0a6`, or model assets.
+
+```sh
+mkdir -p output
+chmod a+rwx output  # grant the image's non-root user write access
+docker run --rm \
+  --publish 127.0.0.1:8000:8000 \
+  --volume "$PWD/output:/app/output" \
+  --env MINERU_VL_SERVER="https://<server>" \
+  --env MINERU_VL_MODEL_NAME="<model-id>" \
+  --env MINERU_VL_API_KEY="<your-key>" \
+  --env MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
+  ghcr.io/agentsyaml/mineru-cli:latest
+
+curl http://127.0.0.1:8000/health
+```
+
+The bind-mounted output directory must be writable by the image's default
+non-root user. The stock image cannot run official Hybrid without a separately
+prepared environment explicitly supplied to it; API Hybrid remains fail-closed.
+`MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` is an explicit, per-container opt-in
+to the unauthenticated task API; keep it out of the Dockerfile and global image
+environment. Publish to loopback first as shown. Broader exposure requires a
+private network or an authenticated reverse proxy because the API has no
+built-in authentication or task-ownership isolation.
 
 ### Startup
 
@@ -282,6 +384,11 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | Page-pipeline concurrency cap (any positive value), bounding only the number of simultaneously running page pipelines; request-level concurrency is governed by `MINERU_VLM_HTTP_CONCURRENCY`. |
 | `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | Concurrency model, one of `classic\|two-phase`. `classic`: the long-standing single-encoder pipeline (default); `two-phase`: splits each page's semantic work into an encode-all → request-all two-stage flow, removing the CPU-encode serialization bottleneck in front of request dispatch (opt-in). |
+| `MINERU_MODEL_STACK` | `auto` | Official direct Hybrid stack: `auto\|light\|full`. |
+| `MINERU_OFFICIAL_WORKER_MODE` | `per-document` | Official Hybrid worker mode: `per-document\|persistent`. Applies only to direct Hybrid; an explicit CLI value wins. |
+| `MINERU_OFFICIAL_PYTHON` | Python `python3`/`python` | Absolute official Hybrid interpreter path. |
+| `MINERU_MODEL_BASE_DIR` | None | Absolute official Hybrid model root. |
+| `MINERU_CONFIG` | None | Absolute official Hybrid config path. |
 | `MINERU_PDF_RENDER_THREADS` | `min(cpu, 8)` | Number of rendering workers. |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | Timeout in seconds for a single render. |
 | `MINERU_FORMULA_ENABLE` | On | Default for formula recognition (strict `true`/`false`, case-insensitive). |
@@ -414,6 +521,17 @@ output/
 
 `{stem}` is the safe stem of the path input filename after removing its extension; it is `document` when there is no safe stem. When bytes are passed as `PdfInput::Bytes` without a safe stem, the library API also uses `document_layout.pdf`. Output is first written to a sibling temporary staging directory; on completion, a rename replaces the target directory. An existing directory is first retained as a backup and the backup is removed after successful replacement, avoiding partially written results.
 
+The direct CLI native profile is intentionally separate from the official output
+tree:
+
+```text
+output/{stem}/native/{stem}.md
+```
+
+It contains only native Markdown. It does not provide `document.json`,
+`middle.json`, `content-list`, layout previews, or cropped assets; consumers
+must not treat it as an official MinerU result archive.
+
 ## Library API (minimal example)
 
 The following example uses only the public API and can be placed in your own Tokio async program:
@@ -485,11 +603,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Both accept the same keyword options as the CLI: `api_url`, `method`
-(`auto`/`txt`/`ocr`), `backend` (`vlm-http-client`/`hybrid-http-client`), `effort`
-(`medium`/`high`), `lang` (default `ch`), `url` (direct VLM server), `start`,
-`end`, `formula`, `table`, `image_analysis`, and
-`client_side_output_generation`.
+Both accept the same VLM keyword options as their binding API; `backend=local`
+currently belongs only to the canonical `mineru` CLI and does not change binding
+or API backend semantics.
 
 ### Node.js
 

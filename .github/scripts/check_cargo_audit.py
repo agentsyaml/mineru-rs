@@ -21,7 +21,10 @@ WARNINGS = {
     ("RUSTSEC-2026-0192", "ttf-parser", "0.25.1"),
     ("RUSTSEC-2024-0320", "yaml-rust", "0.4.5"),
 }
+YANKED = {("arrayref", "0.3.9")}
 EDGES = {
+    ("tiny-skia", "0.11.4", "arrayref", "0.3.9"),
+    ("tiny-skia-path", "0.11.4", "arrayref", "0.3.9"),
     ("umya-spreadsheet", "2.3.3", "quick-xml", "0.37.5"),
     # office2pdf is the reverse parent of umya-spreadsheet in Cargo.lock.
     ("office2pdf", "0.6.5", "umya-spreadsheet", "2.3.3"),
@@ -51,8 +54,22 @@ def tuple_from(finding):
     return result
 
 
-def exact_set(items, expected, label):
-    found = [tuple_from(item) for item in items]
+def yanked_tuple_from(finding):
+    if not isinstance(finding, dict) or finding.get("kind") != "yanked":
+        fail("malformed yanked warning")
+    if "advisory" not in finding or finding["advisory"] is not None:
+        fail("yanked warning advisory is not null")
+    package = finding.get("package")
+    if not isinstance(package, dict):
+        fail("yanked warning lacks package object")
+    result = (package.get("name"), package.get("version"))
+    if not all(isinstance(value, str) and value for value in result):
+        fail("yanked warning has malformed package tuple")
+    return result
+
+
+def exact_set(items, expected, label, parser=tuple_from):
+    found = [parser(item) for item in items]
     if len(found) != len(set(found)):
         fail(f"duplicate {label} finding")
     if set(found) != expected:
@@ -106,12 +123,21 @@ def check_lock(lock):
         }
         if parents != expected_parents:
             fail(f"quick-xml {version} parent drift: {sorted(parents)!r}")
+    if ("arrayref", "0.3.9") not in packages:
+        fail("missing yanked arrayref 0.3.9")
+    arrayref_parents = {
+        key for key, dependencies in packages.items()
+        if depends_on(dependencies, "arrayref", "0.3.9")
+    }
+    if arrayref_parents != {("tiny-skia", "0.11.4"), ("tiny-skia-path", "0.11.4")}:
+        fail(f"arrayref 0.3.9 parent drift: {sorted(arrayref_parents)!r}")
 
 
 def check_expiry(today):
-    # The exception set is pinned exactly by advisory id, package name, package
-    # version, and dependency edges above; the project's own version is unrelated
-    # to whether those exceptions still apply, so no project version gate exists.
+    # The exception set is pinned exactly by finding identity, package name,
+    # package version, and dependency edges above; the project's own version is
+    # unrelated to whether those exceptions still apply, so no project version
+    # gate exists.
     if today >= EXPIRY:
         fail(f"cargo-audit exception expired on {EXPIRY.isoformat()}")
 
@@ -127,12 +153,17 @@ def check(report, lock, today=None):
         fail("vulnerability count/found/list mismatch")
     exact_set(vulnerabilities["list"], VULNERABILITIES, "vulnerability")
     warnings = report["warnings"]
-    if not isinstance(warnings, dict) or set(warnings) != {"unmaintained"} or not isinstance(warnings["unmaintained"], list):
+    if (
+        not isinstance(warnings, dict)
+        or set(warnings) != {"unmaintained", "yanked"}
+        or not all(isinstance(warnings[category], list) for category in warnings)
+    ):
         fail("unexpected cargo-audit warning category")
     for finding in warnings["unmaintained"]:
-        if finding.get("kind") != "unmaintained":
+        if not isinstance(finding, dict) or finding.get("kind") != "unmaintained":
             fail("malformed unmaintained warning")
     exact_set(warnings["unmaintained"], WARNINGS, "warning")
+    exact_set(warnings["yanked"], YANKED, "yanked warning", yanked_tuple_from)
     check_lock(lock)
     check_expiry(today or dt.datetime.now(dt.timezone.utc).date())
 
@@ -141,7 +172,7 @@ def fixture():
     report = {
         "database": {}, "lockfile": {}, "settings": {"ignore": []},
         "vulnerabilities": {"found": True, "count": 4, "list": []},
-        "warnings": {"unmaintained": []},
+        "warnings": {"unmaintained": [], "yanked": []},
     }
     report["vulnerabilities"]["list"] = [
         {"advisory": {"id": advisory}, "package": {"name": name, "version": version}}
@@ -150,6 +181,10 @@ def fixture():
     report["warnings"]["unmaintained"] = [
         {"kind": "unmaintained", "advisory": {"id": advisory}, "package": {"name": name, "version": version}}
         for advisory, name, version in sorted(WARNINGS)
+    ]
+    report["warnings"]["yanked"] = [
+        {"kind": "yanked", "advisory": None, "package": {"name": name, "version": version}}
+        for name, version in sorted(YANKED)
     ]
     packages = {}
     for parent, parent_version, child, child_version in EDGES:
@@ -179,10 +214,16 @@ def self_test():
     cases = []
     unknown = json.loads(json.dumps(report)); unknown["vulnerabilities"]["list"][0]["advisory"]["id"] = "RUSTSEC-0000-0000"; cases.append((unknown, lock))
     changed_version = json.loads(json.dumps(report)); changed_version["vulnerabilities"]["list"][0]["package"]["version"] = "0.37.6"; cases.append((changed_version, lock))
+    changed_yanked_version = json.loads(json.dumps(report)); changed_yanked_version["warnings"]["yanked"][0]["package"]["version"] = "0.3.8"; cases.append((changed_yanked_version, lock))
     edge = json.loads(json.dumps(lock))
     next(package for package in edge["package"] if package["name"] == "umya-spreadsheet")["dependencies"] = []
     cases.append((report, edge))
+    missing_arrayref_edge = json.loads(json.dumps(lock))
+    next(package for package in missing_arrayref_edge["package"] if package["name"] == "tiny-skia")["dependencies"] = []
+    cases.append((report, missing_arrayref_edge))
     warning = json.loads(json.dumps(report)); warning["warnings"]["unmaintained"].append(warning["warnings"]["unmaintained"][0]); cases.append((warning, lock))
+    malformed_yanked = json.loads(json.dumps(report)); malformed_yanked["warnings"]["yanked"][0]["advisory"] = {}; cases.append((malformed_yanked, lock))
+    extra_yanked = json.loads(json.dumps(report)); extra_yanked["warnings"]["yanked"].append({"kind": "yanked", "advisory": None, "package": {"name": "arrayvec", "version": "0.7.8"}}); cases.append((extra_yanked, lock))
     cases.append(({}, lock))
     for bad_report, bad_lock in cases:
         try:
@@ -214,7 +255,7 @@ def main():
     except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
         fail(f"cannot parse audit inputs: {error}")
     check(report, lock)
-    print("cargo-audit exception approved: RUSTSEC-2026-0194, RUSTSEC-2026-0195; expires 2026-09-30 UTC")
+    print("cargo-audit exception approved: RUSTSEC-2026-0194, RUSTSEC-2026-0195 (quick-xml); reviewed yanked transitive lock exception: arrayref 0.3.9; expires 2026-09-30 UTC")
 
 
 if __name__ == "__main__":

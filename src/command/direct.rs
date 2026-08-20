@@ -1,8 +1,11 @@
 //! Shared direct VLM runner for the canonical command.
 use crate::{
-    MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialPdfOptions, ProgressCallback,
-    ProgressEvent, RasterWorkers, VlmHeader, VlmHttpConfig, canonical_stem,
+    ConcurrencyModel, MinerUVlmClient, MinerUVlmConfig, OfficeWorkers, OfficialPdfOptions,
+    ProgressCallback, ProgressEvent, RasterWorkers, VlmHeader, VlmHttpConfig, canonical_stem,
     input_prepare::{DocumentKind, prepare_with_warning_and_ooxml},
+    official_worker::{
+        OfficialPersistentWorker, OfficialRequest, OfficialSessionConfig, OfficialWorker,
+    },
 };
 #[cfg(unix)]
 use cap_fs_ext::MetadataExt;
@@ -14,12 +17,14 @@ use cap_std::{
 use std::{
     collections::HashSet,
     ffi::OsString,
-    io::{Read, Write},
+    io::Read,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
+#[cfg(feature = "legacy-office")]
+use std::{io::Write, time::Duration};
 
 pub(super) type WarningCallback = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
 type DirectError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -71,10 +76,21 @@ fn document_events(
 pub(super) struct DirectOptions {
     pub input: PathBuf,
     pub output: PathBuf,
+    pub local_backend: bool,
+    pub method: String,
+    pub lang: String,
     pub base_url: Option<String>,
     pub server_option_label: &'static str,
     pub model: Option<String>,
     pub api_key: Option<String>,
+    pub official_hybrid: bool,
+    pub official_worker_mode: super::OfficialWorkerMode,
+    pub effort: String,
+    pub model_stack: String,
+    pub model_stack_explicit: bool,
+    pub official_python: Option<PathBuf>,
+    pub official_model_dir: Option<PathBuf>,
+    pub official_config: Option<PathBuf>,
     pub page_start: Option<usize>,
     pub page_end: Option<usize>,
     /// `Some` forces the boolean from a surface that owns it (the legacy `--no-*` flags).
@@ -469,7 +485,9 @@ fn preflight_limit_message(
 /// binary is absent).
 fn feature_unavailable_message(kind: DocumentKind) -> Option<&'static str> {
     if kind.is_legacy_office() && !cfg!(feature = "legacy-office") {
-        Some("legacy office conversion is unavailable (build with --features legacy-office)")
+        Some(
+            "legacy office conversion is unavailable (build with --features legacy-office, or first convert the file with Microsoft Office or LibreOffice to DOCX, XLSX, or PPTX)",
+        )
     } else if kind.is_office() && !cfg!(feature = "office") {
         Some("office conversion is unavailable")
     } else {
@@ -489,55 +507,45 @@ fn format_failures(failures: &[(String, String)]) -> String {
     format!("{} document(s) failed: {details}{suffix}", failures.len())
 }
 
-/// The legacy-family lane: helper text extraction into `{root}/{stem}/office/{stem}.md`.
-/// Image references in the markdown stay dangling — no image assets are extracted.
-async fn extract_text_and_write(
+#[cfg(feature = "legacy-office")]
+async fn extract_text_and_write_local(
     bytes: bytes::Bytes,
     kind: DocumentKind,
     root: &Path,
     stem: &str,
     office_workers: &OfficeWorkers,
     remaining: Duration,
-    task_events: &Option<ProgressCallback>,
 ) -> Result<(), DirectError> {
-    let format = legacy_format_name(kind)?;
-    let (text, warning) = office_workers
-        .convert_text_with_warning(format, bytes, remaining)
+    let text = office_workers
+        .convert_text(kind.suffix(), bytes, remaining)
         .await
-        .map_err(|e| err(e.to_string()))?;
-    if let Some(message) = warning {
-        emit_event(
-            task_events,
-            ProgressEvent::OfficeWarning {
-                document: stem.to_owned(),
-                message,
-            },
-        );
-    }
-    write_legacy_text(root, stem, &text)?;
-    Ok(())
+        .map_err(|error| err(error.to_string()))?;
+    write_legacy_text(root, stem, &text)
 }
 
-fn legacy_format_name(kind: DocumentKind) -> Result<&'static str, DirectError> {
-    Ok(match kind {
-        DocumentKind::Doc => "doc",
-        DocumentKind::Ppt => "ppt",
-        DocumentKind::Xls => "xls",
-        DocumentKind::Odt => "odt",
-        DocumentKind::Rtf => "rtf",
-        DocumentKind::Epub => "epub",
-        DocumentKind::Ods => "ods",
-        DocumentKind::Odp => "odp",
-        DocumentKind::Csv => "csv",
-        _ => return Err(err("legacy office kind required")),
-    })
+#[cfg(feature = "legacy-office")]
+fn native_output_bytes(
+    route: &OfficialPdfOptions,
+    service: &super::service::ResolvedService,
+    document_limits: crate::DocumentLimitPolicy,
+) -> usize {
+    route
+        .max_staged_text_bytes
+        .min(service.office.output_bytes)
+        .min(usize::try_from(document_limits.max_output_bytes).unwrap_or(usize::MAX))
 }
 
 /// Opens or creates `{root}/{stem}/office` with no-follow directory walks and writes
 /// `{stem}.md` with the symlink-free open the snapshot path uses for reads.
-fn write_legacy_text(root: &Path, stem: &str, text: &[u8]) -> Result<(), DirectError> {
+#[cfg(feature = "legacy-office")]
+fn write_text_profile(
+    root: &Path,
+    stem: &str,
+    profile: &str,
+    text: &[u8],
+) -> Result<(), DirectError> {
     let (anchor, mut names) = anchor_and_names(root)?;
-    names.extend([stem.into(), "office".into()]);
+    names.extend([stem.into(), profile.into()]);
     let mut current = Dir::open_ambient_dir(anchor, ambient_authority())?;
     for name in &names {
         match current.symlink_metadata(name) {
@@ -569,6 +577,16 @@ fn write_legacy_text(root: &Path, stem: &str, text: &[u8]) -> Result<(), DirectE
         .map_err(|_| err("output write failed"))?;
     file.flush().map_err(|_| err("output write failed"))?;
     Ok(())
+}
+
+#[cfg(feature = "legacy-office")]
+fn write_legacy_text(root: &Path, stem: &str, text: &[u8]) -> Result<(), DirectError> {
+    write_text_profile(root, stem, "office", text)
+}
+
+#[cfg(feature = "legacy-office")]
+fn write_native_text(root: &Path, stem: &str, text: &[u8]) -> Result<(), DirectError> {
+    write_text_profile(root, stem, "native", text)
 }
 #[cfg(unix)]
 fn same_dir(a: &Dir, b: &Dir) -> std::io::Result<bool> {
@@ -665,13 +683,235 @@ fn output_chain(
     }
     Ok(root)
 }
-fn config(
+
+fn output_target(options: &DirectOptions, kind: DocumentKind) -> &'static str {
+    if options.official_hybrid {
+        "hybrid-v4"
+    } else if options.local_backend && kind == DocumentKind::Pdf {
+        "native"
+    } else if kind.is_office() || (options.local_backend && kind.is_legacy_office()) {
+        "office"
+    } else {
+        "vlm"
+    }
+}
+
+fn official_image_or_pdf(kind: DocumentKind) -> bool {
+    matches!(
+        kind,
+        DocumentKind::Pdf
+            | DocumentKind::Png
+            | DocumentKind::Jpeg
+            | DocumentKind::Jpg
+            | DocumentKind::Jp2
+            | DocumentKind::Webp
+            | DocumentKind::Gif
+            | DocumentKind::Bmp
+            | DocumentKind::Tiff
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_official_hybrid_documents(
+    options: &DirectOptions,
+    route: &OfficialPdfOptions,
+    config: OfficialHybridConfig,
+    candidates: &[(usize, PathBuf, DocumentKind, String)],
+    doomed: &HashSet<PathBuf>,
+    output: &Path,
+    command_events: &Option<super::CommandCallback>,
+    events: &Option<ProgressCallback>,
+    failures: &mut Vec<(String, String)>,
+) -> Result<(), DirectError> {
+    let persistent_worker = if options.official_worker_mode == super::OfficialWorkerMode::Persistent
+    {
+        let session = OfficialSessionConfig::new(
+            config.model_stack.clone(),
+            config.model_dir.clone(),
+            config.config.clone(),
+            config.api_key.clone(),
+            config.model_name.clone(),
+        )
+        .map_err(err)?;
+        Some(OfficialPersistentWorker::new(config.python.clone(), session).map_err(err)?)
+    } else {
+        None
+    };
+    for (candidate_id, path, kind, stem) in candidates {
+        if doomed.contains(path) {
+            continue;
+        }
+        let task_events = document_events(command_events, events, *candidate_id);
+        emit_event(
+            &task_events,
+            ProgressEvent::DocumentStarted {
+                document: stem.clone(),
+            },
+        );
+        let result: Result<(), DirectError> = async {
+            let deadline = Instant::now()
+                .checked_add(route.total_deadline)
+                .ok_or_else(|| err("input deadline overflow"))?;
+            let bytes = snapshot(
+                path,
+                route.max_pdf_bytes,
+                options.document_limits.max_input_bytes,
+            )?
+            .bytes;
+            validate_official_page_selection(*kind, route, &bytes)?;
+            emit_event(
+                &task_events,
+                ProgressEvent::DocumentPrepared {
+                    document: stem.clone(),
+                },
+            );
+            let page_range = if *kind == DocumentKind::Pdf
+                && (route.start_page != 0 || route.end_page.is_some())
+            {
+                Some(official_page_range(*kind, route)?.expect("selected official page range"))
+            } else {
+                None
+            };
+            let request = OfficialRequest::new(
+                "hybrid-http-client".into(),
+                options.effort.clone(),
+                config.server_url.clone(),
+                options.method.clone(),
+                options.lang.clone(),
+                route.image_analysis,
+                page_range,
+                config.model_stack.clone(),
+                config.model_dir.clone(),
+                config.config.clone(),
+                config.api_key.clone(),
+                config.model_name.clone(),
+                options.document_limits.max_output_bytes,
+            );
+            let bundle = if let Some(worker) = persistent_worker.as_ref() {
+                worker.run(&bytes, kind.suffix(), request, deadline).await?
+            } else {
+                let worker = OfficialWorker::new(config.python.clone()).map_err(err)?;
+                worker.run(&bytes, kind.suffix(), request, deadline).await?
+            };
+            crate::hybrid_v4_output::validate_and_publish(
+                bundle.path(),
+                output,
+                stem,
+                options.document_limits.max_output_bytes,
+            )?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            let message = error.to_string();
+            emit_event(
+                &task_events,
+                ProgressEvent::DocumentFailed {
+                    document: stem.clone(),
+                    message: message.clone(),
+                },
+            );
+            failures.push((stem.clone(), message));
+            continue;
+        }
+        emit_event(
+            &task_events,
+            ProgressEvent::DocumentCompleted {
+                document: stem.clone(),
+            },
+        );
+    }
+    if let Some(worker) = persistent_worker.as_ref() {
+        worker.shutdown().await.map_err(err)?;
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(err(format_failures(failures)))
+    }
+}
+
+fn validate_official_page_selection(
+    kind: DocumentKind,
+    route: &OfficialPdfOptions,
+    bytes: &[u8],
+) -> Result<(), DirectError> {
+    if kind != DocumentKind::Pdf {
+        return Ok(());
+    }
+    let selected = if let Some(end) = route.end_page {
+        end.checked_sub(route.start_page)
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| err("invalid official page range"))?
+    } else {
+        let document = lopdf::Document::load_mem(bytes).map_err(|_| err("invalid official PDF"))?;
+        if document.is_encrypted() || document.was_encrypted() {
+            return Err(err("encrypted PDFs are unsupported"));
+        }
+        let pages = document.get_pages().len();
+        pages.saturating_sub(route.start_page)
+    };
+    if selected > route.max_pages {
+        return Err(Box::new(crate::VlmError::LimitExceeded {
+            resource: "pages",
+            limit: route.max_pages as u64,
+            actual: selected as u64,
+        }));
+    }
+    Ok(())
+}
+
+fn official_page_range(
+    kind: DocumentKind,
+    route: &OfficialPdfOptions,
+) -> Result<Option<String>, DirectError> {
+    if kind != DocumentKind::Pdf || (route.start_page == 0 && route.end_page.is_none()) {
+        return Ok(None);
+    }
+    let start = route
+        .start_page
+        .checked_add(1)
+        .ok_or_else(|| err("official page start exceeds usize"))?;
+    let Some(end) = route.end_page else {
+        return Ok(Some(format!("{start}~-1")));
+    };
+    let end = end
+        .checked_add(1)
+        .ok_or_else(|| err("official page end exceeds usize"))?;
+    if start == end {
+        Ok(Some(start.to_string()))
+    } else {
+        Ok(Some(format!("{start}~{end}")))
+    }
+}
+
+#[cfg(feature = "legacy-office")]
+fn legacy_message_once(message: String, recommendation_emitted: &mut bool) -> String {
+    let recommendation = crate::legacy_office::LEGACY_PDF_RECOMMENDATION;
+    if message.contains(recommendation) {
+        if !*recommendation_emitted {
+            *recommendation_emitted = true;
+            return message;
+        }
+        return message
+            .replace(&format!("; {recommendation}."), "")
+            .replace(&format!("; {recommendation}"), "");
+    }
+    if !*recommendation_emitted {
+        *recommendation_emitted = true;
+        format!("{message}; {recommendation}")
+    } else {
+        message
+    }
+}
+
+fn config_inputs(
     options: &DirectOptions,
     env: &super::Environment,
-    mut http: VlmHttpConfig,
-) -> Result<VlmHttpConfig, DirectError> {
-    let server = clean(options.base_url.clone(), options.server_option_label)?;
-    let model = clean(options.model.clone(), "--model")?;
+) -> Result<(Option<url::Url>, Option<String>), DirectError> {
+    let server = clean(options.base_url.clone(), options.server_option_label)?
+        .map(|server| server.parse())
+        .transpose()?;
     let key = clean(
         options
             .api_key
@@ -679,8 +919,113 @@ fn config(
             .or_else(|| env.string("MINERU_VL_API_KEY")),
         "--api-key",
     )?;
+    Ok((server, key))
+}
+
+struct OfficialHybridConfig {
+    python: Option<PathBuf>,
+    model_stack: String,
+    model_dir: Option<PathBuf>,
+    config: Option<PathBuf>,
+    server_url: Option<String>,
+    api_key: Option<String>,
+    model_name: Option<String>,
+}
+
+fn official_text(env: &super::Environment, name: &str) -> Result<Option<String>, DirectError> {
+    let Some(value) = env.os(name) else {
+        return Ok(None);
+    };
+    value
+        .into_string()
+        .map(Some)
+        .map_err(|_| err(format!("{name} must be valid UTF-8")))
+}
+
+fn official_path(
+    explicit: Option<&Path>,
+    environment: Option<String>,
+    name: &str,
+) -> Result<Option<PathBuf>, DirectError> {
+    let path = explicit
+        .map(Path::to_owned)
+        .or_else(|| environment.map(PathBuf::from));
+    let Some(path) = path else { return Ok(None) };
+    if !path.is_absolute() || path.to_string_lossy().chars().any(char::is_control) {
+        return Err(err(format!(
+            "{name} path must be absolute and contain no controls"
+        )));
+    }
+    Ok(Some(path))
+}
+
+fn resolve_official_hybrid(
+    options: &DirectOptions,
+    env: &super::Environment,
+) -> Result<OfficialHybridConfig, DirectError> {
+    let environment_stack = official_text(env, "MINERU_MODEL_STACK")?;
+    let model_stack = if options.model_stack_explicit || options.model_stack != "auto" {
+        options.model_stack.clone()
+    } else {
+        environment_stack.unwrap_or_else(|| "auto".into())
+    };
+    if !matches!(model_stack.as_str(), "auto" | "light" | "full") {
+        return Err(err("model_stack must be auto, light, or full"));
+    }
+    let python = official_path(
+        options.official_python.as_deref(),
+        official_text(env, "MINERU_OFFICIAL_PYTHON")?,
+        "official Python executable",
+    )?;
+    let model_dir = official_path(
+        options.official_model_dir.as_deref(),
+        official_text(env, "MINERU_MODEL_BASE_DIR")?,
+        "official model directory",
+    )?;
+    let config = official_path(
+        options.official_config.as_deref(),
+        official_text(env, "MINERU_CONFIG")?,
+        "official config",
+    )?;
+    let server_url = clean(
+        options
+            .base_url
+            .clone()
+            .or(official_text(env, "MINERU_VL_SERVER")?),
+        "--url",
+    )?;
+    if matches!(options.effort.as_str(), "high" | "xhigh") {
+        super::validate_hybrid_server_url(server_url.as_deref()).map_err(err)?;
+    }
+    Ok(OfficialHybridConfig {
+        python,
+        model_stack,
+        model_dir,
+        config,
+        server_url,
+        api_key: clean(
+            options
+                .api_key
+                .clone()
+                .or(official_text(env, "MINERU_VL_API_KEY")?),
+            "--api-key",
+        )?,
+        model_name: clean(
+            official_text(env, "MINERU_VL_MODEL_NAME")?,
+            "MINERU_VL_MODEL_NAME",
+        )?,
+    })
+}
+
+fn config(
+    options: &DirectOptions,
+    env: &super::Environment,
+    mut http: VlmHttpConfig,
+) -> Result<VlmHttpConfig, DirectError> {
+    let (server, key) = config_inputs(options, env)?;
+    let model = clean(options.model.clone(), "--model")?;
     if let Some(server) = server {
-        http.server_url = Some(server.parse()?);
+        http.server_url = Some(server);
         http.invalid_server_url = false;
     }
     if let Some(model) = model {
@@ -698,6 +1043,38 @@ fn config(
     Ok(http)
 }
 
+async fn ensure_vlm_client(
+    client: &mut Option<MinerUVlmClient>,
+    client_http: &mut Option<VlmHttpConfig>,
+    options: &DirectOptions,
+    env: &super::Environment,
+    concurrency_model: ConcurrencyModel,
+    temperature_retry: bool,
+) -> Result<(), DirectError> {
+    if client.is_some() {
+        return Ok(());
+    }
+    let http = config(
+        options,
+        env,
+        client_http
+            .take()
+            .ok_or_else(|| err("VLM client configuration was already consumed"))?,
+    )?;
+    let connected = MinerUVlmClient::connect_with_temperature_retry(
+        http,
+        MinerUVlmConfig {
+            concurrency_model,
+            ..Default::default()
+        },
+        temperature_retry,
+    )
+    .await
+    .map_err(|error| -> DirectError { Box::new(error) })?;
+    *client = Some(connected);
+    Ok(())
+}
+
 /// Resolves the strict core policy (compiled default -> frozen environment -> CLI). The formula,
 /// table, and image-analysis booleans resolve through `CoreOverrides`; the legacy `--no-*` flags
 /// force their values only when the owning surface actually provided them.
@@ -706,8 +1083,19 @@ fn resolved_route(
     env: &super::Environment,
     overrides: &super::RunOverrides,
 ) -> Result<super::env::ResolvedCore, DirectError> {
-    let mut resolved =
-        super::env::resolve_core(|name| env.os(name), &overrides.core).map_err(err)?;
+    let mut resolved = if options.local_backend {
+        super::env::resolve_core(
+            |name| {
+                (!super::local_vlm_environment_name(name))
+                    .then(|| env.os(name))
+                    .flatten()
+            },
+            &super::local_core_overrides(&overrides.core),
+        )
+    } else {
+        super::env::resolve_core(|name| env.os(name), &overrides.core)
+    }
+    .map_err(err)?;
     resolved.route.start_page = options.page_start.unwrap_or(0);
     resolved.route.end_page = options.page_end;
     if let Some(no_formula) = options.no_formula {
@@ -761,9 +1149,11 @@ async fn run_inner(
     service: &super::service::ResolvedService,
 ) -> Result<(), DirectError> {
     let mut resolved = resolved_route(options, env, overrides)?;
-    let temperature_retry =
-        super::env::resolve_temperature_retry(&|name| env.os(name), &overrides.core)
-            .map_err(err)?;
+    let temperature_retry = if options.local_backend {
+        false
+    } else {
+        super::env::resolve_temperature_retry(&|name| env.os(name), &overrides.core).map_err(err)?
+    };
     apply_document_limits(
         &mut resolved.route,
         options.document_limits,
@@ -772,9 +1162,43 @@ async fn run_inner(
     let totals =
         crate::document_limits::OfficialDocumentTotals::from_policy(options.document_limits);
     let route = resolved.route;
+    let official_config = options
+        .official_hybrid
+        .then(|| resolve_official_hybrid(options, env))
+        .transpose()?;
     let input = absolute(&options.input)?;
     let output = absolute(&options.output)?;
     let (_, inputs, skipped) = discover_inputs(&input)?;
+    if options.official_hybrid
+        && let Some((path, kind)) = inputs
+            .iter()
+            .find(|(_, kind)| !official_image_or_pdf(*kind))
+    {
+        return Err(err(format!(
+            "direct Hybrid accepts only PDF and official image inputs; {} ({}) is unsupported",
+            path.display(),
+            kind.suffix()
+        )));
+    }
+    if options.local_backend
+        && let Some((path, kind)) = inputs
+            .iter()
+            .find(|(_, kind)| !kind.is_legacy_office() && *kind != DocumentKind::Pdf)
+    {
+        return Err(err(format!(
+            "backend=local supports AnyDoc legacy Office formats and native text PDFs; input \"{}\" ({}) is unsupported (images and OOXML inputs require a VLM backend)",
+            path.display(),
+            kind.suffix()
+        )));
+    }
+    if options.local_backend
+        && inputs.iter().any(|(_, kind)| *kind == DocumentKind::Pdf)
+        && (route.start_page != 0 || route.end_page.is_some())
+    {
+        return Err(err(
+            "backend=local native PDF Markdown does not support --start/--end page selection",
+        ));
+    }
     let input_dir = if std::fs::symlink_metadata(&input)?.is_dir() {
         Some(open_dir(&input)?)
     } else {
@@ -792,12 +1216,12 @@ async fn run_inner(
         .zip(allocated)
         .enumerate()
         .map(|(index, ((p, kind), stem))| {
-            let target = if kind.is_office() || kind.is_legacy_office() {
-                "office"
-            } else {
-                "vlm"
-            };
-            output_chain(&output, &stem, input_dir.as_ref(), target)?;
+            output_chain(
+                &output,
+                &stem,
+                input_dir.as_ref(),
+                output_target(options, kind),
+            )?;
             Ok((index + 1, p, kind, stem))
         })
         .collect::<Result<_, DirectError>>()?;
@@ -817,6 +1241,8 @@ async fn run_inner(
     // rest of the batch still runs.
     let mut failures: Vec<(String, String)> = Vec::new();
     let mut doomed: HashSet<PathBuf> = HashSet::new();
+    #[cfg(feature = "legacy-office")]
+    let mut legacy_recommendation_emitted = false;
     for (candidate_id, path, kind, stem) in &candidates {
         let Ok(metadata) = std::fs::symlink_metadata(path) else {
             continue;
@@ -837,6 +1263,14 @@ async fn run_inner(
         else {
             continue;
         };
+        #[cfg(feature = "legacy-office")]
+        let message = if kind.is_legacy_office()
+            && message.contains(crate::legacy_office::LEGACY_PDF_RECOMMENDATION)
+        {
+            legacy_message_once(message, &mut legacy_recommendation_emitted)
+        } else {
+            message
+        };
         let task_events = document_events(&command_events, &events, *candidate_id);
         emit_event(
             &task_events,
@@ -851,35 +1285,30 @@ async fn run_inner(
     if !doomed.is_empty() && doomed.len() == candidates.len() {
         return Err(err(format_failures(&failures)));
     }
-    let http = config(options, env, resolved.http)?;
+    if options.official_hybrid {
+        return run_official_hybrid_documents(
+            options,
+            &route,
+            official_config.expect("official Hybrid configuration"),
+            &candidates,
+            &doomed,
+            &output,
+            &command_events,
+            &events,
+            &mut failures,
+        )
+        .await;
+    }
     let page_concurrency = crate::official_route::OfficialPageConcurrency::new(
         resolved.page_concurrency,
         route.processing_window_size,
     )
     .map_err(|error| err(error.to_string()))?;
-    // Lazy VLM connection: a batch whose *surviving* candidates are all legacy formats never
-    // touches a VLM server, so no connection is attempted (`mineru -i old.doc -o out` works
-    // offline). Preflight-doomed candidates are skipped before the main loop and never reach
-    // the client, so they must not count toward the decision either.
-    let all_legacy = candidates
-        .iter()
-        .filter(|(_, path, _, _)| !doomed.contains(path))
-        .all(|(_, _, kind, _)| kind.is_legacy_office());
-    let client = if all_legacy {
-        None
-    } else {
-        Some(
-            MinerUVlmClient::connect_with_temperature_retry(
-                http,
-                MinerUVlmConfig {
-                    concurrency_model: resolved.concurrency_model,
-                    ..Default::default()
-                },
-                temperature_retry,
-            )
-            .await?,
-        )
-    };
+    // The client is lazy so a legacy conversion failure is handled before any VLM discovery or
+    // request. Only the client is retained across documents; each prepared document is consumed by
+    // the route immediately, keeping resident memory bounded to one.
+    let mut client = None;
+    let mut client_http = Some(resolved.http);
     for (candidate_id, path, kind, stem) in &candidates {
         if doomed.contains(path) {
             continue;
@@ -893,43 +1322,146 @@ async fn run_inner(
         );
         let cleanup_warning = cleanup_warning_callback(&warnings);
         let result: Result<(), DirectError> = async {
+            let root = output_chain(
+                &output,
+                stem,
+                input_dir.as_ref(),
+                output_target(options, *kind),
+            )?;
             let deadline = Instant::now()
                 .checked_add(route.total_deadline)
                 .ok_or_else(|| err("input deadline overflow"))?;
-            let snapshot = snapshot(
+            let bytes = snapshot(
                 path,
                 route.max_pdf_bytes,
                 options.document_limits.max_input_bytes,
-            )?;
-            let bytes = snapshot.bytes;
-            let target = if kind.is_office() || kind.is_legacy_office() {
-                "office"
-            } else {
-                "vlm"
-            };
-            let root = output_chain(&output, stem, input_dir.as_ref(), target)?;
+            )?
+            .bytes;
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .filter(|d| !d.is_zero())
                 .ok_or_else(|| err("input deadline expired"))?;
+            if options.local_backend && *kind == DocumentKind::Pdf {
+                #[cfg(feature = "legacy-office")]
+                {
+                    let markdown = office_workers
+                        .convert_native_pdf(
+                            bytes,
+                            route.max_pages,
+                            native_output_bytes(&route, service, options.document_limits),
+                            remaining,
+                        )
+                        .await
+                        .map_err(|error| err(error.to_string()))?;
+                    write_native_text(&root, stem, &markdown)?;
+                    emit_event(
+                        &task_events,
+                        ProgressEvent::DocumentPrepared {
+                            document: stem.clone(),
+                        },
+                    );
+                    return Ok(());
+                }
+                #[cfg(not(feature = "legacy-office"))]
+                return Err(err(
+                    "backend=local native PDF Markdown requires the legacy-office feature (AnyDoc PDF support)",
+                ));
+            }
             if kind.is_legacy_office() {
-                extract_text_and_write(
-                    bytes,
-                    *kind,
-                    &root,
-                    stem,
-                    office_workers,
-                    remaining,
-                    &task_events,
-                )
-                .await?;
-                emit_event(
-                    &task_events,
-                    ProgressEvent::DocumentPrepared {
-                        document: stem.clone(),
-                    },
-                );
-                return Ok(());
+                if options.local_backend {
+                    #[cfg(feature = "legacy-office")]
+                    extract_text_and_write_local(
+                        bytes,
+                        *kind,
+                        &root,
+                        stem,
+                        office_workers,
+                        remaining,
+                    )
+                    .await?;
+                    #[cfg(not(feature = "legacy-office"))]
+                    return Err(err(
+                        "backend=local requires the legacy-office feature for AnyDoc parsing",
+                    ));
+                    #[cfg(feature = "legacy-office")]
+                    {
+                        emit_event(
+                            &task_events,
+                            ProgressEvent::DocumentPrepared {
+                                document: stem.clone(),
+                            },
+                        );
+                        return Ok(());
+                    }
+                } else {
+                    #[cfg(feature = "legacy-office")]
+                    {
+                        let (prepared, warning) =
+                            crate::input_prepare::prepare_legacy_with_warning(
+                                bytes,
+                                *kind,
+                                &route,
+                                office_workers,
+                                remaining,
+                            )
+                            .await
+                            .map_err(err)?;
+                        if let Some(message) = warning {
+                            emit_event(
+                                &task_events,
+                                ProgressEvent::OfficeWarning {
+                                    document: stem.clone(),
+                                    message: legacy_message_once(
+                                        message,
+                                        &mut legacy_recommendation_emitted,
+                                    ),
+                                },
+                            );
+                        }
+                        emit_event(
+                            &task_events,
+                            ProgressEvent::DocumentPrepared {
+                                document: stem.clone(),
+                            },
+                        );
+                        let mut route = route.clone();
+                        route.start_page = 0;
+                        route.end_page = None;
+                        route.total_deadline = deadline
+                            .checked_duration_since(Instant::now())
+                            .filter(|d| !d.is_zero())
+                            .ok_or_else(|| err("input deadline expired"))?;
+                        ensure_vlm_client(
+                            &mut client,
+                            &mut client_http,
+                            options,
+                            env,
+                            resolved.concurrency_model,
+                            temperature_retry,
+                        )
+                        .await?;
+                        client
+                            .as_ref()
+                            .expect("a non-local legacy candidate implies a connected VLM client")
+                            .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
+                                prepared,
+                                route,
+                                &root,
+                                stem,
+                                task_events.clone(),
+                                cleanup_warning,
+                                totals,
+                                page_concurrency.clone(),
+                            )
+                            .await
+                            .map_err(|e| -> DirectError { Box::new(e) })?;
+                        return Ok(());
+                    }
+                    #[cfg(not(feature = "legacy-office"))]
+                    return Err(err(
+                        "legacy PDF conversion requires the legacy-office feature",
+                    ));
+                }
             }
             let (prepared, warning) = prepare_with_warning_and_ooxml(
                 bytes,
@@ -966,12 +1498,18 @@ async fn run_inner(
                 .checked_duration_since(Instant::now())
                 .filter(|d| !d.is_zero())
                 .ok_or_else(|| err("input deadline expired"))?;
-            // Invariant: a non-legacy candidate reaching this loop implies the VLM client was
-            // connected. `all_legacy` is computed over exactly the loop's surviving candidates
-            // (the same doomed filter the loop applies), so do not skip candidates elsewhere.
+            ensure_vlm_client(
+                &mut client,
+                &mut client_http,
+                options,
+                env,
+                resolved.concurrency_model,
+                temperature_retry,
+            )
+            .await?;
             client
                 .as_ref()
-                .expect("a non-legacy candidate implies a connected VLM client")
+                .expect("a VLM candidate implies a connected VLM client")
                 .parse_and_write_prepared_pdf_with_totals_and_page_concurrency(
                     prepared,
                     route,
@@ -988,14 +1526,32 @@ async fn run_inner(
         }
         .await;
         if let Err(e) = result {
+            let message = e.to_string();
+            #[cfg(feature = "legacy-office")]
+            let message = {
+                let mut message = message;
+                if !options.local_backend
+                    && kind.is_legacy_office()
+                    && message.starts_with("legacy best-effort PDF conversion failed")
+                {
+                    message = legacy_message_once(message, &mut legacy_recommendation_emitted);
+                }
+                message
+            };
+            // Client discovery/configuration historically failed before document events. Keep
+            // that fail-fast behavior, while conversion errors remain document-scoped so later
+            // documents can still run.
+            if !options.local_backend && client.is_none() && client_http.is_none() {
+                return Err(e);
+            }
             emit_event(
                 &task_events,
                 ProgressEvent::DocumentFailed {
                     document: stem.clone(),
-                    message: e.to_string(),
+                    message: message.clone(),
                 },
             );
-            failures.push((stem.clone(), e.to_string()));
+            failures.push((stem.clone(), message));
             continue;
         }
         emit_event(
@@ -1026,10 +1582,21 @@ mod tests {
         DirectOptions {
             input: PathBuf::new(),
             output: PathBuf::new(),
+            local_backend: false,
+            method: "auto".into(),
+            lang: "ch".into(),
             base_url: None,
             server_option_label: "--url",
             model: None,
             api_key: None,
+            official_hybrid: false,
+            official_worker_mode: super::super::OfficialWorkerMode::PerDocument,
+            effort: "medium".into(),
+            model_stack: "auto".into(),
+            model_stack_explicit: false,
+            official_python: None,
+            official_model_dir: None,
+            official_config: None,
             page_start: None,
             page_end: None,
             no_formula: None,
@@ -1037,6 +1604,113 @@ mod tests {
             no_image_analysis: None,
             document_limits: crate::DocumentLimitPolicy::defaults(),
         }
+    }
+
+    #[test]
+    fn official_page_ranges_use_official_open_ended_syntax() {
+        let mut route = OfficialPdfOptions::default();
+        assert_eq!(
+            official_page_range(DocumentKind::Pdf, &route).unwrap(),
+            None
+        );
+
+        route.start_page = 2;
+        assert_eq!(
+            official_page_range(DocumentKind::Pdf, &route).unwrap(),
+            Some("3~-1".into())
+        );
+
+        route.end_page = Some(4);
+        assert_eq!(
+            official_page_range(DocumentKind::Pdf, &route).unwrap(),
+            Some("3~5".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn official_open_ended_page_limit_rejects_before_worker_dispatch() {
+        use lopdf::{Document, Object, dictionary};
+
+        let temp = tempfile::tempdir().unwrap();
+        let pdf = temp.path().join("multi.pdf");
+        let mut document = Document::with_version("1.5");
+        let pages = document.new_object_id();
+        let page_ids: Vec<_> = (0..2)
+            .map(|_| {
+                let page = document.new_object_id();
+                document.objects.insert(
+                    page,
+                    Object::Dictionary(dictionary! {
+                        "Type" => "Page",
+                        "Parent" => pages,
+                        "MediaBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+                    }),
+                );
+                page
+            })
+            .collect();
+        document.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+                "Count" => 2,
+            }),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        std::fs::write(&pdf, bytes).unwrap();
+
+        let mut route = OfficialPdfOptions::default();
+        route.max_pages = 1;
+        let candidates = vec![(1, pdf, DocumentKind::Pdf, "multi".into())];
+        let mut failures = Vec::new();
+        let error = run_official_hybrid_documents(
+            &test_options(),
+            &route,
+            OfficialHybridConfig {
+                python: Some("/definitely/missing/python".into()),
+                model_stack: "auto".into(),
+                model_dir: None,
+                config: None,
+                server_url: None,
+                api_key: None,
+                model_name: None,
+            },
+            &candidates,
+            &HashSet::new(),
+            temp.path(),
+            &None,
+            &None,
+            &mut failures,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("limit exceeded for pages: 2 > 1"), "{error}");
+        assert_eq!(failures.len(), 1);
+    }
+
+    #[test]
+    fn explicit_auto_model_stack_overrides_environment() {
+        let env = super::super::Environment::from_values(HashMap::from([(
+            "MINERU_MODEL_STACK",
+            OsString::from("full"),
+        )]));
+        let mut options = test_options();
+        options.model_stack_explicit = true;
+        assert_eq!(
+            resolve_official_hybrid(&options, &env).unwrap().model_stack,
+            "auto"
+        );
+
+        options.model_stack_explicit = false;
+        assert_eq!(
+            resolve_official_hybrid(&options, &env).unwrap().model_stack,
+            "full"
+        );
     }
 
     #[test]
@@ -1471,10 +2145,21 @@ mod tests {
             DirectOptions {
                 input: input.path().to_owned(),
                 output: output.path().to_owned(),
+                local_backend: false,
+                method: "auto".into(),
+                lang: "ch".into(),
                 base_url: Some("http://127.0.0.1:1".into()),
                 server_option_label: "--url",
                 model: Some("mock".into()),
                 api_key: None,
+                official_hybrid: false,
+                official_worker_mode: super::super::OfficialWorkerMode::PerDocument,
+                effort: "medium".into(),
+                model_stack: "auto".into(),
+                model_stack_explicit: false,
+                official_python: None,
+                official_model_dir: None,
+                official_config: None,
                 page_start: None,
                 page_end: None,
                 no_formula: None,
@@ -1638,10 +2323,21 @@ mod tests {
             DirectOptions {
                 input: input.path().to_owned(),
                 output: output.path().to_owned(),
+                local_backend: false,
+                method: "auto".into(),
+                lang: "ch".into(),
                 base_url: Some(base_url),
                 server_option_label: "--url",
                 model: Some("mock".into()),
                 api_key: None,
+                official_hybrid: false,
+                official_worker_mode: super::super::OfficialWorkerMode::PerDocument,
+                effort: "medium".into(),
+                model_stack: "auto".into(),
+                model_stack_explicit: false,
+                official_python: None,
+                official_model_dir: None,
+                official_config: None,
                 page_start: None,
                 page_end: None,
                 no_formula: None,

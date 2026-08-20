@@ -3014,7 +3014,7 @@ dependencies = [
 
 [[package]]
 name = "mineru"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "anydoc",
  "axum",
@@ -3039,6 +3039,7 @@ dependencies = [
  "lopdf 0.44.0",
  "md5",
  "office2pdf",
+ "pdf-inspector",
  "pdf-writer",
  "quick-xml 0.41.0",
  "regex",
@@ -3058,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "mineru-node"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "mineru",
  "napi",
@@ -3068,7 +3069,7 @@ dependencies = [
 
 [[package]]
 name = "mineru-python"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "mineru",
  "pyo3",

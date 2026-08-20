@@ -1,5 +1,5 @@
 use super::{Backend, InputDocument, PlannedTask};
-use std::path::Path;
+use std::{fs::File, io::Read, path::Path};
 
 #[doc(hidden)]
 pub fn selected_pages_for_path(
@@ -16,6 +16,55 @@ pub fn selected_pages_for_path(
         return Err("PDF is encrypted".into());
     }
     selected_pages(document.get_pages().len(), start, end)
+}
+
+pub(crate) fn selected_pages_for_path_with_limit(
+    path: &Path,
+    is_pdf: bool,
+    start: u64,
+    end: Option<u64>,
+    max_input_bytes: u64,
+) -> Result<usize, String> {
+    if !is_pdf {
+        return Ok(1);
+    }
+    let document = load_pdf_with_limit(path, max_input_bytes)?;
+    if document.is_encrypted() {
+        return Err("PDF is encrypted".into());
+    }
+    selected_pages(document.get_pages().len(), start, end)
+}
+
+fn load_pdf_with_limit(path: &Path, max_input_bytes: u64) -> Result<lopdf::Document, String> {
+    let mut file = File::open(path).map_err(|_| "cannot read PDF")?;
+    let read_limit = max_input_bytes.saturating_add(1);
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let remaining = read_limit.saturating_sub(total);
+        if remaining == 0 {
+            break;
+        }
+        let chunk_len =
+            usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| "cannot read PDF")?;
+        let read = file
+            .read(&mut buffer[..chunk_len])
+            .map_err(|_| "cannot read PDF")?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(u64::try_from(read).map_err(|_| "cannot read PDF")?)
+            .ok_or("cannot read PDF")?;
+        if total > max_input_bytes {
+            return Err(format!(
+                "upload file exceeds configured input limit of {max_input_bytes} bytes"
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    lopdf::Document::load_mem(&bytes).map_err(|_| "cannot read PDF".into())
 }
 pub(crate) fn selected_pages(count: usize, start: u64, end: Option<u64>) -> Result<usize, String> {
     let count = u64::try_from(count).map_err(|_| "PDF page count is too large")?;
@@ -165,7 +214,13 @@ pub(crate) fn effective_concurrency(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    const MINIMAL_PDF_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/pdf/minimal.pdf"
+    );
+
     fn d(order: usize, pages: usize) -> InputDocument {
         InputDocument {
             path: PathBuf::from(format!("{order}.pdf")),
@@ -175,6 +230,36 @@ mod tests {
             order,
         }
     }
+
+    #[test]
+    fn limited_pdf_input_is_rejected_before_parse() {
+        let error =
+            selected_pages_for_path_with_limit(Path::new(MINIMAL_PDF_PATH), true, 0, None, 1)
+                .unwrap_err();
+
+        assert_eq!(
+            error,
+            "upload file exceeds configured input limit of 1 bytes"
+        );
+    }
+
+    #[test]
+    fn limited_pdf_input_still_selects_pages() {
+        let max_input_bytes =
+            u64::try_from(include_bytes!("../../tests/fixtures/pdf/minimal.pdf").len()).unwrap();
+
+        assert_eq!(
+            selected_pages_for_path_with_limit(
+                Path::new(MINIMAL_PDF_PATH),
+                true,
+                0,
+                Some(0),
+                max_input_bytes,
+            ),
+            Ok(1)
+        );
+    }
+
     #[test]
     fn stems_reserve_raw_names_and_utf8_bytes() {
         let input = vec!["a".into(), "A".into(), "a_2".into(), "a".into()];

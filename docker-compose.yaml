@@ -29,7 +29,7 @@ x-mineru-vllm: &mineru-vllm
             device_ids: ["${VLLM_NVIDIA_DEVICE_ID:-0}"]
             capabilities: [gpu]
 
-# llama.cpp OpenAI-compatible server for quantized (GGUF) MinerU models.
+# Generic llama.cpp OpenAI-compatible provider example only; not validated for MinerU 4.0.0a6 multimodal compatibility.
 x-mineru-llama: &mineru-llama
   <<: *defaults
   image: ${LLAMA_CPP_REGISTRY:-}ghcr.io/ggml-org/llama.cpp:${LLAMA_CPP_TAG:-server-cuda}
@@ -41,8 +41,6 @@ x-mineru-llama: &mineru-llama
     LLAMA_ARG_CTX_SIZE: ${LLAMA_CTX_SIZE:-8192}
     # Number of layers offloaded to the GPU; use auto/all for full offload.
     LLAMA_ARG_N_GPU_LAYERS: ${LLAMA_N_GPU_LAYERS:-99}
-    # Fetch the GGUF directly from Hugging Face when LLAMA_MODEL is not a local path.
-    LLAMA_ARG_HF_REPO: ${LLAMA_ARG_HF_REPO:-}
   volumes:
     # Put your quantized GGUF file(s) in ./models (host) or point LLAMA_MODELS_DIR elsewhere.
     - ${LLAMA_MODELS_DIR:-./models}:/models:ro
@@ -70,7 +68,7 @@ services:
       - "openai-server"
       - ${COMPOSE_PROFILES:-} # as default
     ports:
-      - ${MINERU_PORT_OVERRIDE_VLLM:-30000}:30000
+      - "${MINERU_PROVIDER_BIND_HOST:-127.0.0.1}:${MINERU_PORT_OVERRIDE_VLLM:-30000}:30000"
     entrypoint: mineru-openai-server
     command: --host 0.0.0.0
       --port 30000
@@ -83,15 +81,15 @@ services:
       retries: 3
       start_period: 60s
 
-  # Quantized (GGUF) model serving via llama.cpp. Override the model with
-  # LLAMA_MODEL=/models/<file>.gguf or use LLAMA_ARG_HF_REPO to fetch from HF.
+  # Generic llama.cpp provider example only; not validated for MinerU 4.0.0a6 multimodal compatibility.
+  # Set LLAMA_MODEL=/models/<file>.gguf explicitly.
   mineru-llama-server:
     <<: *mineru-llama
     profiles:
       - "llama-server"
       - ${COMPOSE_PROFILES:-} # as default
     ports:
-      - ${MINERU_PORT_OVERRIDE_LLAMA:-30000}:30000
+      - "${MINERU_PROVIDER_BIND_HOST:-127.0.0.1}:${MINERU_PORT_OVERRIDE_LLAMA:-30000}:30000"
     # The image ships a HEALTHCHECK pinned to its default port 8080; override it
     # when remapping the port so the container is not reported unhealthy.
     healthcheck:
@@ -100,4 +98,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 120s
-

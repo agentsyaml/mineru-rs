@@ -71,7 +71,7 @@ jobs:
           set -e
           python3 .github/scripts/check_cargo_audit.py check \
             --report "$RUNNER_TEMP/cargo-audit.json" --lockfile Cargo.lock
-          printf '%s\n' "### cargo-audit exception" "" "Allowed: \`RUSTSEC-2026-0194\`, \`RUSTSEC-2026-0195\` (\`quick-xml\` only). Expires: \`2026-09-30\` UTC." >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "### cargo-audit policy" "" "Allowed vulnerability advisories: \`RUSTSEC-2026-0194\`, \`RUSTSEC-2026-0195\` (\`quick-xml\` only)." "Reviewed yanked transitive lock exception: \`arrayref 0.3.9\`. Expires: \`2026-09-30\` UTC." >> "$GITHUB_STEP_SUMMARY"
           test "$audit_status" -eq 1
       - name: Check formatting
         run: cargo +1.89.0 fmt --all -- --check

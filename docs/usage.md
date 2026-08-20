@@ -66,24 +66,24 @@ export MINERU_VL_MODEL_NAME="<model-id>"
 
 ## `mineru` 规范命令（PDF / 图像 / Office）
 
-`mineru` 是规范产品二进制，支持 PDF、图像和 Office 输入，可选 `--api-url` 远程 API 服务器模式。它不暴露本地 ML 后端；`--backend` 接受 `vlm-http-client` 与 `hybrid-http-client`（直接模式下后者是前者的协议别名，见下文）。
+`mineru` 是规范产品二进制，支持 PDF、图像和 Office 输入，可选 `--api-url` 远程 API 服务器模式。`--backend=local` 仅在直接模式下通过隔离的内置 Rust `mineru-office-convert` 辅助程序，对 AnyDoc 支持的旧格式和保守判定的干净文本 PDF 执行原生 Markdown 抽取；这是项目私有 native lane，不是本地 ML 模型、`llama-server` 或官方 `hybrid-engine`。该辅助程序不启动 Python、Microsoft Office/LibreOffice，不加载模型，也不发网络请求。直接 `hybrid-http-client` 使用独立的官方 MinerU 4.0.0a6 Python worker，绝不进入旧版 3.4.5 VLM 或 Office 路径。
 
-Office 格式转换需要 `mineru-office-convert` 辅助程序，它依赖两个可选 feature：
+OOXML 格式转换需要 `mineru-office-convert` 辅助程序；`backend=local` 的旧格式和 native PDF 抽取也使用这个内置 Rust 辅助程序，且不启动 Python、Office、模型或网络。能力依赖两个可选 feature：
 
 ```sh
 # docx/pptx/xlsx → PDF（经 office2pdf，再走 VLM 版面解析）
 cargo build --release --features office
-# 旧格式 → Markdown 文本（经 anydoc，无需 VLM）
+# 旧格式 → 非 local VLM 路径的尽力文本 PDF；local 通过内置 helper 使用 AnyDoc Markdown
 cargo build --release --features legacy-office
 # 两者都启用
 cargo build --release --features office,legacy-office
 ```
 
-`mineru` 按扩展名自动路由：`.docx`/`.pptx`/`.xlsx` 先转 PDF 再走 VLM 版面解析；`.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv` 由 `anydoc` 直接抽取 Markdown 文本，**不需要 VLM 服务**。旧格式输出位于 `{输出}/{stem}/office/{stem}.md`，仅含文本，无版面 JSON 与资产；文档中的图片引用保留为未解析的 Markdown 引用。`mineru-api` 服务端不接受旧格式（返回 `422`），仅 `mineru` 直接模式支持。
+`mineru` 按扩展名自动路由：`.docx`/`.pptx`/`.xlsx` 保持现有 helper 转 PDF 再走 VLM 版面解析。对 `.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv`，非 local 直接 VLM 路径先通过隔离 helper 将 AnyDoc Markdown 尽力转换为合法文本 PDF，再把该 PDF 送入现有 PDF/VLM 路径。该结果是仅文本的 fallback，不承诺保持 Office 版式：原版式、图片、表格、公式和宏可能丢失，非 ASCII 字符可能被替换为 `?`；每个文档都会发对应 warning，一个批次的 Office/LibreOffice 建议只发一次。若无法生成合法 PDF，错误会建议先用 Microsoft Office 或 LibreOffice 转成 DOCX/XLSX/PPTX。显式 `--backend local` 时，同一组旧格式和干净 native PDF 都通过隔离的内置 Rust helper 运行 AnyDoc；该路径不启动 Python、Office，不加载模型，也不发网络请求。旧格式输出为 `{输出}/{stem}/office/{stem}.md`，native PDF 输出为 `{输出}/{stem}/native/{stem}.md`，只包含 Markdown，不生成 official JSON 或 assets。扫描、混合、乱码、低质量或不确定 PDF 会明确失败，不回退到 VLM。非 local 旧格式输出位于 `{输出}/{stem}/vlm/`，并保留原始旧格式 origin。直接 Hybrid 在启动 worker 前拒绝 Office 和旧格式；API 路径仍 fail-closed，不使用该 worker。`mineru-api` 的 backend 语义不变，不接受 `local`。
 
 ### Office helper containment
 
-辅助程序在转换前对 OOXML 执行强制完整预检，并限制输入 32 MiB、输出 64 MiB。
+辅助程序在转换前对 OOXML 和旧格式签名执行强制预检，并限制输入 32 MiB、输出 64 MiB。旧格式 PDF 是有界的文本 fallback，不承诺保持 Office 版式。
 
 | 平台 | 内存硬限制 | 其他辅助程序限制 |
 | --- | --- | --- |
@@ -97,11 +97,44 @@ macOS 原生 API 没有可靠且无需 entitlement 的进程 RSS/地址空间硬
 
 不传 `--api-url` 时，`mineru` 直接调用外部 VLM 服务。服务地址和模型由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME`、`MINERU_VL_API_KEY` 环境变量或 `--url` 覆盖。
 
-直接模式下 `-b hybrid-http-client` 与 `vlm-http-client` 行为完全相同（本构建没有本地 layout/OCR/formula 模型），每次运行会在 stderr 提示：
+### 直接官方 Hybrid 4.0.0a6
+
+直接 `-b hybrid-http-client` 要求 Python 环境中精确安装
+`mineru==4.0.0a6`。Rust 二进制内嵌窄 adapter shim，但不打包 Python、MinerU
+或模型文件；默认 `per-document` 模式每个文档启动一个新子进程，父进程负责
+deadline、取消、管道上限和后代清理。只接受 PDF 和官方图像格式，OOXML/旧 Office
+会在启动 worker 前拒绝。
+
+可显式选择 `--official-worker-mode persistent`，或设置
+`MINERU_OFFICIAL_WORKER_MODE=persistent`，在同一次直接 CLI 运行中复用一个 worker
+和已加载模型。该性能模式始终只有一个 active request：文档仍按顺序、各自使用私有
+快照和 bundle；worker 启动/握手一次，取消或崩溃后下一文档建立新 session。已提交的
+请求不自动重试，不提供硬 RSS/GPU 隔离。默认值仍为 `per-document`，CLI 显式值覆盖
+环境值，环境值只影响直接 `hybrid-http-client`。
+
+`medium` 也保持官方 `hybrid-http-client` backend，但只走本地路径，不需要
+VLM URL；`high`/`xhigh` 使用同一个官方 `hybrid-http-client`，必须提供显式 HTTP(S) `--url` 或
+`MINERU_VL_SERVER`。`model_stack` 可为 `auto`、`light`、`full`；模型目录和
+配置由用户通过绝对路径提供。公式/表格关闭开关不是固定 parser 的参数。
+结果独立写入 `{输出}/{stem}/hybrid-v4/`，包含 `markdown.md`、
+`middle_json.json`、`content_list.json`、`structured_content.json`、可选的
+`model_output.json` 和 `images/`，不会进入 3.4.5 builders。
+
+直接 Hybrid 会拒绝旧版 v3 专用的 VLM transport 控制项（`--http-*`、
+`--max-remote-image-*`、`--max-decoded-pixels`、`--max-images-per-request`、
+`--max-redirects`、`--vlm-debug`、`--temperature-retry` 及对应环境变量），
+也会拒绝 `--client-side-output-generation`，不会静默忽略这些选项。官方解析
+字段和项目自己的输入/输出上限仍然可用。
+
+项目自有 adapter envelope 版本为 `mineru-rs-official-worker/1`（默认模式）或
+内部 persistent `mineru-rs-official-worker/2`，都不是官方 MinerU stdin/stdout 协议。
+API 模式仍明确拒绝 Hybrid：
 
 ```text
-warning: backend=hybrid-http-client: this build has no local layout/OCR/formula models; falling back to the vlm-http-client pipeline (identical behavior)
+failed: backend=hybrid-http-client is direct-only; API mode does not support Hybrid
 ```
+
+默认 `vlm-http-client` 始终走现有 3.4.5 VLM 路径；`backend=local` 和官方 Hybrid 也保持独立。
 
 ```sh
 export MINERU_VL_SERVER="https://<server>"
@@ -110,6 +143,17 @@ export MINERU_VL_API_KEY="<your-key>"
 
 ./target/release/mineru -p input.pdf -o output
 ```
+
+### 本地 AnyDoc 模式（`backend=local`）
+
+`local` 表示在隔离的内置 Rust `mineru-office-convert` 辅助程序中执行 AnyDoc 文本抽取，不在 CLI 核心进程中运行，也不表示本地模型。它支持 `.doc`、`.ppt`、`.xls`、`.odt`、`.rtf`、`.epub`、`.ods`、`.odp`、`.csv` 和 PDF native Markdown；构建时必须启用 `legacy-office`：
+
+```sh
+cargo build --release --features legacy-office
+./target/release/mineru -p old.doc -o output --backend local
+```
+
+旧格式输出仍为 `output/old/office/old.md`，干净 native PDF 输出为 `output/old/native/old.md`。native profile 只有 Markdown，不生成 `document.json`、`middle.json`、`content-list` 或 assets。扫描、混合、乱码、空、低质量、复杂或不确定 PDF 会明确报错；不会调用 VLM 或静默回退。该内置 Rust helper 不启动 Python、Microsoft Office/LibreOffice，不加载模型，也不发网络请求。`--url`、`--api-key` 或 VLM 连接环境变量不会用于 AnyDoc 或被校验，也不会访问 `--api-url`。VLM transport flags（如 `--http-*`、`--max-remote-image-*`、`--vlm-debug`）同样不参与 local 解析。local 使用 helper 的有界默认策略，目前仅执行实际可实现的输入/输出字节限制（包括 `--office-input-bytes` 与 `--office-output-bytes`）；helper 专属的 stderr、wall、CPU、NOFILE、内存和进程隔离参数若通过 flag 或环境变量设置，在未明确支持时会在读取输入前明确拒绝。native local PDF 不支持页选择。
 
 ### 远程 API 服务器模式
 
@@ -126,9 +170,14 @@ export MINERU_VL_API_KEY="<your-key>"
 | `-p, --path <路径>` | 必填 | 输入文件或目录（递归处理）。 |
 | `-o, --output <目录>` | 必填 | 输出目录。 |
 | `--api-url <URL>` | 无 | 远程 API 服务器地址；不传则直接 VLM 模式。 |
-| `-m, --method <auto\|txt\|ocr>` | `auto` | 解析方法（直接模式下忽略）。 |
-| `-b, --backend <vlm-http-client\|hybrid-http-client>` | `vlm-http-client` | 后端。直接模式下 `hybrid-http-client` 是 `vlm-http-client` 的协议别名（每次运行警告），API 模式下原样透传给服务器。 |
-| `--effort <medium\|high>` | `medium` | 解析力度（直接模式下忽略）。 |
+| `-m, --method <auto\|txt\|ocr>` | `auto` | 解析方法；直接 `vlm-http-client` 忽略，官方直接 Hybrid 转发。 |
+| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | 后端。`local` 通过内置 Rust helper 调用项目私有 AnyDoc lane；直接 `hybrid-http-client` 使用官方 4.0.0a6 worker，API Hybrid 仍明确拒绝。 |
+| `--effort <medium\|high\|xhigh>` | `medium` | 官方直接 Hybrid 力度。`medium` 仅本地；`high`/`xhigh` 要求显式 HTTP(S) VLM URL；其它直接后端仍只接受 `medium`/`high`。 |
+| `--model-stack <auto\|light\|full>` | `auto` | 官方直接 Hybrid 模型栈。显式提供的值（包括 `auto`）覆盖 `MINERU_MODEL_STACK`；省略时使用环境值。模型文件不随 Rust 二进制提供。 |
+| `--official-worker-mode <per-document\|persistent>` | `per-document` | 官方 Hybrid worker 生命周期。`persistent` 是单 worker、单 active request 的显式性能模式；覆盖 `MINERU_OFFICIAL_WORKER_MODE`。 |
+| `--official-python <绝对路径>` | Python `python3`/`python` | 官方 Hybrid Python 解释器，覆盖 `MINERU_OFFICIAL_PYTHON`；不随 Rust 二进制提供。 |
+| `--official-model-dir <绝对路径>` | 无 | 官方 Hybrid 模型根目录，覆盖 `MINERU_MODEL_BASE_DIR`。 |
+| `--official-config <绝对路径>` | 无 | 官方 Hybrid 配置路径，覆盖 `MINERU_CONFIG`。 |
 | `-l, --lang <语言>` | `ch` | 语言代码。 |
 | `-u, --url <URL>` | 无 | 直接模式下的 VLM 服务地址覆盖；API 模式下的任务级模型服务器覆盖。 |
 | `-s, --start <n>` | `0` | 起始页，**从 0 开始**。 |
@@ -175,12 +224,12 @@ VLM 传输旋钮（每个都有对应的环境拼写）：
 | `--max-images-per-request <n>` | `64` | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` |
 | `--max-redirects <n>` | `3` | `MINERU_VLM_MAX_REDIRECTS` |
 | `--http-max-response-bytes <n>` | `10485760` | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` |
-| `--temperature-retry[=<true\|false>]` | 关闭 | 仅对可完整缓冲的 official PDF layout/semantic 请求启用质量重试：先使用基础温度，之后每次 `+0.2`，上限 `1.0`。升温重试 body 仅将已存在的正数 `top_k` 放宽到至少 `40`、`top_p` 放宽到至少 `0.9`；不添加缺失字段或改写 `top_k<=0` 的不限值。`--temperature-retry` 等同于 `true`，显式 `=false` 覆盖 `MINERU_VLM_TEMPERATURE_RETRY`；未提供 CLI 值时沿用环境变量。不影响普通 `predict`、批量、流式、legacy-office 或 API 表单请求。 |
+| `--temperature-retry[=<true\|false>]` | 关闭 | 仅对可完整缓冲的 official PDF layout/semantic 请求启用质量重试：先使用基础温度，之后每次 `+0.2`，上限 `1.0`。升温重试 body 仅将已存在的正数 `top_k` 放宽到至少 `40`、`top_p` 放宽到至少 `0.9`；不添加缺失字段或改写 `top_k<=0` 的不限值。`--temperature-retry` 等同于 `true`，显式 `=false` 覆盖 `MINERU_VLM_TEMPERATURE_RETRY`；未提供 CLI 值时沿用环境变量。不影响普通 `predict`、批量、流式、`backend=local` 或 API 表单请求。 |
 | `--vlm-debug <true\|false>` | `false` | 在 VLM 请求体中发送 `vllm_xargs.debug`。覆盖 `MINERU_VL_DEBUG_ENABLE`。 |
 
 诊断/人类输出截断上限保持编译固定、不可配置。现有 `--max-input-bytes`、`--max-encoded-document-bytes`、`--max-output-bytes` 三组不变。
 
-直接模式下 `--method`、`--effort`、`--lang` 的非默认值会产生警告并被忽略。`--client-side-output-generation=true` 在 API 模式下会被拒绝。
+现有直接 `vlm-http-client` 下 `--method`、`--effort`、`--lang` 的非默认值会产生警告并被忽略；官方直接 Hybrid 会把这些字段传给 4.0.0a6。`--client-side-output-generation` 在直接 Hybrid 和 API 模式下都会被拒绝。
 
 API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--concurrency-model`、`--processing-window-size`、`--render-*`、`--batch-size`、全部 `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--temperature-retry`/`--vlm-debug` 及其环境拼写）会显式报错，因为远程服务器执行解析、这些配置不会有任何消费者；`MINERU_VL_SERVER` 在未传 `--url` 时作为任务级 `server_url` 提交。
 
@@ -192,7 +241,32 @@ API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--concurrency-mod
 
 ### 容器
 
-API 服务没有已发布的容器镜像；请从源码构建运行（见上文[构建与前置条件](#构建与前置条件)）。
+已发布的 Rust API 镜像为 `ghcr.io/agentsyaml/mineru-cli`。它监听容器端口
+`8000`，提供 `GET /health`，将任务输出写入 `/app/output`，并以默认的非
+root 用户运行。发布二进制包含 `office,legacy-office` feature，但镜像只打包
+Rust 二进制：不包含 Python、`mineru==4.0.0a6` 或模型文件。
+
+```sh
+mkdir -p output
+chmod a+rwx output  # 让镜像的非 root 用户可以写入
+docker run --rm \
+  --publish 127.0.0.1:8000:8000 \
+  --volume "$PWD/output:/app/output" \
+  --env MINERU_VL_SERVER="https://<server>" \
+  --env MINERU_VL_MODEL_NAME="<model-id>" \
+  --env MINERU_VL_API_KEY="<your-key>" \
+  --env MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
+  ghcr.io/agentsyaml/mineru-cli:latest
+
+curl http://127.0.0.1:8000/health
+```
+
+宿主机绑定的输出目录必须允许镜像默认的非 root 用户写入。该镜像不能直接
+运行官方 Hybrid；只有显式提供另行准备好的环境才可满足其外部依赖，API Hybrid
+仍 fail-closed。`MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` 是显式的、针对单个容器的
+未认证任务 API opt-in；不要将它放入 Dockerfile 或镜像的全局 ENV。优先按上例发布到
+loopback；若要扩大暴露范围，必须使用私有网络或带认证的反向代理，因为 API 没有内置
+认证或任务所有权隔离。
 
 ### 启动
 
@@ -278,6 +352,11 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | 页管线并发上限（任意正整数），仅约束同时运行的页管线数；请求级并发由 `MINERU_VLM_HTTP_CONCURRENCY` 决定。 |
 | `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | 并发模型，取值 `classic\|two-phase`。`classic`：经典单编码器流水（默认）；`two-phase`：将页内语义处理拆为 encode-all → request-all 两阶段，解除 CPU 编码对请求派发的串行瓶颈（可选启用）。 |
+| `MINERU_MODEL_STACK` | `auto` | 官方直接 Hybrid 模型栈：`auto\|light\|full`。 |
+| `MINERU_OFFICIAL_WORKER_MODE` | `per-document` | 官方 Hybrid worker 模式：`per-document\|persistent`。仅直接 Hybrid 生效；CLI 显式值优先。 |
+| `MINERU_OFFICIAL_PYTHON` | Python `python3`/`python` | 官方 Hybrid Python 解释器绝对路径。 |
+| `MINERU_MODEL_BASE_DIR` | 无 | 官方 Hybrid 模型根目录绝对路径。 |
+| `MINERU_CONFIG` | 无 | 官方 Hybrid 配置绝对路径。 |
 | `MINERU_PDF_RENDER_THREADS` | `min(cpu, 8)` | 渲染 worker 数。 |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
 | `MINERU_FORMULA_ENABLE` | 开启 | 公式识别默认值（严格 `true`/`false`，不区分大小写）。 |
@@ -408,6 +487,16 @@ output/
 
 `{stem}` 是路径输入文件名去掉扩展名后的安全 stem；无安全 stem 时为 `document`。库 API 以字节传入 `PdfInput::Bytes` 且未提供安全 stem 时，预览同为 `document_layout.pdf`。输出先写入同级临时 staging 目录；完成后以重命名替换目标目录，已有目录会先作为备份，替换成功后删除备份，避免留下半写入结果。
 
+直接 CLI 的 native profile 与 official 输出树明确分离：
+
+```text
+output/{stem}/native/{stem}.md
+```
+
+其中只有 native Markdown，不提供 `document.json`、`middle.json`、
+`content-list`、layout preview 或裁剪 assets；不要将其当作 official
+MinerU 结果归档。
+
 ## 库 API（最小示例）
 
 以下示例只使用公开 API，可放入自己的 Tokio 异步程序：
@@ -468,7 +557,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-两者都接受与 CLI 相同的关键字选项：`api_url`、`method`（`auto`/`txt`/`ocr`）、`backend`（`vlm-http-client`/`hybrid-http-client`）、`effort`（`medium`/`high`）、`lang`（默认 `ch`）、`url`（直接 VLM 服务）、`start`、`end`、`formula`、`table`、`image_analysis` 和 `client_side_output_generation`。
+两者接受与绑定版本相同的 VLM 关键字选项；`backend=local` 当前仅属于规范 `mineru` CLI，不改变绑定或 API backend 语义。
 
 ### Node.js
 

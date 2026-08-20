@@ -2,8 +2,8 @@ FROM rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d
 
 WORKDIR /app
 COPY . .
-# CPU image ships the main binaries; local VLM inference is served by llama.cpp instead.
-RUN cargo build --release --locked -p mineru --features office --bins
+# Rust API image; VLM inference uses an external provider.
+RUN cargo build --release --locked -p mineru --features office,legacy-office --bins
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 

@@ -32,10 +32,27 @@ No long-lived registry token belongs in GitHub Actions. The crates.io, PyPI,
 and npm jobs acquire OIDC credentials only after all release artifacts pass
 verification; GHCR uses the job-scoped `GITHUB_TOKEN` permissions above.
 
+## Published GHCR image contract
+
+The existing `publish-container` job publishes the Rust API image
+`ghcr.io/agentsyaml/mineru-cli` for `linux/amd64` and `linux/arm64`. Its
+release binaries are built with `office,legacy-office`; the image's default
+command listens on container port `8000`, serves `GET /health`, runs as its
+configured non-root user, and writes task output under `/app/output`.
+
+The image bundles Rust binaries only. It does not contain Python,
+`mineru==4.0.0a6`, or model assets, so direct official Hybrid needs a separately
+prepared environment explicitly supplied to the image and API Hybrid remains
+fail-closed. Supply `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and
+`MINERU_VL_API_KEY` for an external VLM provider. Documented local publication
+is `127.0.0.1:8000:8000`; broader exposure belongs on a private network or
+behind an authenticated reverse proxy. This section describes the immutable
+workflow contract; it does not change that workflow.
+
 ## Non-user-facing 0.0.1 bootstrap
 
 Perform bootstrap from a temporary checkout or branch with the Cargo workspace
-version changed to `0.0.1`. Main remains at the current workspace version (`0.2.9`).
+version changed to `0.0.1`. Main remains at the current workspace version (`0.3.0`).
 
 ### crates.io
 
@@ -141,6 +158,7 @@ manifests just to prepare the workflow.
 ## Local preflight
 
 The temporary `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` (`quick-xml`) exception is mitigated reachability, not fixed or unreachable: mandatory full OOXML preflight runs before Office conversion. It expires on 2026-09-30 and must be reviewed or removed then. Native macOS has no reliable no-entitlement hard memory cap, so hostile Office processing there requires an external VM or container memory boundary.
+The registry-reported yanked transitive `arrayref` 0.3.9 is a reviewed lock exception. It expires on 2026-09-30 and must be reviewed or removed then.
 
 Run from the repository root unless a subshell changes directory:
 

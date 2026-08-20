@@ -4,16 +4,23 @@ pub mod command;
 mod config;
 mod document_limits;
 mod error;
+mod hybrid_v4_output;
 mod image_pipeline;
 #[doc(hidden)]
 pub mod input_prepare;
 mod layout;
+#[cfg(feature = "legacy-office")]
+#[doc(hidden)]
+pub mod legacy_office;
 #[doc(hidden)]
 pub mod mineru_api;
+#[cfg(feature = "legacy-office")]
+mod native_pdf;
 mod office_workers;
 mod official_builders;
 mod official_output;
 mod official_route;
+mod official_worker;
 mod output;
 mod pdf;
 mod preview;

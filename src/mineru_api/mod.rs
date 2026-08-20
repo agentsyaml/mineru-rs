@@ -120,6 +120,22 @@ pub fn selected_document_pages(
     planning::selected_pages_for_path(path, kind == DocumentKind::Pdf, start, end)
 }
 
+pub(crate) fn selected_document_pages_with_limit(
+    path: &std::path::Path,
+    kind: DocumentKind,
+    start: u64,
+    end: Option<u64>,
+    max_input_bytes: u64,
+) -> Result<usize, String> {
+    planning::selected_pages_for_path_with_limit(
+        path,
+        kind == DocumentKind::Pdf,
+        start,
+        end,
+        max_input_bytes,
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Backend {
     Pipeline,

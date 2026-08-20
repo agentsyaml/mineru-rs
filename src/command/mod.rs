@@ -11,7 +11,7 @@ pub mod service;
 
 use crate::{
     OfficeWorkers, ProgressCallback, ProgressEvent, RemoteApiDocument, RemoteApiOptions,
-    normalize_remote_language, sanitize_event_text, selected_document_pages,
+    normalize_remote_language, sanitize_event_text,
 };
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 use std::{
@@ -30,7 +30,11 @@ use std::{
 const WARNING_CAP: usize = 64;
 const TEXT_CAP: usize = 512;
 const FAILURE_CAP: usize = 4096;
-const ENV_NAMES: [&str; 94] = [
+pub(crate) const HYBRID_HTTP_CLIENT_UNSUPPORTED: &str =
+    "backend=hybrid-http-client is direct-only; API mode does not support Hybrid";
+const OFFICIAL_WORKER_MODE_DIRECT_ONLY: &str =
+    "--official-worker-mode applies only to direct backend=hybrid-http-client";
+const ENV_NAMES: [&str; 99] = [
     "MINERU_LOG_LEVEL",
     "MINERU_PROCESSING_WINDOW_SIZE",
     "MINERU_OFFICIAL_PAGE_CONCURRENCY",
@@ -86,6 +90,11 @@ const ENV_NAMES: [&str; 94] = [
     "MINERU_VL_SERVER",
     "MINERU_VL_MODEL_NAME",
     "MINERU_VL_API_KEY",
+    "MINERU_MODEL_STACK",
+    "MINERU_OFFICIAL_PYTHON",
+    "MINERU_OFFICIAL_WORKER_MODE",
+    "MINERU_MODEL_BASE_DIR",
+    "MINERU_CONFIG",
     "MINERU_VL_DEBUG_ENABLE",
     "MINERU_VLM_END_TOKEN",
     "MINERU_VLM_TEXT_BEFORE_IMAGE",
@@ -179,6 +188,14 @@ pub struct RunOptions {
     pub method: String,
     pub backend: String,
     pub effort: String,
+    pub model_stack: String,
+    /// Whether `model_stack` was explicitly supplied by the caller. This lets explicit `auto`
+    /// override `MINERU_MODEL_STACK` without changing the public string value.
+    pub model_stack_explicit: bool,
+    pub official_worker_mode: Option<OfficialWorkerMode>,
+    pub official_python: Option<PathBuf>,
+    pub official_model_dir: Option<PathBuf>,
+    pub official_config: Option<PathBuf>,
     pub lang: String,
     pub url: Option<String>,
     pub start: usize,
@@ -187,6 +204,25 @@ pub struct RunOptions {
     pub table: bool,
     pub image_analysis: bool,
     pub client_side_output_generation: bool,
+    pub client_side_output_generation_explicit: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfficialWorkerMode {
+    PerDocument,
+    Persistent,
+}
+
+impl OfficialWorkerMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "per-document" => Ok(Self::PerDocument),
+            "persistent" => Ok(Self::Persistent),
+            _ => Err(format!(
+                "MINERU_OFFICIAL_WORKER_MODE must be per-document or persistent, got {value}"
+            )),
+        }
+    }
 }
 
 impl RunOptions {
@@ -199,6 +235,12 @@ impl RunOptions {
             method: "auto".into(),
             backend: "vlm-http-client".into(),
             effort: "medium".into(),
+            model_stack: "auto".into(),
+            model_stack_explicit: false,
+            official_worker_mode: None,
+            official_python: None,
+            official_model_dir: None,
+            official_config: None,
             lang: "ch".into(),
             url: None,
             start: 0,
@@ -207,6 +249,7 @@ impl RunOptions {
             table: true,
             image_analysis: true,
             client_side_output_generation: false,
+            client_side_output_generation_explicit: false,
         }
     }
 }
@@ -429,6 +472,26 @@ async fn run_core(
     events: CommandCallback,
     warnings: direct::WarningCallback,
 ) -> Result<(), RunError> {
+    if options.api_url.is_some() && options.backend == "hybrid-http-client" {
+        return Err(RunError::new(HYBRID_HTTP_CLIENT_UNSUPPORTED));
+    }
+    let direct_hybrid = options.api_url.is_none() && options.backend == "hybrid-http-client";
+    let official_worker_mode =
+        resolve_official_worker_mode(&options, &context.environment, direct_hybrid)
+            .map_err(RunError::new)?;
+    if options.api_url.is_none() && options.backend == "hybrid-http-client" {
+        if options.client_side_output_generation_explicit || options.client_side_output_generation {
+            return Err(RunError::new(
+                "direct Hybrid does not support client-side output generation",
+            ));
+        }
+        if let Some(message) =
+            hybrid_direct_transport_error(&overrides.core, &overrides.service, &context.environment)
+        {
+            return Err(RunError::new(message));
+        }
+    }
+    let local_backend = options.api_url.is_none() && options.backend == "local";
     if options.api_url.is_some()
         && (overrides
             .document_limits
@@ -458,8 +521,19 @@ async fn run_core(
         context.environment.os(name)
     })
     .map_err(RunError::new)?;
-    let mut resolved = env::resolve_core(|name| context.environment.os(name), &overrides.core)
-        .map_err(RunError::new)?;
+    let mut resolved = if local_backend {
+        env::resolve_core(
+            |name| {
+                (!local_vlm_environment_name(name))
+                    .then(|| context.environment.os(name))
+                    .flatten()
+            },
+            &local_core_overrides(&overrides.core),
+        )
+    } else {
+        env::resolve_core(|name| context.environment.os(name), &overrides.core)
+    }
+    .map_err(RunError::new)?;
     // Remote-only Phase-1B controls cannot act in direct mode; server request caps are owned by
     // the task-service CLI and cannot act from this client at all. No behaviorless configuration.
     if options.api_url.is_none()
@@ -470,11 +544,30 @@ async fn run_core(
     if let Some(message) = server_owned_error(&overrides.service, &context.environment) {
         return Err(RunError::new(message));
     }
-    let service = service::resolve_service(
-        &(|name| context.environment.os(name)),
-        &overrides.service,
-        document_limits,
-    )
+    if options.api_url.is_none()
+        && options.backend == "local"
+        && let Some(message) =
+            local_helper_isolation_error(&overrides.service, &context.environment)
+    {
+        return Err(RunError::new(message));
+    }
+    let service = if local_backend {
+        service::resolve_service(
+            &(|name| {
+                (!local_vlm_environment_name(name))
+                    .then(|| context.environment.os(name))
+                    .flatten()
+            }),
+            &local_service_overrides(&overrides.service),
+            document_limits,
+        )
+    } else {
+        service::resolve_service(
+            &(|name| context.environment.os(name)),
+            &overrides.service,
+            document_limits,
+        )
+    }
     .map_err(RunError::new)?;
     // Resolved local VLM transport booleans feed the HTTP config with the same strict
     // default -> environment -> CLI precedence as every other transport knob.
@@ -491,20 +584,44 @@ async fn run_core(
     }
     if !matches!(
         options.backend.as_str(),
-        "vlm-http-client" | "hybrid-http-client"
+        "vlm-http-client" | "hybrid-http-client" | "local"
     ) {
         return Err(RunError::new(format!(
             "unsupported backend: {}",
             options.backend
         )));
     }
-    if !matches!(options.effort.as_str(), "medium" | "high") {
+    if options.api_url.is_some() && options.backend == "local" {
+        return Err(RunError::new(
+            "backend=local is only supported in direct CLI mode; the API backend choices are unchanged",
+        ));
+    }
+    let supported_effort = if options.backend == "hybrid-http-client" {
+        matches!(options.effort.as_str(), "medium" | "high" | "xhigh")
+    } else {
+        matches!(options.effort.as_str(), "medium" | "high")
+    };
+    if !supported_effort {
         return Err(RunError::new(format!(
             "unsupported effort: {}",
             options.effort
         )));
     }
     let language = normalize_remote_language(&options.lang).map_err(RunError::new)?;
+    if options.backend == "hybrid-http-client" && options.api_url.is_none() {
+        if !resolved.route.formula_enable || !resolved.route.table_enable {
+            return Err(RunError::new(
+                "direct Hybrid does not support formula=false or table=false",
+            ));
+        }
+        if matches!(options.effort.as_str(), "high" | "xhigh") {
+            let url = options
+                .url
+                .clone()
+                .or_else(|| context.environment.string("MINERU_VL_SERVER"));
+            validate_hybrid_server_url(url.as_deref()).map_err(RunError::new)?;
+        }
+    }
     if options.api_url.is_none()
         && options.end.is_some_and(|end| end < options.start)
         && has_pdf_input(&options.path)
@@ -512,18 +629,10 @@ async fn run_core(
         return Err(RunError::new("--end must not be less than --start"));
     }
     if options.api_url.is_none()
+        && options.backend != "hybrid-http-client"
         && let Some(message) = behaviorless_warning(&options)
     {
         warnings("ignored direct options", &message);
-    }
-    // Direct mode has no local layout/OCR/formula models, so the hybrid-http-client backend is
-    // an alias for vlm-http-client; say so honestly on every run. API mode passes the backend
-    // through to the server untouched, where the server decides the semantics, so no warning.
-    if options.api_url.is_none() && options.backend == "hybrid-http-client" {
-        warnings(
-            "backend=hybrid-http-client",
-            "this build has no local layout/OCR/formula models; falling back to the vlm-http-client pipeline (identical behavior)",
-        );
     }
     if let Some(api_url) = options.api_url.clone() {
         run_api(
@@ -544,10 +653,21 @@ async fn run_core(
             direct::DirectOptions {
                 input: options.path,
                 output: options.output,
+                local_backend: options.backend == "local",
+                method: options.method.clone(),
+                lang: options.lang.clone(),
                 base_url: options.url,
                 server_option_label: "--url",
                 model: None,
                 api_key: options.api_key.clone(),
+                official_hybrid: options.backend == "hybrid-http-client",
+                official_worker_mode,
+                effort: options.effort.clone(),
+                model_stack: options.model_stack.clone(),
+                model_stack_explicit: options.model_stack_explicit,
+                official_python: options.official_python.clone(),
+                official_model_dir: options.official_model_dir.clone(),
+                official_config: options.official_config.clone(),
                 page_start: Some(options.start),
                 page_end: options.end,
                 // Formula/table/image-analysis resolve through CoreOverrides with strict
@@ -615,8 +735,14 @@ async fn run_api(
         .zip(stems)
         .enumerate()
         .map(|(order, ((path, kind), stem))| {
-            let effective_pages =
-                selected_document_pages(&path, kind, start, end).map_err(RunError::new)?;
+            let effective_pages = crate::mineru_api::selected_document_pages_with_limit(
+                &path,
+                kind,
+                start,
+                end,
+                document_limits.max_input_bytes,
+            )
+            .map_err(RunError::new)?;
             Ok(RemoteApiDocument {
                 path,
                 kind,
@@ -855,6 +981,167 @@ fn remote_local_service_transport_error(
     })
 }
 
+fn hybrid_direct_transport_error(
+    core: &env::CoreOverrides,
+    service: &service::ServiceOverrides,
+    environment: &Environment,
+) -> Option<String> {
+    let mut controls = Vec::new();
+    if let Some(message) = remote_local_transport_error(core, environment) {
+        if let Some(values) = message
+            .strip_prefix("local VLM transport controls cannot configure a remote API server: ")
+        {
+            controls.push(values.to_owned());
+        } else {
+            controls.push(message);
+        }
+    }
+    if let Some(message) = remote_local_service_transport_error(service, environment) {
+        if let Some(values) = message
+            .strip_prefix("local VLM transport controls cannot configure a remote API server: ")
+        {
+            controls.push(values.to_owned());
+        } else {
+            controls.push(message);
+        }
+    }
+    if environment.os("MINERU_VLM_END_TOKEN").is_some() {
+        controls.push("MINERU_VLM_END_TOKEN".into());
+    }
+    (!controls.is_empty()).then(|| {
+        format!(
+            "direct Hybrid rejects v3-only transport controls: {}",
+            controls.join(", ")
+        )
+    })
+}
+
+fn local_vlm_environment_name(name: &str) -> bool {
+    matches!(
+        name,
+        "MINERU_VL_SERVER"
+            | "MINERU_VL_MODEL_NAME"
+            | "MINERU_VL_API_KEY"
+            | "MINERU_VL_DEBUG_ENABLE"
+            | "MINERU_VLM_END_TOKEN"
+            | "MINERU_VLM_TEXT_BEFORE_IMAGE"
+            | "MINERU_VLM_ALLOW_TRUNCATED_CONTENT"
+            | "MINERU_VLM_ALLOW_REMOTE_IMAGES"
+            | "MINERU_VLM_ALLOW_PRIVATE_REMOTE_IMAGES"
+            | "MINERU_VLM_HTTP_CONCURRENCY"
+            | "MINERU_VLM_HTTP_TIMEOUT"
+            | "MINERU_VLM_CONNECT_TIMEOUT"
+            | "MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS"
+            | "MINERU_VLM_HTTP_KEEPALIVE_EXPIRY"
+            | "MINERU_VLM_HTTP_MAX_RETRIES"
+            | "MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR"
+            | "MINERU_VLM_TEMPERATURE_RETRY"
+            | "MINERU_VLM_MAX_IMAGE_BYTES"
+            | "MINERU_VLM_MAX_DECODED_PIXELS"
+            | "MINERU_VLM_MAX_IMAGES_PER_REQUEST"
+            | "MINERU_VLM_MAX_REDIRECTS"
+            | "MINERU_VLM_HTTP_MAX_RESPONSE_BYTES"
+    )
+}
+
+fn local_core_overrides(overrides: &env::CoreOverrides) -> env::CoreOverrides {
+    let mut filtered = overrides.clone();
+    filtered.vlm_debug = None;
+    filtered.http_max_concurrency = None;
+    filtered.http_timeout = None;
+    filtered.connect_timeout = None;
+    filtered.http_max_keepalive_connections = None;
+    filtered.http_keepalive_expiry = None;
+    filtered.http_max_retries = None;
+    filtered.http_retry_backoff_factor = None;
+    filtered.temperature_retry = None;
+    filtered.max_remote_image_bytes = None;
+    filtered.max_decoded_pixels = None;
+    filtered.max_images_per_request = None;
+    filtered.max_redirects = None;
+    filtered.http_max_response_bytes = None;
+    filtered
+}
+
+fn local_service_overrides(overrides: &service::ServiceOverrides) -> service::ServiceOverrides {
+    let mut filtered = overrides.clone();
+    filtered.vlm_text_before_image = None;
+    filtered.vlm_allow_truncated_content = None;
+    filtered.vlm_allow_remote_images = None;
+    filtered.vlm_allow_private_remote_images = None;
+    filtered
+}
+
+/// Local legacy and native-PDF conversion uses the bundled helper's bounded default policy. Reject
+/// explicit helper-only controls that this route does not support instead of silently ignoring them.
+fn local_helper_isolation_error(
+    service: &service::ServiceOverrides,
+    environment: &Environment,
+) -> Option<String> {
+    let mut controls = Vec::new();
+    let mut push = |flag: &str, env_name: &str, cli_set: bool| {
+        if cli_set || environment.os(env_name).is_some() {
+            controls.push(format!("{flag}/{env_name}"));
+        }
+    };
+    push(
+        "--office-stderr-bytes",
+        service::OFFICE_STDERR_ENV,
+        service.office_stderr_bytes.is_some(),
+    );
+    push(
+        "--office-wall-seconds",
+        service::OFFICE_WALL_ENV,
+        service.office_wall_seconds.is_some(),
+    );
+    push(
+        "--office-cpu-seconds",
+        service::OFFICE_CPU_ENV,
+        service.office_cpu_seconds.is_some(),
+    );
+    push(
+        "--office-nofile",
+        service::OFFICE_NOFILE_ENV,
+        service.office_nofile.is_some(),
+    );
+    push(
+        "--office-address-space-bytes",
+        service::OFFICE_ADDRESS_SPACE_ENV,
+        service.office_address_space_bytes.is_some(),
+    );
+    push(
+        "--office-active-process-limit",
+        service::OFFICE_ACTIVE_PROCESS_ENV,
+        service.office_active_process_limit.is_some(),
+    );
+    push(
+        "--office-process-memory-bytes",
+        service::OFFICE_PROCESS_MEMORY_ENV,
+        service.office_process_memory_bytes.is_some(),
+    );
+    push(
+        "--office-job-memory-bytes",
+        service::OFFICE_JOB_MEMORY_ENV,
+        service.office_job_memory_bytes.is_some(),
+    );
+    push(
+        "--office-process-time-seconds",
+        service::OFFICE_PROCESS_TIME_ENV,
+        service.office_process_time_seconds.is_some(),
+    );
+    push(
+        "--office-job-time-seconds",
+        service::OFFICE_JOB_TIME_ENV,
+        service.office_job_time_seconds.is_some(),
+    );
+    (!controls.is_empty()).then(|| {
+        format!(
+            "backend=local rejects unsupported helper-only Office isolation limits: {}; only --office-input-bytes and --office-output-bytes are supported",
+            controls.join(", ")
+        )
+    })
+}
+
 /// Remote-only Phase-1B controls accepted alongside a direct run would silently do nothing,
 /// because no remote API client, result archive, or task poller exists in direct mode. Reject
 /// explicit/env remote-only controls before any output work; no behaviorless configuration.
@@ -1003,6 +1290,43 @@ fn behaviorless_warning(options: &RunOptions) -> Option<String> {
     (!selected.is_empty()).then(|| selected.join(", "))
 }
 
+fn resolve_official_worker_mode(
+    options: &RunOptions,
+    environment: &Environment,
+    direct_hybrid: bool,
+) -> Result<OfficialWorkerMode, String> {
+    if let Some(mode) = options.official_worker_mode {
+        return direct_hybrid
+            .then_some(mode)
+            .ok_or_else(|| OFFICIAL_WORKER_MODE_DIRECT_ONLY.to_owned());
+    }
+    if !direct_hybrid {
+        return Ok(OfficialWorkerMode::PerDocument);
+    }
+    let Some(value) = environment.os("MINERU_OFFICIAL_WORKER_MODE") else {
+        return Ok(OfficialWorkerMode::PerDocument);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| "MINERU_OFFICIAL_WORKER_MODE must be valid UTF-8".to_owned())?;
+    OfficialWorkerMode::parse(&value)
+}
+
+fn validate_hybrid_server_url(value: Option<&str>) -> Result<(), String> {
+    let value = value.ok_or_else(|| {
+        "Hybrid effort high/xhigh requires an explicit HTTP(S) URL via --url or MINERU_VL_SERVER"
+            .to_owned()
+    })?;
+    let parsed = value
+        .trim()
+        .parse::<url::Url>()
+        .map_err(|_| "Hybrid VLM URL must be an explicit HTTP(S) URL".to_owned())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("Hybrid VLM URL must be an explicit HTTP(S) URL".into());
+    }
+    Ok(())
+}
+
 fn has_pdf_input(path: &Path) -> bool {
     let is_pdf = |path: &Path| {
         path.extension()
@@ -1025,10 +1349,10 @@ fn has_pdf_input(path: &Path) -> bool {
 
 #[derive(Parser, Debug)]
 #[command(
-    about = "Parse PDF, image, and Office documents with the supported external VLM-HTTP subset (vlm-http-client and hybrid-http-client; no local engines).",
+    about = "Parse PDF, image, and Office documents with VLM-HTTP backends, use the official MinerU 4.0.0a6 Hybrid worker directly, or parse AnyDoc-supported inputs through the bundled Rust helper with backend=local.",
     version,
     disable_version_flag = true,
-    after_help = "Environment:\n  MINERU_VL_SERVER      MinerU VLM service base URL, e.g. https://host/v1\n  MINERU_VL_MODEL_NAME  model id served by that endpoint\n  MINERU_VL_API_KEY     Bearer token; preferred over --api-key\n\nFull reference: docs/usage.en.md"
+    after_help = "Environment:\n  MINERU_VL_SERVER              MinerU VLM service base URL, e.g. https://host/v1\n  MINERU_VL_MODEL_NAME          model id served by that endpoint\n  MINERU_VL_API_KEY             Bearer token; preferred over --api-key\n  MINERU_OFFICIAL_WORKER_MODE   per-document or persistent for direct Hybrid\n\nFull reference: docs/usage.en.md"
 )]
 pub struct Cli {
     #[arg(short = 'v', long, action = ArgAction::Version)]
@@ -1043,10 +1367,20 @@ pub struct Cli {
     api_key: Option<String>,
     #[arg(short = 'm', long, value_parser = ["auto", "txt", "ocr"], default_value = "auto")]
     method: String,
-    #[arg(short = 'b', long, value_parser = ["vlm-http-client", "hybrid-http-client"], default_value = "vlm-http-client")]
+    #[arg(short = 'b', long, value_parser = ["vlm-http-client", "hybrid-http-client", "local"], default_value = "vlm-http-client")]
     backend: String,
-    #[arg(long, value_parser = ["medium", "high"], default_value = "medium")]
+    #[arg(long, value_parser = ["medium", "high", "xhigh"], default_value = "medium")]
     effort: String,
+    #[arg(long, value_parser = ["auto", "light", "full"])]
+    model_stack: Option<String>,
+    #[arg(long, value_parser = ["per-document", "persistent"])]
+    official_worker_mode: Option<String>,
+    #[arg(long)]
+    official_python: Option<PathBuf>,
+    #[arg(long)]
+    official_model_dir: Option<PathBuf>,
+    #[arg(long)]
+    official_config: Option<PathBuf>,
     #[arg(short = 'l', long, value_parser = ["ch", "ch_server", "korean", "ta", "te", "ka", "th", "el", "arabic", "east_slavic", "cyrillic", "devanagari", "en", "japan", "chinese_cht", "latin"], default_value = "ch")]
     lang: String,
     #[arg(short = 'u', long)]
@@ -1061,8 +1395,8 @@ pub struct Cli {
     table: Option<bool>,
     #[arg(long, action = ArgAction::Set)]
     image_analysis: Option<bool>,
-    #[arg(long, action = ArgAction::Set, default_value_t = false)]
-    client_side_output_generation: bool,
+    #[arg(long, action = ArgAction::Set)]
+    client_side_output_generation: Option<bool>,
     #[arg(long)]
     max_input_bytes: Option<String>,
     #[arg(long)]
@@ -1258,6 +1592,8 @@ pub fn cli_command() -> clap::Command {
 
 impl From<Cli> for RunOptions {
     fn from(cli: Cli) -> Self {
+        let model_stack_explicit = cli.model_stack.is_some();
+        let client_side_output_generation_explicit = cli.client_side_output_generation.is_some();
         Self {
             path: cli.path,
             output: cli.output,
@@ -1266,6 +1602,14 @@ impl From<Cli> for RunOptions {
             method: cli.method,
             backend: cli.backend,
             effort: cli.effort,
+            model_stack: cli.model_stack.unwrap_or_else(|| "auto".into()),
+            model_stack_explicit,
+            official_worker_mode: cli.official_worker_mode.as_deref().map(|value| {
+                OfficialWorkerMode::parse(value).expect("clap constrained worker mode")
+            }),
+            official_python: cli.official_python,
+            official_model_dir: cli.official_model_dir,
+            official_config: cli.official_config,
             lang: cli.lang,
             url: cli.url,
             start: cli.start,
@@ -1273,7 +1617,8 @@ impl From<Cli> for RunOptions {
             formula: cli.formula.unwrap_or(true),
             table: cli.table.unwrap_or(true),
             image_analysis: cli.image_analysis.unwrap_or(true),
-            client_side_output_generation: cli.client_side_output_generation,
+            client_side_output_generation: cli.client_side_output_generation.unwrap_or(false),
+            client_side_output_generation_explicit,
         }
     }
 }
@@ -1470,6 +1815,7 @@ pub async fn run_cli(argv: Vec<OsString>, context: RunContext) -> i32 {
 /// Maps the canonical Clap surface onto typed core overrides. The flag-to-environment-name
 /// correspondence is one-to-one; strict parsing produces errors before any work begins.
 fn cli_core_overrides(cli: &Cli) -> Result<env::CoreOverrides, String> {
+    let local_backend = cli.backend == "local";
     let value = |name: &str| -> Option<OsString> {
         let flag: Option<&str> = match name {
             "MINERU_PROCESSING_WINDOW_SIZE" => cli.processing_window_size.as_deref(),
@@ -1511,18 +1857,27 @@ fn cli_core_overrides(cli: &Cli) -> Result<env::CoreOverrides, String> {
         };
         flag.map(OsString::from)
     };
-    let mut core = env::parse_core_overrides(&value)?;
+    let mut core = env::parse_core_overrides(&|name| {
+        if local_backend && local_vlm_environment_name(name) {
+            None
+        } else {
+            value(name)
+        }
+    })?;
     core.formula = cli.formula;
     core.table = cli.table;
     core.image_analysis = cli.image_analysis;
-    core.vlm_debug = cli.vlm_debug;
-    core.temperature_retry = cli.temperature_retry;
+    if !local_backend {
+        core.vlm_debug = cli.vlm_debug;
+        core.temperature_retry = cli.temperature_retry;
+    }
     Ok(core)
 }
 
 /// Maps the canonical Clap surface onto typed service overrides. The flag-to-environment-name
 /// correspondence is one-to-one; strict parsing produces errors before any work begins.
 fn cli_service_overrides(cli: &Cli) -> Result<service::ServiceOverrides, String> {
+    let local_backend = cli.backend == "local";
     let value = |name: &str| -> Option<OsString> {
         let flag: Option<&str> = match name {
             "MINERU_API_MAX_CONCURRENT_REQUESTS" => cli.api_max_concurrent_requests.as_deref(),
@@ -1574,11 +1929,19 @@ fn cli_service_overrides(cli: &Cli) -> Result<service::ServiceOverrides, String>
         };
         flag.map(OsString::from)
     };
-    let mut service = service::parse_service_overrides(&value)?;
-    service.vlm_text_before_image = cli.vlm_text_before_image;
-    service.vlm_allow_truncated_content = cli.vlm_allow_truncated_content;
-    service.vlm_allow_remote_images = cli.vlm_allow_remote_images;
-    service.vlm_allow_private_remote_images = cli.vlm_allow_private_remote_images;
+    let mut service = service::parse_service_overrides(&|name| {
+        if local_backend && local_vlm_environment_name(name) {
+            None
+        } else {
+            value(name)
+        }
+    })?;
+    if !local_backend {
+        service.vlm_text_before_image = cli.vlm_text_before_image;
+        service.vlm_allow_truncated_content = cli.vlm_allow_truncated_content;
+        service.vlm_allow_remote_images = cli.vlm_allow_remote_images;
+        service.vlm_allow_private_remote_images = cli.vlm_allow_private_remote_images;
+    }
     Ok(service)
 }
 
@@ -1705,6 +2068,21 @@ mod tests {
         let path = std::env::current_dir().unwrap().join("helper");
         let context = RunContext::with_office_executable(path.clone()).unwrap();
         assert_eq!(context.office_workers().executable(), &path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn official_worker_mode_rejects_non_utf8_environment_value() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let environment = Environment::from_values(HashMap::from([(
+            "MINERU_OFFICIAL_WORKER_MODE",
+            OsString::from_vec(vec![0xff]),
+        )]));
+        let error =
+            resolve_official_worker_mode(&RunOptions::new("input", "output"), &environment, true)
+                .unwrap_err();
+        assert_eq!(error, "MINERU_OFFICIAL_WORKER_MODE must be valid UTF-8");
     }
 
     #[test]

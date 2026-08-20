@@ -1272,11 +1272,15 @@ async fn parse_form(
             _ => {}
         }
     }
-    if !matches!(
-        out.backend.as_deref(),
-        Some("vlm-http-client" | "hybrid-http-client")
-    ) {
-        return Err((StatusCode::BAD_REQUEST, "unsupported backend"));
+    match out.backend.as_deref() {
+        Some("vlm-http-client") => {}
+        Some("hybrid-http-client") => {
+            return Err((
+                StatusCode::NOT_IMPLEMENTED,
+                crate::command::HYBRID_HTTP_CLIENT_UNSUPPORTED,
+            ));
+        }
+        _ => return Err((StatusCode::BAD_REQUEST, "unsupported backend")),
     }
     apply_client_side(&mut out);
     if !file {
@@ -3185,6 +3189,30 @@ mod tests {
             )
             .await;
         }
+        let mut hybrid = canonical_fields();
+        hybrid
+            .iter_mut()
+            .find(|(key, _)| key == "backend")
+            .unwrap()
+            .1 = "hybrid-http-client".into();
+        let response = post(
+            &service,
+            form(hybrid, vec![("files", "input.pdf", b"%PDF-x".to_vec())]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap(),
+            json!({"detail": crate::command::HYBRID_HTTP_CLIENT_UNSUPPORTED})
+        );
+        let health: serde_json::Value = reqwest::get(format!("{}/health", service.base))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["task_count"], 0);
+        assert_eq!(std::fs::read_dir(&service.output).unwrap().count(), 0);
         let mut alias = canonical_fields();
         alias
             .iter_mut()

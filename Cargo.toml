@@ -14,6 +14,8 @@ include = [
     "Cargo.toml",
     "Cargo.lock",
     "src/**",
+    "python/mineru_official_worker.py",
+    "python/mineru_official_worker_protocol.py",
     "/README.md",
     "README.zh-CN.md",
     "LICENSE-MIT",
@@ -52,7 +54,7 @@ path = "src/bin/mineru-office-convert.rs"
 [features]
 default = []
 office = ["dep:office2pdf"]
-legacy-office = ["dep:anydoc"]
+legacy-office = ["dep:anydoc", "dep:pdf-inspector"]
 
 [dependencies]
 anydoc = { version = "=0.1.9", optional = true }
@@ -75,6 +77,7 @@ hayro-write = "=0.4.0"
 html-escape = "0.2"
 lopdf = { version = "=0.44.0", default-features = false }
 office2pdf = { version = "=0.6.5", optional = true }
+pdf-inspector = { version = "=1.14.2", optional = true, default-features = false }
 pdf-writer = "=0.14.0"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "multipart", "stream"] }
@@ -109,7 +112,7 @@ members = [".", "bindings/python", "bindings/node"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.9"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"

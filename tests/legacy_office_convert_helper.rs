@@ -11,8 +11,12 @@ use legacy_fixtures::{all, doc, rtf};
 
 const CAP: usize = 32 * 1024 * 1024;
 
-fn run(args: &[&str], input: &[u8]) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mineru-office-convert"))
+fn run_with_mode(args: &[&str], input: &[u8], mode: Option<&str>) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mineru-office-convert"));
+    if let Some(mode) = mode {
+        command.env("MINERU_OFFICE_CONVERT_MODE", mode);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -21,6 +25,10 @@ fn run(args: &[&str], input: &[u8]) -> std::process::Output {
         .unwrap();
     child.stdin.take().unwrap().write_all(input).unwrap();
     child.wait_with_output().unwrap()
+}
+
+fn run(args: &[&str], input: &[u8]) -> std::process::Output {
+    run_with_mode(args, input, None)
 }
 
 #[test]
@@ -49,6 +57,20 @@ fn every_legacy_format_converts_to_clean_utf8_markdown() {
         }
         assert!(output.stderr.len() <= 4096, "{}", fixture.kind);
     }
+}
+
+#[test]
+fn legacy_helper_can_emit_a_valid_text_pdf_fallback() {
+    let output = run_with_mode(&["doc"], &doc(), Some("legacy-pdf"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.len() <= CAP);
+    assert!(output.stdout.starts_with(b"%PDF-"));
+    let pdf = lopdf::Document::load_mem(&output.stdout).unwrap();
+    assert_eq!(pdf.get_pages().len(), 1);
 }
 
 #[test]

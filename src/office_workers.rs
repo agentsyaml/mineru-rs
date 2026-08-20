@@ -45,11 +45,17 @@ pub enum OfficeConvertError {
 }
 
 /// Output contract of a conversion: PDF mode validates the `%PDF-` signature plus lopdf
-/// structure (OOXML family); Markdown mode validates non-empty UTF-8 text (legacy family).
+/// structure (OOXML family); legacy PDF mode uses the same contract but asks the helper for its
+/// best-effort AnyDoc-to-text-PDF fallback; Markdown modes validate non-empty UTF-8 text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConvertMode {
     Pdf,
+    LegacyPdf,
     Markdown,
+    NativePdf {
+        max_pages: usize,
+        max_output_bytes: usize,
+    },
 }
 
 struct State {
@@ -189,6 +195,26 @@ impl OfficeWorkers {
         self.convert_inner(format, input, timeout, ConvertMode::Pdf)
             .await
     }
+    #[doc(hidden)]
+    pub async fn convert_legacy_pdf(
+        &self,
+        format: &'static str,
+        input: impl Into<Bytes>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, OfficeConvertError> {
+        self.convert_legacy_pdf_with_warning(format, input, timeout)
+            .await
+            .map(|(pdf, _)| pdf)
+    }
+    pub(crate) async fn convert_legacy_pdf_with_warning(
+        &self,
+        format: &'static str,
+        input: impl Into<Bytes>,
+        timeout: Duration,
+    ) -> Result<(Vec<u8>, Option<String>), OfficeConvertError> {
+        self.convert_inner(format, input, timeout, ConvertMode::LegacyPdf)
+            .await
+    }
     /// Legacy-family text extraction: converts to Markdown with the same bounded subprocess
     /// skeleton as [`Self::convert`], validating the output as UTF-8 text instead of a PDF.
     #[doc(hidden)]
@@ -211,6 +237,38 @@ impl OfficeWorkers {
         self.convert_inner(format, input, timeout, ConvertMode::Markdown)
             .await
     }
+    /// Native local PDF assessment and extraction. The helper emits Markdown only after the
+    /// bounded child-side assessment accepts the document.
+    #[doc(hidden)]
+    pub async fn convert_native_pdf(
+        &self,
+        input: impl Into<Bytes>,
+        max_pages: usize,
+        max_output_bytes: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, OfficeConvertError> {
+        self.convert_native_pdf_with_warning(input, max_pages, max_output_bytes, timeout)
+            .await
+            .map(|(text, _)| text)
+    }
+    pub(crate) async fn convert_native_pdf_with_warning(
+        &self,
+        input: impl Into<Bytes>,
+        max_pages: usize,
+        max_output_bytes: usize,
+        timeout: Duration,
+    ) -> Result<(Vec<u8>, Option<String>), OfficeConvertError> {
+        self.convert_inner(
+            "pdf",
+            input,
+            timeout,
+            ConvertMode::NativePdf {
+                max_pages,
+                max_output_bytes,
+            },
+        )
+        .await
+    }
     async fn convert_inner(
         &self,
         format: &'static str,
@@ -230,6 +288,16 @@ impl OfficeWorkers {
         }
         if timeout.is_zero() {
             return Err(OfficeConvertError::Failed("invalid timeout".into()));
+        }
+        if let ConvertMode::NativePdf {
+            max_pages,
+            max_output_bytes,
+        } = mode
+            && (max_pages == 0 || max_output_bytes == 0 || max_output_bytes > limits.output_bytes)
+        {
+            return Err(OfficeConvertError::Failed(
+                "invalid native PDF request".into(),
+            ));
         }
         let (result_tx, result_rx) = oneshot::channel();
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -683,6 +751,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_pdf_mode_uses_the_pdf_contract() {
+        let pdf = workers()
+            .convert_legacy_pdf("doc", b"input".to_vec(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF-"));
+        assert_eq!(Document::load_mem(&pdf).unwrap().get_pages().len(), 1);
+    }
+
+    #[tokio::test]
     async fn text_mode_accepts_utf8_markdown_and_discards_warning() {
         let w = workers();
         let (text, warning) = w
@@ -733,6 +811,74 @@ mod tests {
                 .is_err()
         );
         assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn native_pdf_mode_uses_the_bounded_markdown_contract() {
+        let w = workers();
+        let (markdown, warning) = w
+            .convert_inner(
+                "ok_markdown",
+                b"input".to_vec(),
+                Duration::from_secs(5),
+                ConvertMode::NativePdf {
+                    max_pages: 10,
+                    max_output_bytes: w.limits.output_bytes,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(warning, None);
+        assert_eq!(markdown, b"hello markdown \xe4\xb8\xad\xe6\x96\x87");
+    }
+
+    #[tokio::test]
+    async fn native_pdf_mode_rejects_invalid_output_and_honors_timeout() {
+        let w = workers();
+        let error = w
+            .convert_inner(
+                "invalid_text",
+                b"input".to_vec(),
+                Duration::from_secs(5),
+                ConvertMode::NativePdf {
+                    max_pages: 10,
+                    max_output_bytes: w.limits.output_bytes,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid text output"), "{error}");
+
+        let error = w
+            .convert_inner(
+                "hang",
+                b"input".to_vec(),
+                Duration::from_millis(100),
+                ConvertMode::NativePdf {
+                    max_pages: 10,
+                    max_output_bytes: w.limits.output_bytes,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("timed out"), "{error}");
+
+        let error = w
+            .convert_native_pdf(
+                b"input".to_vec(),
+                10,
+                w.limits.output_bytes + 1,
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            error
+                .unwrap_err()
+                .to_string()
+                .contains("invalid native PDF request")
+        );
     }
     #[tokio::test]
     async fn abort_after_activity_reaps_everything_once() {
@@ -860,17 +1006,35 @@ async fn owner(
     // reads it exactly once at startup and never re-reads a drifting process environment.
     limits.apply_to_child_env(&mut command);
     ooxml.apply_to_child_env(&mut command);
+    command.env(
+        "MINERU_OFFICE_CONVERT_MODE",
+        match mode {
+            ConvertMode::Pdf => "pdf",
+            ConvertMode::LegacyPdf => "legacy-pdf",
+            ConvertMode::Markdown => "markdown",
+            ConvertMode::NativePdf { .. } => "native-pdf",
+        },
+    );
     #[cfg(test)]
     if fake_child {
         command.env("MINERU_OFFICE_FAKE_MODE", format);
         if let Some(path) = ready {
             command.env("MINERU_OFFICE_FAKE_READY", path);
         }
-    } else {
+    }
+    #[cfg(test)]
+    if !fake_child {
         command.arg(format);
     }
     #[cfg(not(test))]
     command.arg(format);
+    if let ConvertMode::NativePdf {
+        max_pages,
+        max_output_bytes,
+    } = mode
+    {
+        command.args([max_pages.to_string(), max_output_bytes.to_string()]);
+    }
     command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -936,7 +1100,12 @@ async fn owner(
         stdin.write_all(&input).await.map_err(|_| ())?;
         stdin.shutdown().await.map_err(|_| ())
     }));
-    let output_cap = limits.output_bytes;
+    let output_cap = match mode {
+        ConvertMode::NativePdf {
+            max_output_bytes, ..
+        } => max_output_bytes,
+        ConvertMode::Pdf | ConvertMode::LegacyPdf | ConvertMode::Markdown => limits.output_bytes,
+    };
     let stderr_cap = limits.stderr_bytes;
     let mut out = Some(tokio::spawn(async move {
         #[cfg(test)]
@@ -1107,11 +1276,17 @@ async fn owner(
     #[cfg(test)]
     let output = if fake_child {
         match mode {
-            ConvertMode::Pdf => output
+            ConvertMode::Pdf | ConvertMode::LegacyPdf => output
                 .windows(5)
                 .position(|window| window == b"%PDF-")
                 .map_or(output.clone(), |start| output[start..].to_vec()),
             ConvertMode::Markdown => output
+                .windows(MARKDOWN_FAKE_MARKER.len())
+                .position(|window| window == MARKDOWN_FAKE_MARKER)
+                .map_or(output.clone(), |start| {
+                    output[start + MARKDOWN_FAKE_MARKER.len()..].to_vec()
+                }),
+            ConvertMode::NativePdf { .. } => output
                 .windows(MARKDOWN_FAKE_MARKER.len())
                 .position(|window| window == MARKDOWN_FAKE_MARKER)
                 .map_or(output.clone(), |start| {
@@ -1122,7 +1297,7 @@ async fn owner(
         output
     };
     match mode {
-        ConvertMode::Pdf => {
+        ConvertMode::Pdf | ConvertMode::LegacyPdf => {
             if !output.starts_with(b"%PDF-") {
                 return Err(OfficeConvertError::Failed(sanitize(
                     diagnostic.as_deref().unwrap_or_default(),
@@ -1135,7 +1310,7 @@ async fn owner(
                 return Err(OfficeConvertError::Failed("invalid PDF output".into()));
             }
         }
-        ConvertMode::Markdown => {
+        ConvertMode::Markdown | ConvertMode::NativePdf { .. } => {
             if output.is_empty() || std::str::from_utf8(&output).is_err() {
                 return Err(OfficeConvertError::Failed("invalid text output".into()));
             }
