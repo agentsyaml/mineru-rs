@@ -40,6 +40,38 @@ const PYTHON_SHIM: &str = concat!(
     "\n",
     include_str!("../python/mineru_official_worker.py"),
 );
+
+struct PythonShim {
+    _temporary: TempDir,
+    path: PathBuf,
+}
+
+impl PythonShim {
+    fn new() -> Result<Self, String> {
+        let temporary = tempfile::tempdir()
+            .map_err(|error| format!("official worker Python shim tempdir: {error}"))?;
+        let path = temporary.path().join("official_worker.py");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| format!("official worker Python shim create: {error}"))?;
+        file.write_all(PYTHON_SHIM.as_bytes())
+            .map_err(|error| format!("official worker Python shim write: {error}"))?;
+        file.flush()
+            .map_err(|error| format!("official worker Python shim flush: {error}"))?;
+        drop(file);
+        Ok(Self {
+            _temporary: temporary,
+            path,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 #[allow(dead_code)]
 const PERSISTENT_EFFORTS: &[&str] = &["medium", "high", "xhigh"];
 #[allow(dead_code)]
@@ -174,9 +206,10 @@ impl OfficialWorker {
             return Err("official worker request exceeds protocol limit".into());
         }
 
+        let shim = PythonShim::new()?;
         let mut command = Command::new(&self.executable);
         command
-            .args(["-c", PYTHON_SHIM])
+            .arg(shim.path())
             .current_dir(temporary.path())
             .env_clear()
             .stdin(std::process::Stdio::piped())

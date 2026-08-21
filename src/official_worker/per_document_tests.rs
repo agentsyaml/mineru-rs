@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{
-    OfficialRequest, OfficialWorker, STDERR_CAP, process::with_truncated_diagnostic,
-    read_diagnostic,
+    OfficialRequest, OfficialWorker, PYTHON_SHIM, PythonShim, STDERR_CAP,
+    process::with_truncated_diagnostic, read_diagnostic,
 };
 
 fn test_request() -> OfficialRequest {
@@ -23,6 +23,20 @@ fn test_request() -> OfficialRequest {
         None,
         1024,
     )
+}
+
+#[test]
+fn python_shim_materializes_and_cleans_up() {
+    let shim = PythonShim::new().unwrap();
+    let path = shim.path().to_owned();
+    let directory = path.parent().unwrap().to_owned();
+
+    assert_eq!(std::fs::read(&path).unwrap(), PYTHON_SHIM.as_bytes());
+    assert!(path.is_file());
+    assert!(directory.is_dir());
+
+    drop(shim);
+    assert!(!directory.exists());
 }
 
 #[tokio::test]

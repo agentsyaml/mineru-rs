@@ -33,7 +33,7 @@ use crate::official_worker::process::WindowsJob;
 #[cfg(target_os = "linux")]
 use crate::official_worker::process::install_parent_death_signal;
 use crate::official_worker::{
-    PERSISTENT_PROTOCOL, REAP_GRACE, STDERR_CAP,
+    PERSISTENT_PROTOCOL, PythonShim, REAP_GRACE, STDERR_CAP,
     process::{copy_runtime_environment, with_diagnostic},
 };
 use replay::RecentRequestIds;
@@ -184,13 +184,16 @@ pub(super) struct PersistentChild {
     process_group: ProcessGroup,
     #[cfg(windows)]
     _job: WindowsJob,
+    _shim: PythonShim,
 }
 
 impl PersistentChild {
     pub(super) fn spawn(executable: &Path) -> Result<Self, String> {
+        let shim = PythonShim::new()?;
         let mut command = Command::new(executable);
         command
-            .args(["-c", super::super::PYTHON_SHIM, "--persistent"])
+            .arg(shim.path())
+            .arg("--persistent")
             .env_clear()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -233,6 +236,7 @@ impl PersistentChild {
             commands,
         ));
         Ok(Self {
+            _shim: shim,
             child,
             stdin,
             stdout: BufReader::new(stdout),
