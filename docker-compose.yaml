@@ -6,6 +6,8 @@ x-defaults: &defaults
       max-size: 100m
       max-file: "3"
 
+# Separate provider-image baseline; docs/compatibility.md's MinerU 3.4.5 is the
+# VLM protocol baseline, not a requirement to change this provider image tag.
 x-mineru-vllm: &mineru-vllm
   <<: *defaults
   image: ${GLOBAL_REGISTRY:-}alexsuntop/mineru:${MINERU_VERSION:-3.4.2}
@@ -66,7 +68,7 @@ services:
     <<: *mineru-vllm
     profiles:
       - "openai-server"
-      - ${COMPOSE_PROFILES:-} # as default
+      - ${COMPOSE_PROFILES:-} # empty by default: active without an explicit profile
     ports:
       - "${MINERU_PROVIDER_BIND_HOST:-127.0.0.1}:${MINERU_PORT_OVERRIDE_VLLM:-30000}:30000"
     entrypoint: mineru-openai-server
@@ -87,7 +89,7 @@ services:
     <<: *mineru-llama
     profiles:
       - "llama-server"
-      - ${COMPOSE_PROFILES:-} # as default
+      - ${COMPOSE_PROFILES:-} # empty by default: active without an explicit profile
     ports:
       - "${MINERU_PROVIDER_BIND_HOST:-127.0.0.1}:${MINERU_PORT_OVERRIDE_LLAMA:-30000}:30000"
     # The image ships a HEALTHCHECK pinned to its default port 8080; override it

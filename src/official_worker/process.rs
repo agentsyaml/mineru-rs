@@ -1,8 +1,23 @@
 use std::path::PathBuf;
 
+#[cfg(all(test, windows))]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tokio::process::{Child, Command};
 
 use super::{REAP_GRACE, STDERR_CAP};
+
+#[cfg(all(test, windows))]
+#[path = "process_windows_tests.rs"]
+mod windows_tests;
+
+#[cfg(all(test, windows))]
+static FORCE_ATTACH_FAILURE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(test, windows))]
+pub(super) fn set_attach_failure_for_test(force: bool) {
+    FORCE_ATTACH_FAILURE.store(force, Ordering::SeqCst);
+}
 
 pub(super) fn official_executable(executable: Option<PathBuf>) -> Result<PathBuf, String> {
     if let Some(path) = &executable
@@ -45,13 +60,55 @@ pub(super) async fn terminate(child: &mut Child) {
 }
 
 pub(super) fn with_diagnostic(message: String, diagnostic: Option<&[u8]>) -> String {
+    let truncated = diagnostic.is_some_and(|bytes| bytes.len() > STDERR_CAP);
+    with_truncated_diagnostic(message, diagnostic, truncated)
+}
+
+pub(super) fn with_truncated_diagnostic(
+    message: String,
+    diagnostic: Option<&[u8]>,
+    truncated: bool,
+) -> String {
     let diagnostic = diagnostic
-        .map(|bytes| crate::error::sanitize_vlm_error_bytes(bytes, STDERR_CAP))
+        .map(|bytes| bounded_diagnostic(bytes, truncated))
         .filter(|text| !text.is_empty());
     match diagnostic {
         Some(diagnostic) => format!("{message}: {diagnostic}"),
         None => message,
     }
+}
+
+fn bounded_diagnostic(raw: &[u8], truncated: bool) -> String {
+    const MARKER: &str = " [truncated]";
+
+    let mut text =
+        crate::error::sanitize_vlm_error_bytes(&raw[..raw.len().min(STDERR_CAP)], STDERR_CAP);
+    let needs_marker = truncated || text.len() > STDERR_CAP;
+    if !needs_marker {
+        return text;
+    }
+
+    if STDERR_CAP >= MARKER.len() {
+        while let Some(start) = text.find(MARKER) {
+            text.replace_range(start..start + MARKER.len(), "");
+        }
+        truncate_utf8(&mut text, STDERR_CAP - MARKER.len());
+        text.push_str(MARKER);
+    } else {
+        truncate_utf8(&mut text, STDERR_CAP);
+    }
+    text
+}
+
+fn truncate_utf8(text: &mut String, cap: usize) {
+    if text.len() <= cap {
+        return;
+    }
+    let mut end = cap;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
 }
 
 #[cfg(unix)]
@@ -135,11 +192,19 @@ impl WindowsJob {
                 size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             )
         };
+        if set == 0 {
+            return Err("official worker job setup failed".into());
+        }
         let process_handle = child
             .raw_handle()
             .ok_or_else(|| "official worker process handle unavailable".to_owned())?;
+        #[cfg(all(test, windows))]
+        if FORCE_ATTACH_FAILURE.swap(false, Ordering::SeqCst) {
+            let pid = child.id().unwrap_or(0);
+            return Err(format!("official worker test attach failure: pid={pid}"));
+        }
         let assigned = unsafe { AssignProcessToJobObject(job.0, process_handle as _) };
-        if set == 0 || assigned == 0 {
+        if assigned == 0 {
             return Err("official worker job assignment failed".into());
         }
         Ok(job)

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::Error as DeError};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -98,7 +98,7 @@ pub(super) fn persistent_request_frame(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PersistentHandshakeFrame {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default = "handshake_frame_type")]
     pub(super) frame_type: String,
     pub(super) protocol: String,
     pub(super) status: String,
@@ -113,7 +113,7 @@ pub(super) struct PersistentHandshakeFrame {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PersistentResultFrame {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default = "result_frame_type")]
     pub(super) frame_type: String,
     pub(super) protocol: String,
     pub(super) request_id: String,
@@ -130,7 +130,7 @@ pub(super) struct PersistentResultFrame {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PersistentErrorFrame {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default = "error_frame_type")]
     pub(super) frame_type: String,
     pub(super) protocol: String,
     pub(super) status: String,
@@ -142,30 +142,106 @@ pub(super) struct PersistentErrorFrame {
     pub(super) diagnostic: Option<String>,
 }
 
+#[derive(Debug)]
 pub(super) enum PersistentFrame {
     Handshake(PersistentHandshakeFrame),
     Result(PersistentResultFrame),
     Error(PersistentErrorFrame),
 }
 
+fn handshake_frame_type() -> String {
+    "handshake".into()
+}
+
+fn result_frame_type() -> String {
+    "result".into()
+}
+
+fn error_frame_type() -> String {
+    "error".into()
+}
+
+const HANDSHAKE_FRAME_ERROR: &str = "__official_persistent_handshake_frame_error__: ";
+const RESULT_FRAME_ERROR: &str = "__official_persistent_result_frame_error__: ";
+const ERROR_FRAME_ERROR: &str = "__official_persistent_error_frame_error__: ";
+
+fn deserialize_handshake_frame<'de, D>(
+    deserializer: D,
+) -> Result<PersistentHandshakeFrame, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    PersistentHandshakeFrame::deserialize(deserializer)
+        .map_err(|error| D::Error::custom(format!("{HANDSHAKE_FRAME_ERROR}{error}")))
+}
+
+fn deserialize_result_frame<'de, D>(deserializer: D) -> Result<PersistentResultFrame, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    PersistentResultFrame::deserialize(deserializer)
+        .map_err(|error| D::Error::custom(format!("{RESULT_FRAME_ERROR}{error}")))
+}
+
+fn deserialize_error_frame<'de, D>(deserializer: D) -> Result<PersistentErrorFrame, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    PersistentErrorFrame::deserialize(deserializer)
+        .map_err(|error| D::Error::custom(format!("{ERROR_FRAME_ERROR}{error}")))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum PersistentFrameEnvelope {
+    #[serde(rename = "handshake", deserialize_with = "deserialize_handshake_frame")]
+    Handshake { frame: PersistentHandshakeFrame },
+    #[serde(rename = "result", deserialize_with = "deserialize_result_frame")]
+    Result { frame: PersistentResultFrame },
+    #[serde(rename = "error", deserialize_with = "deserialize_error_frame")]
+    Error { frame: PersistentErrorFrame },
+    #[serde(other)]
+    Unsupported,
+}
+
 pub(super) fn parse_persistent_frame(bytes: &[u8]) -> Result<PersistentFrame, String> {
-    let value: Value = serde_json::from_slice(bytes)
-        .map_err(|error| format!("official persistent protocol JSON is invalid: {error}"))?;
-    let frame_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "official persistent protocol frame type is missing".to_owned())?;
-    match frame_type {
-        "handshake" => serde_json::from_value(value)
-            .map(PersistentFrame::Handshake)
-            .map_err(|error| format!("official persistent handshake is invalid: {error}")),
-        "result" => serde_json::from_value(value)
-            .map(PersistentFrame::Result)
-            .map_err(|error| format!("official persistent result is invalid: {error}")),
-        "error" => serde_json::from_value(value)
-            .map(PersistentFrame::Error)
-            .map_err(|error| format!("official persistent error frame is invalid: {error}")),
-        _ => Err("official persistent protocol frame type is unsupported".into()),
+    let envelope = match serde_json::from_slice::<PersistentFrameEnvelope>(bytes) {
+        Ok(envelope) => envelope,
+        Err(error) if error.is_syntax() || error.is_eof() => {
+            return Err(format!(
+                "official persistent protocol JSON is invalid: {error}"
+            ));
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if message.contains("missing field `type`") || message.starts_with("invalid type") {
+                return Err("official persistent protocol frame type is missing".into());
+            }
+            if let Some(detail) = message.strip_prefix(HANDSHAKE_FRAME_ERROR) {
+                return Err(format!(
+                    "official persistent handshake is invalid: {detail}"
+                ));
+            }
+            if let Some(detail) = message.strip_prefix(RESULT_FRAME_ERROR) {
+                return Err(format!("official persistent result is invalid: {detail}"));
+            }
+            if let Some(detail) = message.strip_prefix(ERROR_FRAME_ERROR) {
+                return Err(format!(
+                    "official persistent error frame is invalid: {detail}"
+                ));
+            }
+            return Err(format!(
+                "official persistent protocol frame is invalid: {message}"
+            ));
+        }
+    };
+    match envelope {
+        PersistentFrameEnvelope::Handshake { frame } => Ok(PersistentFrame::Handshake(frame)),
+        PersistentFrameEnvelope::Result { frame } => Ok(PersistentFrame::Result(frame)),
+        PersistentFrameEnvelope::Error { frame } => Ok(PersistentFrame::Error(frame)),
+        PersistentFrameEnvelope::Unsupported => {
+            Err("official persistent protocol frame type is unsupported".into())
+        }
     }
 }
 
@@ -236,5 +312,177 @@ pub(super) async fn read_persistent_frame(
         frame.extend_from_slice(available);
         let size = available.len();
         stdout.consume(size);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn handshake_frame() -> Value {
+        json!({
+            "type": "handshake",
+            "protocol": "mineru-rs-official-worker/2",
+            "status": "ready",
+            "package_version": "4.0.0a6",
+            "schema_version": "1.0",
+            "backend": "hybrid-http-client",
+            "max_in_flight": 1,
+            "capabilities": {"bundle_name": "hybrid-v4"},
+        })
+    }
+
+    fn result_frame() -> Value {
+        json!({
+            "type": "result",
+            "protocol": "mineru-rs-official-worker/2",
+            "request_id": "request-1",
+            "sequence": 1,
+            "status": "ok",
+            "package_version": "4.0.0a6",
+            "schema_version": "1.0",
+            "backend": "hybrid-http-client",
+            "bundle_name": "hybrid-v4",
+        })
+    }
+
+    fn error_frame() -> Value {
+        json!({
+            "type": "error",
+            "protocol": "mineru-rs-official-worker/2",
+            "status": "error",
+            "package_version": "4.0.0a6",
+            "schema_version": "1.0",
+            "backend": "hybrid-http-client",
+            "bundle_name": "hybrid-v4",
+            "error": "startup failed",
+        })
+    }
+
+    fn parse(value: Value) -> Result<PersistentFrame, String> {
+        parse_persistent_frame(&serde_json::to_vec(&value).unwrap())
+    }
+
+    #[test]
+    fn parses_handshake_result_and_error_frames() {
+        assert!(
+            matches!(parse(handshake_frame()), Ok(PersistentFrame::Handshake(frame))
+            if frame.frame_type == "handshake" && frame.max_in_flight == 1)
+        );
+        assert!(
+            matches!(parse(result_frame()), Ok(PersistentFrame::Result(frame))
+            if frame.frame_type == "result" && frame.request_id == "request-1")
+        );
+        assert!(
+            matches!(parse(error_frame()), Ok(PersistentFrame::Error(frame))
+            if frame.frame_type == "error" && frame.error == "startup failed")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_type_and_unknown_field() {
+        let mut unknown_type = handshake_frame();
+        unknown_type["type"] = json!("notice");
+        assert_eq!(
+            parse(unknown_type).unwrap_err(),
+            "official persistent protocol frame type is unsupported"
+        );
+
+        let mut unknown_field = handshake_frame();
+        unknown_field["unexpected"] = json!(true);
+        let error = parse(unknown_field).unwrap_err();
+        assert!(
+            error.contains("official persistent handshake is invalid: unknown field `unexpected`")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_type_and_malformed_json() {
+        let mut missing_type = handshake_frame();
+        missing_type.as_object_mut().unwrap().remove("type");
+        assert_eq!(
+            parse(missing_type).unwrap_err(),
+            "official persistent protocol frame type is missing"
+        );
+
+        let error = parse_persistent_frame(br#"{"type":"handshake""#).unwrap_err();
+        assert!(error.starts_with("official persistent protocol JSON is invalid: "));
+    }
+
+    #[cfg(unix)]
+    fn value_with_encoded_len(target: usize) -> Value {
+        let empty = serde_json::to_vec(&json!({"payload": ""})).unwrap();
+        assert!(target > empty.len());
+        json!({"payload": "x".repeat(target - empty.len())})
+    }
+
+    #[cfg(unix)]
+    async fn read_from_cat(bytes: &[u8]) -> Result<Vec<u8>, String> {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(bytes).await.unwrap();
+        drop(stdin);
+        let stdout = child.stdout.take().unwrap();
+        let result = read_persistent_frame(&mut BufReader::new(stdout)).await;
+        child.wait().await.unwrap();
+        result
+    }
+
+    #[cfg(unix)]
+    async fn write_to_cat(frame: &Value) -> Result<(), String> {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let result = write_persistent_frame(&mut stdin, frame).await;
+        drop(stdin);
+        child.wait().await.unwrap();
+        result
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accepts_the_cap_and_rejects_one_byte_over_it() {
+        let exact = serde_json::to_vec(&value_with_encoded_len(REQUEST_CAP - 1)).unwrap();
+        assert_eq!(exact.len() + 1, REQUEST_CAP);
+        let mut exact_with_newline = exact.clone();
+        exact_with_newline.push(b'\n');
+        assert_eq!(
+            read_from_cat(&exact_with_newline).await.unwrap(),
+            exact_with_newline
+        );
+        assert!(
+            write_to_cat(&value_with_encoded_len(REQUEST_CAP - 1))
+                .await
+                .is_ok()
+        );
+
+        let over = serde_json::to_vec(&value_with_encoded_len(REQUEST_CAP)).unwrap();
+        assert_eq!(over.len() + 1, REQUEST_CAP + 1);
+        let mut over_with_newline = over.clone();
+        over_with_newline.push(b'\n');
+        assert_eq!(
+            read_from_cat(&over_with_newline).await.unwrap_err(),
+            "official persistent frame exceeds its limit"
+        );
+        assert_eq!(
+            write_to_cat(&value_with_encoded_len(REQUEST_CAP))
+                .await
+                .unwrap_err(),
+            "official persistent frame exceeds its limit"
+        );
     }
 }

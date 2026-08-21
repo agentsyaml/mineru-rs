@@ -184,7 +184,13 @@ fn inline_image_pdf_is_rejected_as_image_bearing() {
 
 #[test]
 fn form_inline_image_is_detected_without_an_image_xobject() {
-    assert_eq!(has_page_images(&form_inline_image_pdf()), Ok(true));
+    let bytes = form_inline_image_pdf();
+    assert_eq!(has_page_images(&bytes), Ok(true));
+    let document = lopdf::Document::load_mem(&bytes).unwrap();
+    assert_eq!(
+        has_page_images_in_document(&document, bytes.len()),
+        Ok(true)
+    );
 }
 
 #[test]

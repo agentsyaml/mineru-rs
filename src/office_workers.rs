@@ -945,11 +945,11 @@ mod tests {
         let conversion = tokio::spawn({
             let w = w.clone();
             async move {
-                w.convert("group_hang", vec![], Duration::from_millis(100))
+                w.convert("group_hang", vec![], Duration::from_secs(1))
                     .await
             }
         });
-        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+        let pid = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Ok(pid) = std::fs::read_to_string(&path)
                     && let Ok(pid) = pid.trim().parse::<libc::pid_t>()

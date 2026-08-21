@@ -14,19 +14,30 @@ MinerU 3.4.5 metadata specifies only `mineru-vl-utils>=1.0.5,<2`. Pinning
 `1.0.5` is this project's reproducibility choice; it does not claim that the
 MinerU wheel itself was lockfile-pinned.
 
+The bundled Compose image `alexsuntop/mineru:3.4.2` is a separate provider-image
+baseline. The MinerU 3.4.5 version above is the VLM protocol baseline for this
+compatibility contract, not a Compose image-tag requirement.
+
 ### MinerU 4.0.0a6 direct Hybrid
 
 Direct `hybrid-http-client` is a separate, pinned boundary for MinerU 4.0.0a6
 at revision `90770107e5287342e7c8234446a262cda5bbd029`. It requires a user-
 installed Python environment with exactly `mineru==4.0.0a6`; Python, MinerU,
-and model assets are not bundled. The default `per-document` mode invokes the official
-`mineru.parser.parse_async` entrypoint in one fresh subprocess per document. The explicit
-`persistent` mode reuses one worker and loaded model per direct CLI run, with one active
-request, sequential documents, and new session creation after cancellation or crash.
+and model assets are not bundled. When no worker mode is specified, selection is
+automatic after input preflight: one runnable document invokes the official
+`mineru.parser.parse_async` entrypoint in one fresh subprocess, while multiple runnable
+documents use a persistent worker. The explicit `per-document` mode invokes one fresh
+subprocess per document; the explicit `persistent` mode reuses one worker and loaded model
+per direct CLI run, with one active request, sequential documents, and new session creation
+after cancellation or crash.
 Committed requests are not automatically retried; there is no hard RSS/GPU isolation.
-Select it with `--official-worker-mode persistent` or
-`MINERU_OFFICIAL_WORKER_MODE=persistent`; the default remains `per-document` and CLI
-values take precedence. The project-owned JSON envelopes are
+On Windows, worker assignment to a `KILL_ON_JOB_CLOSE` Job Object is fail-closed,
+but Tokio spawns the worker before `WindowsJob::attach` runs. A very fast
+descendant created in that interval can escape the job, so cleanup is best effort
+for that race. The official worker has no hard RSS or GPU quota.
+Select either mode explicitly with `--official-worker-mode per-document` or
+`--official-worker-mode persistent`, or set `MINERU_OFFICIAL_WORKER_MODE` to either value;
+CLI values take precedence. The project-owned JSON envelopes are
 `mineru-rs-official-worker/1` and internal `/2`, not official MinerU stdin/stdout
 protocols.
 

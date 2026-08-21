@@ -101,16 +101,22 @@ macOS 原生 API 没有可靠且无需 entitlement 的进程 RSS/地址空间硬
 
 直接 `-b hybrid-http-client` 要求 Python 环境中精确安装
 `mineru==4.0.0a6`。Rust 二进制内嵌窄 adapter shim，但不打包 Python、MinerU
-或模型文件；默认 `per-document` 模式每个文档启动一个新子进程，父进程负责
-deadline、取消、管道上限和后代清理。只接受 PDF 和官方图像格式，OOXML/旧 Office
-会在启动 worker 前拒绝。
+或模型文件；未指定 worker 模式时，会在输入预检后自动选择：一个可运行文档使用
+`per-document`，多个可运行文档使用 `persistent`。`per-document` 模式每个文档
+启动一个新子进程，父进程负责 deadline、取消、管道上限和后代清理。只接受 PDF
+和官方图像格式，OOXML/旧 Office 会在启动 worker 前拒绝。
 
-可显式选择 `--official-worker-mode persistent`，或设置
-`MINERU_OFFICIAL_WORKER_MODE=persistent`，在同一次直接 CLI 运行中复用一个 worker
-和已加载模型。该性能模式始终只有一个 active request：文档仍按顺序、各自使用私有
+可显式选择 `--official-worker-mode per-document` 或 `persistent`，或将
+`MINERU_OFFICIAL_WORKER_MODE` 设置为任一值。`persistent` 设置会在同一次直接 CLI
+运行中复用一个 worker 和已加载模型。该性能模式始终只有一个 active request：文档仍按顺序、各自使用私有
 快照和 bundle；worker 启动/握手一次，取消或崩溃后下一文档建立新 session。已提交的
-请求不自动重试，不提供硬 RSS/GPU 隔离。默认值仍为 `per-document`，CLI 显式值覆盖
-环境值，环境值只影响直接 `hybrid-http-client`。
+请求不自动重试，不提供硬 RSS/GPU 隔离。CLI 显式值覆盖环境值；两者都未指定时，
+按可运行文档数自动选择。环境值只影响直接 `hybrid-http-client`。
+
+在 Windows 上，worker 分配到 `KILL_ON_JOB_CLOSE` Job Object 是 fail-closed 的，
+但 Tokio 会先 spawn，之后才执行 `WindowsJob::attach`。因此，分配前已启动的极快
+后代可能逃出该 Job Object；这段竞态只能尽力清理。官方 worker 不提供硬 RSS 或 GPU
+配额。
 
 `medium` 也保持官方 `hybrid-http-client` backend，但只走本地路径，不需要
 VLM URL；`high`/`xhigh` 使用同一个官方 `hybrid-http-client`，必须提供显式 HTTP(S) `--url` 或
@@ -126,7 +132,7 @@ VLM URL；`high`/`xhigh` 使用同一个官方 `hybrid-http-client`，必须提�
 也会拒绝 `--client-side-output-generation`，不会静默忽略这些选项。官方解析
 字段和项目自己的输入/输出上限仍然可用。
 
-项目自有 adapter envelope 版本为 `mineru-rs-official-worker/1`（默认模式）或
+项目自有 adapter envelope 版本为 `mineru-rs-official-worker/1`（`per-document` 模式）或
 内部 persistent `mineru-rs-official-worker/2`，都不是官方 MinerU stdin/stdout 协议。
 API 模式仍明确拒绝 Hybrid：
 
@@ -174,7 +180,7 @@ cargo build --release --features legacy-office
 | `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | 后端。`local` 通过内置 Rust helper 调用项目私有 AnyDoc lane；直接 `hybrid-http-client` 使用官方 4.0.0a6 worker，API Hybrid 仍明确拒绝。 |
 | `--effort <medium\|high\|xhigh>` | `medium` | 官方直接 Hybrid 力度。`medium` 仅本地；`high`/`xhigh` 要求显式 HTTP(S) VLM URL；其它直接后端仍只接受 `medium`/`high`。 |
 | `--model-stack <auto\|light\|full>` | `auto` | 官方直接 Hybrid 模型栈。显式提供的值（包括 `auto`）覆盖 `MINERU_MODEL_STACK`；省略时使用环境值。模型文件不随 Rust 二进制提供。 |
-| `--official-worker-mode <per-document\|persistent>` | `per-document` | 官方 Hybrid worker 生命周期。`persistent` 是单 worker、单 active request 的显式性能模式；覆盖 `MINERU_OFFICIAL_WORKER_MODE`。 |
+| `--official-worker-mode <per-document\|persistent>` | 按可运行文档数自动选择 | 官方 Hybrid worker 生命周期。一个可运行文档使用 `per-document`；多个可运行文档使用 `persistent`。显式值覆盖 `MINERU_OFFICIAL_WORKER_MODE`。 |
 | `--official-python <绝对路径>` | Python `python3`/`python` | 官方 Hybrid Python 解释器，覆盖 `MINERU_OFFICIAL_PYTHON`；不随 Rust 二进制提供。 |
 | `--official-model-dir <绝对路径>` | 无 | 官方 Hybrid 模型根目录，覆盖 `MINERU_MODEL_BASE_DIR`。 |
 | `--official-config <绝对路径>` | 无 | 官方 Hybrid 配置路径，覆盖 `MINERU_CONFIG`。 |
@@ -353,7 +359,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | 页管线并发上限（任意正整数），仅约束同时运行的页管线数；请求级并发由 `MINERU_VLM_HTTP_CONCURRENCY` 决定。 |
 | `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | 并发模型，取值 `classic\|two-phase`。`classic`：经典单编码器流水（默认）；`two-phase`：将页内语义处理拆为 encode-all → request-all 两阶段，解除 CPU 编码对请求派发的串行瓶颈（可选启用）。 |
 | `MINERU_MODEL_STACK` | `auto` | 官方直接 Hybrid 模型栈：`auto\|light\|full`。 |
-| `MINERU_OFFICIAL_WORKER_MODE` | `per-document` | 官方 Hybrid worker 模式：`per-document\|persistent`。仅直接 Hybrid 生效；CLI 显式值优先。 |
+| `MINERU_OFFICIAL_WORKER_MODE` | 按可运行文档数自动选择 | 官方 Hybrid worker 模式：`per-document\|persistent`。仅直接 Hybrid 生效；CLI 显式值优先。 |
 | `MINERU_OFFICIAL_PYTHON` | Python `python3`/`python` | 官方 Hybrid Python 解释器绝对路径。 |
 | `MINERU_MODEL_BASE_DIR` | 无 | 官方 Hybrid 模型根目录绝对路径。 |
 | `MINERU_CONFIG` | 无 | 官方 Hybrid 配置绝对路径。 |

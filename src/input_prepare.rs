@@ -462,6 +462,31 @@ fn format_for(kind: DocumentKind) -> Option<ImageFormat> {
         _ => return None,
     })
 }
+
+/// Validate an image for the direct official Hybrid lane without materializing a PDF.
+pub(crate) fn preflight_image(
+    bytes: &[u8],
+    declared: DocumentKind,
+    options: &OfficialPdfOptions,
+) -> Result<(), String> {
+    if declared == DocumentKind::Jp2 {
+        let image = Jp2Image::new(bytes, &DecodeSettings::default()).map_err(|_| "invalid JP2")?;
+        limits(image.width(), image.height(), options)?;
+        return Ok(());
+    }
+    let expected = format_for(declared).ok_or("unsupported document kind")?;
+    let reader = ImageReader::with_format(Cursor::new(bytes), expected);
+    let mut decoder = reader.into_decoder().map_err(|_| "invalid image")?;
+    let (w, h) = decoder.dimensions();
+    limits(w, h, options)?;
+    reject_animation(bytes, expected)?;
+    decoder.orientation().map_err(|_| "invalid image")?;
+    DynamicImage::from_decoder(decoder)
+        .map(|_| ())
+        .map_err(|_| "invalid image")?;
+    Ok(())
+}
+
 fn image_pdf(
     bytes: Bytes,
     expected: ImageFormat,
@@ -810,6 +835,52 @@ mod tests {
         let error = validate_prepared_pdf(b"0123456789", &options).unwrap_err();
         assert!(error.contains("PDF exceeds size limit"));
         assert!(error.contains("--max-pdf-bytes") && error.contains("MINERU_MAX_PDF_BYTES"));
+    }
+
+    #[test]
+    fn official_image_preflight_enforces_pixel_and_byte_boundaries() {
+        let mut bytes = Vec::new();
+        DynamicImage::new_rgb8(2, 3)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .unwrap();
+        let mut options = OfficialPdfOptions::default();
+        assert!(preflight_image(&bytes, DocumentKind::Png, &options).is_ok());
+
+        options.max_page_pixels = 5;
+        assert_eq!(
+            preflight_image(&bytes, DocumentKind::Png, &options).unwrap_err(),
+            "image exceeds limits"
+        );
+        options.max_page_pixels = 6;
+        options.max_rendered_image_bytes = 17;
+        assert!(preflight_image(&bytes, DocumentKind::Png, &options).is_err());
+        options.max_rendered_image_bytes = 18;
+        options.max_in_flight_image_bytes = 17;
+        assert!(preflight_image(&bytes, DocumentKind::Png, &options).is_err());
+        options.max_in_flight_image_bytes = 18;
+        assert!(preflight_image(&bytes, DocumentKind::Png, &options).is_ok());
+    }
+
+    #[test]
+    fn official_image_preflight_rejects_truncated_static_images() {
+        for (kind, format) in [
+            (DocumentKind::Png, ImageFormat::Png),
+            (DocumentKind::Jpeg, ImageFormat::Jpeg),
+            (DocumentKind::Webp, ImageFormat::WebP),
+            (DocumentKind::Bmp, ImageFormat::Bmp),
+            (DocumentKind::Tiff, ImageFormat::Tiff),
+        ] {
+            let mut bytes = Vec::new();
+            DynamicImage::new_rgb8(2, 3)
+                .write_to(&mut Cursor::new(&mut bytes), format)
+                .unwrap();
+            bytes.truncate(bytes.len() / 2);
+            assert!(
+                preflight_image(&bytes, kind, &OfficialPdfOptions::default()).is_err(),
+                "truncated {} was accepted",
+                kind.suffix()
+            );
+        }
     }
 
     #[tokio::test]

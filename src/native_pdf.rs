@@ -1,7 +1,7 @@
 //! Conservative native Markdown assessment for text PDFs.
 
 use pdf_inspector::{DetectionConfig, PdfOptions, PdfType, ProcessMode, ScanStrategy};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) const NATIVE_PDF_METADATA_SCHEMA_VERSION: u16 = 1;
 pub(crate) const NATIVE_PDF_PROVENANCE: &str = "anydoc::Format::Pdf via pdf-inspector";
@@ -78,7 +78,11 @@ pub(crate) fn assess(
         };
     }
 
-    match has_page_images(bytes) {
+    // Share one parsed document across page-content and resource/image inspection.
+    let image_result = lopdf::Document::load_mem(bytes)
+        .map_err(|_| ())
+        .and_then(|document| has_page_images_in_document(&document, bytes.len()));
+    match image_result {
         Ok(true) => {
             metadata.images_present = true;
             push_reason(&mut metadata, "images_present");
@@ -209,15 +213,31 @@ fn push_reason(metadata: &mut NativePdfMetadata, reason: &'static str) {
     }
 }
 
+#[derive(Default)]
+struct ImageScanCache {
+    form_inline_images: HashMap<lopdf::ObjectId, Result<bool, ()>>,
+}
+
+#[cfg(test)]
+fn has_page_images(bytes: &[u8]) -> Result<bool, ()> {
+    let document = lopdf::Document::load_mem(bytes).map_err(|_| ())?;
+    has_page_images_in_document(&document, bytes.len())
+}
+
 /// Detects image XObjects reachable from page resources and inline images in page content without
 /// relying on pdf-inspector's internal logging or optional image-emission settings. An undecidable
 /// resource graph or content stream rejects the native lane rather than silently dropping a visible
 /// image.
-fn has_page_images(bytes: &[u8]) -> Result<bool, ()> {
-    let document = lopdf::Document::load_mem(bytes).map_err(|_| ())?;
+fn has_page_images_in_document(
+    document: &lopdf::Document,
+    content_limit: usize,
+) -> Result<bool, ()> {
+    // Cache only immutable form-content decoding; resource recursion stays path-local so cycles
+    // and depth failures remain fail-closed.
+    let mut cache = ImageScanCache::default();
     for page_id in document.get_pages().values().copied() {
         let content = document
-            .get_page_content_with_limit(page_id, bytes.len())
+            .get_page_content_with_limit(page_id, content_limit)
             .map_err(|_| ())?;
         let content = lopdf::content::Content::decode(&content).map_err(|_| ())?;
         if content
@@ -227,7 +247,14 @@ fn has_page_images(bytes: &[u8]) -> Result<bool, ()> {
         {
             return Ok(true);
         }
-        if page_resources_have_images(&document, page_id, &mut HashSet::new(), 0, bytes.len())? {
+        if page_resources_have_images(
+            document,
+            page_id,
+            &mut HashSet::new(),
+            0,
+            content_limit,
+            &mut cache,
+        )? {
             return Ok(true);
         }
     }
@@ -240,6 +267,7 @@ fn page_resources_have_images(
     seen_pages: &mut HashSet<lopdf::ObjectId>,
     mut depth: usize,
     content_limit: usize,
+    cache: &mut ImageScanCache,
 ) -> Result<bool, ()> {
     loop {
         check_resource_depth(depth)?;
@@ -258,6 +286,7 @@ fn page_resources_have_images(
                 &mut HashSet::new(),
                 depth,
                 content_limit,
+                cache,
             );
         }
         page_id = match page.get(b"Parent") {
@@ -274,6 +303,7 @@ fn resource_object_has_images(
     seen_objects: &mut HashSet<lopdf::ObjectId>,
     depth: usize,
     content_limit: usize,
+    cache: &mut ImageScanCache,
 ) -> Result<bool, ()> {
     check_resource_depth(depth)?;
     let resources = resolve_dictionary(document, object, seen_objects, depth)?;
@@ -283,7 +313,15 @@ fn resource_object_has_images(
     let child_depth = next_resource_depth(depth)?;
     let xobjects = resolve_dictionary(document, xobjects, seen_objects, child_depth)?;
     for (_, xobject) in xobjects.iter() {
-        if object_has_image(document, xobject, seen_objects, child_depth, content_limit)? {
+        if object_has_image(
+            document,
+            xobject,
+            seen_objects,
+            child_depth,
+            content_limit,
+            cache,
+            None,
+        )? {
             return Ok(true);
         }
     }
@@ -296,6 +334,8 @@ fn object_has_image(
     seen_objects: &mut HashSet<lopdf::ObjectId>,
     depth: usize,
     content_limit: usize,
+    cache: &mut ImageScanCache,
+    object_id: Option<lopdf::ObjectId>,
 ) -> Result<bool, ()> {
     check_resource_depth(depth)?;
     match object {
@@ -309,6 +349,8 @@ fn object_has_image(
                 seen_objects,
                 next_resource_depth(depth)?,
                 content_limit,
+                cache,
+                Some(*id),
             );
             seen_objects.remove(id);
             result
@@ -323,18 +365,7 @@ fn object_has_image(
                 return Ok(true);
             }
             if subtype == Some(b"Form".as_slice()) {
-                if stream.dict.has(b"Filter") && stream.filters().is_err() {
-                    return Err(());
-                }
-                let content = stream
-                    .get_plain_content_with_limit(content_limit)
-                    .map_err(|_| ())?;
-                let content = lopdf::content::Content::decode(&content).map_err(|_| ())?;
-                if content
-                    .operations
-                    .iter()
-                    .any(|operation| operation.operator == "BI")
-                {
+                if form_stream_has_inline_image(stream, content_limit, cache, object_id)? {
                     return Ok(true);
                 }
                 if let Ok(resources) = stream.dict.get(b"Resources") {
@@ -344,6 +375,7 @@ fn object_has_image(
                         seen_objects,
                         next_resource_depth(depth)?,
                         content_limit,
+                        cache,
                     );
                 }
             }
@@ -353,6 +385,36 @@ fn object_has_image(
         // as undecidable so native Markdown never claims to preserve a resource it cannot inspect.
         _ => Err(()),
     }
+}
+
+fn form_stream_has_inline_image(
+    stream: &lopdf::Stream,
+    content_limit: usize,
+    cache: &mut ImageScanCache,
+    object_id: Option<lopdf::ObjectId>,
+) -> Result<bool, ()> {
+    if let Some(id) = object_id
+        && let Some(result) = cache.form_inline_images.get(&id)
+    {
+        return *result;
+    }
+    let result = (|| {
+        if stream.dict.has(b"Filter") && stream.filters().is_err() {
+            return Err(());
+        }
+        let content = stream
+            .get_plain_content_with_limit(content_limit)
+            .map_err(|_| ())?;
+        let content = lopdf::content::Content::decode(&content).map_err(|_| ())?;
+        Ok(content
+            .operations
+            .iter()
+            .any(|operation| operation.operator == "BI"))
+    })();
+    if let Some(id) = object_id {
+        cache.form_inline_images.insert(id, result);
+    }
+    result
 }
 
 fn resolve_dictionary<'a>(

@@ -9,7 +9,7 @@ MinerU VLM 模型有两种运行方式：
 - **远程**——让工具连接 OpenAI 兼容的 MinerU VLM 服务，无需在自己的机器上运行模型即可解析文档。
 - **外部服务（可选）**——让工具连接一个在仓库外准备好的 OpenAI 兼容服务，例如 `llama-server`；见 [Docker](#docker)。这是未经验证的 provider 示例，不表示兼容 MinerU 4.0.0a6 的多模态协议或模型。这与 CLI 的 `backend=local` 不同：后者通过隔离的 Rust `mineru-office-convert` 辅助程序调用 AnyDoc，抽取支持的旧格式和干净文本 PDF Markdown；该辅助程序不启动 Python、Microsoft Office/LibreOffice，不加载模型，也不发网络请求。
 
-在 MinerU 3.4.5 VLM 范围内，MinerU Rust 是 MinerU Python SDK `vlm-http-client` 路径的可直接替代实现，可以完全替代该 VLM 工作流。直接 `backend=hybrid-http-client` 是独立的官方 MinerU 4.0.0a6 边界：要求用户安装精确版本的 Python 包，并为每个文档启动一个带内嵌 shim 的子进程；输出写入独立的 `hybrid-v4` 路径。CLI 另提供独立的 `backend=local` AnyDoc 原生 Markdown 路径；这是项目私有的 native lane，不是官方 Hybrid。API Hybrid 仍 fail-closed，不会冒充旧 3.4.5 VLM 路径。参见[兼容性契约](docs/compatibility.md)、[中文使用指南](docs/usage.md)和[英文使用指南](docs/usage.en.md)。文档大小限制控制项及其 CLI/API 适用范围见使用指南。
+在 MinerU 3.4.5 VLM 范围内，MinerU Rust 是 MinerU Python SDK `vlm-http-client` 路径的可直接替代实现，可以完全替代该 VLM 工作流。直接 `backend=hybrid-http-client` 是独立的官方 MinerU 4.0.0a6 边界：要求用户安装精确版本的 Python 包；未指定 worker 模式时，一个可运行文档使用一个带内嵌 shim 的子进程，多个可运行文档使用 persistent worker。显式 `--official-worker-mode` 或 `MINERU_OFFICIAL_WORKER_MODE` 会覆盖该自动选择。输出写入独立的 `hybrid-v4` 路径。CLI 另提供独立的 `backend=local` AnyDoc 原生 Markdown 路径；这是项目私有的 native lane，不是官方 Hybrid。API Hybrid 仍 fail-closed，不会冒充旧 3.4.5 VLM 路径。参见[兼容性契约](docs/compatibility.md)、[中文使用指南](docs/usage.md)和[英文使用指南](docs/usage.en.md)。文档大小限制控制项及其 CLI/API 适用范围见使用指南。
 
 **没有 GPU？** PDF/图像流水线仍驱动 VLM 端点；需要完整版面解析时，纯 CPU 的替代方案是官方 MinerU Python pipeline（PP-OCRv6）：它产出相同的 `document.json` / `middle.json` / `content_list.json` / markdown 契约，两份输出可互换消费。非 local CLI 路径的旧格式会先由隔离 helper 尽力生成有界的仅文本 PDF，再进入现有 PDF/VLM 路径；原版式、图片、表格、公式和宏可能丢失，非 ASCII 字符可能变成 `?`，若不适用请先用 Microsoft Office 或 LibreOffice 保存为 DOCX/XLSX/PPTX。无 VLM 服务时仍可用 `backend=local`（通过隔离 Rust helper 运行 AnyDoc，仅 Markdown、无版面 JSON）；该路径不启动 Python、Office，不加载模型，也不发网络请求。不确定的 PDF 会明确失败，不伪造 official 输出。官方 MinerU 4.0.0a6 直接 Hybrid 支持 `medium`、`high`、`xhigh` 和 `auto|light|full` 模型栈；Python、MinerU 与模型文件不随 Rust 二进制打包。Docker/llama.cpp 编排不属于此边界（见[兼容性说明](docs/compatibility.md)）。
 
@@ -243,11 +243,11 @@ opt-in；不要将它放入 Dockerfile 或镜像的全局 ENV。优先按上例�
 
 ### Docker Compose 配置
 
-仓库自带的 [`docker-compose.yaml`](docker-compose.yaml) 通过两个 profile 之一在 NVIDIA GPU 上运行 MinerU 的 OpenAI 兼容服务：
+仓库自带的 [`docker-compose.yaml`](docker-compose.yaml) 通过两个 profile 在 NVIDIA GPU 上运行 MinerU 的 OpenAI 兼容 provider。未显式选择 profile 时，Compose 会激活两个服务；二者都绑定宿主机 `30000` 端口，因此启动前必须且只能选择一个 profile：
 
 | Profile | 镜像 | 用途 |
 | --- | --- | --- |
-| `openai-server` | `alexsuntop/mineru:3.4.2` | vLLM 后端的 MinerU 服务（默认，端口 `30000`）。 |
+| `openai-server` | `alexsuntop/mineru:3.4.2` | vLLM 后端的 MinerU provider 镜像，端口 `30000`。 |
 | `llama-server` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | 通用 OpenAI 兼容 provider 示例，端口 `30000`；本项目不验证模型兼容性。 |
 
 启动 vLLM 服务：
@@ -269,9 +269,12 @@ docker compose --profile llama-server up -d
 `http://localhost:30000`（可用 `MINERU_PORT_OVERRIDE_VLLM` /
 `MINERU_PORT_OVERRIDE_LLAMA` 覆盖端口）。如需其他绑定地址，必须显式设置
 `MINERU_PROVIDER_BIND_HOST=<绑定地址>`；扩大暴露范围前，必须使用私有网络或带认证的
-反向代理。它们映射同一宿主机端口，请勿同时启动。
+反向代理。它们映射同一宿主机端口，请只启动一个。`3.4.2` provider 镜像是独立的
+provider-image baseline；兼容性文档中的 MinerU `3.4.5` 是 VLM 协议基线，不是该镜像
+标签的要求。
 
-也可通过 `COMPOSE_PROFILES` 隐式激活 profile，例如 `COMPOSE_PROFILES=llama-server docker compose up -d`。
+请显式使用 `--profile openai-server` 或 `--profile llama-server`；不要在未选择 profile
+时运行 `docker compose up -d`。
 
 上面的 GHCR 镜像是已发布的 Rust API 镜像，不是包含 Python/模型的推理运行时。
 Compose profile 只是独立的 provider 示例，不会准备或验证 MinerU 4.0.0a6 模型。

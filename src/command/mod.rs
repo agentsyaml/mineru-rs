@@ -1294,22 +1294,22 @@ fn resolve_official_worker_mode(
     options: &RunOptions,
     environment: &Environment,
     direct_hybrid: bool,
-) -> Result<OfficialWorkerMode, String> {
+) -> Result<Option<OfficialWorkerMode>, String> {
     if let Some(mode) = options.official_worker_mode {
         return direct_hybrid
-            .then_some(mode)
+            .then_some(Some(mode))
             .ok_or_else(|| OFFICIAL_WORKER_MODE_DIRECT_ONLY.to_owned());
     }
     if !direct_hybrid {
-        return Ok(OfficialWorkerMode::PerDocument);
+        return Ok(None);
     }
     let Some(value) = environment.os("MINERU_OFFICIAL_WORKER_MODE") else {
-        return Ok(OfficialWorkerMode::PerDocument);
+        return Ok(None);
     };
     let value = value
         .into_string()
         .map_err(|_| "MINERU_OFFICIAL_WORKER_MODE must be valid UTF-8".to_owned())?;
-    OfficialWorkerMode::parse(&value)
+    OfficialWorkerMode::parse(&value).map(Some)
 }
 
 fn validate_hybrid_server_url(value: Option<&str>) -> Result<(), String> {

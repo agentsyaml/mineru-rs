@@ -55,7 +55,9 @@ use process::ProcessGroup;
 use process::WindowsJob;
 #[cfg(target_os = "linux")]
 use process::install_parent_death_signal;
-use process::{copy_runtime_environment, official_executable, terminate, with_diagnostic};
+use process::{
+    copy_runtime_environment, official_executable, terminate, with_truncated_diagnostic,
+};
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct OfficialRequest {
@@ -212,7 +214,7 @@ impl OfficialWorker {
             .ok_or_else(|| "official worker stderr pipe unavailable".to_owned())?;
         let mut input_task = Some(tokio::spawn(write_request(stdin, encoded)));
         let mut stdout_task = Some(tokio::spawn(read_capped(stdout, STDOUT_CAP)));
-        let mut stderr_task = Some(tokio::spawn(read_capped(stderr, STDERR_CAP)));
+        let mut stderr_task = Some(tokio::spawn(read_diagnostic(stderr, STDERR_CAP)));
         let mut status = None;
         let mut stdout_bytes = None;
         let mut stderr_bytes = None;
@@ -248,7 +250,6 @@ impl OfficialWorker {
                     stderr_task = None;
                     match result {
                         Ok(Ok(bytes)) => stderr_bytes = Some(bytes),
-                        Ok(Err(ReadError::TooLarge)) => failure = Some("official worker stderr exceeded its cap".into()),
                         _ => failure = Some("official worker stderr failed".into()),
                     }
                 }
@@ -268,12 +269,12 @@ impl OfficialWorker {
             #[cfg(unix)]
             process_group.kill();
             terminate(&mut child).await;
-            return Err(with_diagnostic(error, stderr_bytes.as_deref()));
+            return Err(with_stderr_diagnostic(error, stderr_bytes.as_ref()));
         }
         if !status.is_some_and(|status| status.success()) {
-            return Err(with_diagnostic(
+            return Err(with_stderr_diagnostic(
                 "official worker exited unsuccessfully".into(),
-                stderr_bytes.as_deref(),
+                stderr_bytes.as_ref(),
             ));
         }
         let response: Response = serde_json::from_slice(
@@ -301,11 +302,11 @@ impl OfficialWorker {
             return Err("official worker bundle name mismatch".into());
         }
         if response.status != "ok" {
-            return Err(with_diagnostic(
+            return Err(with_stderr_diagnostic(
                 response
                     .error
                     .unwrap_or_else(|| "official worker failed".into()),
-                stderr_bytes.as_deref(),
+                stderr_bytes.as_ref(),
             ));
         }
         #[cfg(unix)]
@@ -335,9 +336,15 @@ async fn write_request(mut stdin: tokio::process::ChildStdin, request: Vec<u8>) 
     stdin.shutdown().await.map_err(|_| ())
 }
 
+#[derive(Debug)]
 enum ReadError {
     TooLarge,
     Io,
+}
+
+struct Diagnostic {
+    bytes: Vec<u8>,
+    truncated: bool,
 }
 
 async fn read_capped(mut reader: impl AsyncRead + Unpin, cap: usize) -> Result<Vec<u8>, ReadError> {
@@ -355,10 +362,36 @@ async fn read_capped(mut reader: impl AsyncRead + Unpin, cap: usize) -> Result<V
     }
 }
 
+async fn read_diagnostic(
+    mut reader: impl AsyncRead + Unpin,
+    cap: usize,
+) -> Result<Diagnostic, ReadError> {
+    let mut bytes = Vec::with_capacity(cap);
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer).await.map_err(|_| ReadError::Io)?;
+        if read == 0 {
+            return Ok(Diagnostic { bytes, truncated });
+        }
+        let remaining = cap.saturating_sub(bytes.len());
+        let retained = read.min(remaining);
+        bytes.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < read;
+    }
+}
+
+fn with_stderr_diagnostic(message: String, diagnostic: Option<&Diagnostic>) -> String {
+    let Some(diagnostic) = diagnostic else {
+        return message;
+    };
+    with_truncated_diagnostic(message, Some(&diagnostic.bytes), diagnostic.truncated)
+}
+
 fn abort(
     input: &mut Option<JoinHandle<Result<(), ()>>>,
     stdout: &mut Option<JoinHandle<Result<Vec<u8>, ReadError>>>,
-    stderr: &mut Option<JoinHandle<Result<Vec<u8>, ReadError>>>,
+    stderr: &mut Option<JoinHandle<Result<Diagnostic, ReadError>>>,
 ) {
     if let Some(task) = input.take() {
         task.abort();

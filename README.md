@@ -23,8 +23,10 @@ Within the MinerU 3.4.5 VLM scope, MinerU Rust is a drop-in replacement for the
 MinerU Python SDK's `vlm-http-client` path and can replace that VLM workflow
 completely for the PDF/VLM workflow. Direct `backend=hybrid-http-client` is a
 separate official MinerU 4.0.0a6 boundary: it requires a user-installed pinned
-Python package and launches one embedded-shim subprocess per document. Its
-`hybrid-v4` artifacts are separate from the 3.4.5 output path. The CLI also
+Python package and, when unspecified, uses one embedded-shim subprocess for one
+runnable document or a persistent worker for multiple runnable documents. Explicit
+`--official-worker-mode` or `MINERU_OFFICIAL_WORKER_MODE` values override that choice.
+Its `hybrid-v4` artifacts are separate from the 3.4.5 output path. The CLI also
 provides the separate `backend=local` AnyDoc native-Markdown lane through the
 bundled Rust helper; it is not the official Hybrid backend. API Hybrid remains
 fail-closed and never aliases the 3.4.5 VLM route.
@@ -340,12 +342,14 @@ because the API has no built-in authentication or task ownership isolation.
 
 ### Docker Compose profiles
 
-The bundled [`docker-compose.yaml`](docker-compose.yaml) runs the MinerU
-OpenAI-compatible server on an NVIDIA GPU behind one of two profiles:
+The bundled [`docker-compose.yaml`](docker-compose.yaml) exposes two MinerU
+OpenAI-compatible provider profiles on an NVIDIA GPU. Without an explicit profile,
+Compose activates both services; both bind host port `30000`, so choose exactly one
+profile before starting:
 
 | Profile | Image | Purpose |
 | --- | --- | --- |
-| `openai-server` | `alexsuntop/mineru:3.4.2` | vLLM-backed MinerU server (default, port `30000`). |
+| `openai-server` | `alexsuntop/mineru:3.4.2` | vLLM-backed MinerU provider image, port `30000`. |
 | `llama-server` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | Generic OpenAI-compatible provider example, port `30000`; model compatibility is not validated. |
 
 Start the vLLM server:
@@ -368,10 +372,12 @@ expose `http://localhost:30000` (override the port with
 `MINERU_PORT_OVERRIDE_VLLM` / `MINERU_PORT_OVERRIDE_LLAMA`). Set
 `MINERU_PROVIDER_BIND_HOST=<bind-host>` explicitly to use another bind address;
 broader exposure requires a private network or an authenticated reverse proxy.
-They map the same host port, so start only one at a time.
+They map the same host port, so start exactly one at a time. The `3.4.2` provider
+image is a separate provider-image baseline; the compatibility document's MinerU
+`3.4.5` is the VLM protocol baseline, not this image tag.
 
-`COMPOSE_PROFILES` can also activate a profile implicitly, e.g.
-`COMPOSE_PROFILES=llama-server docker compose up -d`.
+Use `--profile openai-server` or `--profile llama-server` explicitly; do not run
+`docker compose up -d` without choosing one.
 
 The GHCR image above is the published Rust API image; it is not a bundled
 Python/model runtime. The Compose profiles are separate provider examples and

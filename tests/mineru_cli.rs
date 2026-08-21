@@ -767,11 +767,11 @@ fn input(dir: &tempfile::TempDir) -> std::path::PathBuf {
     path
 }
 
-fn multipage_pdf(path: &std::path::Path) {
+fn multipage_pdf(path: &std::path::Path, page_count: usize) {
     use lopdf::{Document, Object, Stream, dictionary};
     let mut pdf = Document::with_version("1.5");
     let pages = pdf.new_object_id();
-    let page_ids: Vec<_> = (0..2).map(|_| pdf.new_object_id()).collect();
+    let page_ids: Vec<_> = (0..page_count).map(|_| pdf.new_object_id()).collect();
     for id in &page_ids {
         let contents = pdf.add_object(Stream::new(
             dictionary! {},
@@ -781,7 +781,7 @@ fn multipage_pdf(path: &std::path::Path) {
             "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()], "Contents" => contents,
         }));
     }
-    pdf.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(), "Count" => 2 }));
+    pdf.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(), "Count" => page_count as i64 }));
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
     pdf.trailer.set("Root", catalog);
     pdf.compress();
@@ -1141,7 +1141,7 @@ async fn one_level_mixed_inputs_publish_exact_origins_and_selected_pdf_source_pa
     let input = tempfile::tempdir().unwrap();
     let output = tempfile::tempdir().unwrap();
     let pdf = input.path().join("PDF.PDF");
-    multipage_pdf(&pdf);
+    multipage_pdf(&pdf, 2);
     let png = input.path().join("image.PnG");
     std::fs::write(&png, encoded_image(ImageFormat::Png)).unwrap();
     let jpg = input.path().join("photo.JpG");
@@ -1959,6 +1959,7 @@ async fn direct_mode_hybrid_backend_uses_the_official_boundary() {
 async fn direct_hybrid_medium_propagates_options_without_a_url() {
     let dir = tempfile::tempdir().unwrap();
     let pdf = input(&dir);
+    multipage_pdf(&pdf, 5);
     let output = dir.path().join("out");
     let python = fake_official_python(dir.path());
     let mut cmd = mineru();
@@ -1995,6 +1996,13 @@ async fn direct_hybrid_medium_propagates_options_without_a_url() {
     assert_eq!(
         std::fs::read_to_string(output.join("document/hybrid-v4/markdown.md")).unwrap(),
         "effort=medium page=1~5\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("official-worker-pids"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
     );
 }
 
@@ -2091,7 +2099,7 @@ async fn direct_hybrid_persistent_mode_reuses_one_worker_for_two_documents() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn direct_hybrid_default_mode_keeps_one_shot_worker_per_document() {
+async fn direct_hybrid_automatic_mode_reuses_one_worker_for_two_documents() {
     let dir = tempfile::tempdir().unwrap();
     let inputs = dir.path().join("inputs");
     std::fs::create_dir(&inputs).unwrap();
@@ -2103,7 +2111,7 @@ async fn direct_hybrid_default_mode_keeps_one_shot_worker_per_document() {
         .unwrap();
     }
     let output = dir.path().join("out");
-    let python = fake_official_python(dir.path());
+    let (python, record) = fake_persistent_python(dir.path());
     let mut cmd = mineru();
     cmd.args(["-p"])
         .arg(&inputs)
@@ -2116,12 +2124,14 @@ async fn direct_hybrid_default_mode_keeps_one_shot_worker_per_document() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let entries: Vec<Value> = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+    assert_eq!(entries.len(), 2);
     assert_eq!(
-        std::fs::read_to_string(dir.path().join("official-worker-pids"))
+        std::fs::read_to_string(dir.path().join("persistent-pids"))
             .unwrap()
             .lines()
             .count(),
-        2
+        1
     );
     for stem in ["first", "second"] {
         assert!(
@@ -2130,6 +2140,93 @@ async fn direct_hybrid_default_mode_keeps_one_shot_worker_per_document() {
                 .is_file()
         );
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn direct_hybrid_automatic_mode_counts_only_runnable_documents() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inputs = dir.path().join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    let runnable = inputs.join("runnable.pdf");
+    std::fs::copy("tests/fixtures/pdf/minimal.pdf", &runnable).unwrap();
+    let doomed = inputs.join("doomed.pdf");
+    std::fs::copy(&runnable, &doomed).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&doomed)
+        .unwrap()
+        .write_all(b"x")
+        .unwrap();
+    let limit = std::fs::metadata(&runnable).unwrap().len().to_string();
+    let output = dir.path().join("out");
+    let python = fake_official_python(dir.path());
+    let mut cmd = mineru();
+    cmd.args([
+        "-p",
+        inputs.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ])
+    .args(["--backend", "hybrid-http-client", "--official-python"])
+    .arg(python)
+    .args(["--max-input-bytes", limit.as_str()]);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("max-input-bytes"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("official-worker-pids"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert!(output.join("runnable/hybrid-v4/markdown.md").is_file());
+    assert!(!output.join("doomed").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn direct_hybrid_automatic_mode_preflights_semantic_rejections() {
+    let dir = tempfile::tempdir().unwrap();
+    let inputs = dir.path().join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    multipage_pdf(&inputs.join("valid.pdf"), 2);
+    multipage_pdf(&inputs.join("rejected.pdf"), 1);
+    let output = dir.path().join("out");
+    let python = fake_official_python(dir.path());
+    let mut cmd = mineru();
+    cmd.args([
+        "-p",
+        inputs.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ])
+    .args([
+        "--backend",
+        "hybrid-http-client",
+        "--start",
+        "0",
+        "--end",
+        "1",
+        "--official-python",
+    ])
+    .arg(python);
+    let result = command(cmd).await;
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("outside PDF"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("official-worker-pids"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert!(!dir.path().join("persistent-pids").exists());
+    assert!(output.join("valid/hybrid-v4/markdown.md").is_file());
+    assert!(!output.join("rejected").exists());
 }
 
 #[cfg(unix)]
@@ -2301,6 +2398,7 @@ async fn official_shim_propagates_exact_kwargs_and_environment() {
     for effort in ["high", "xhigh"] {
         let dir = tempfile::tempdir().unwrap();
         let pdf = input(&dir);
+        multipage_pdf(&pdf, 3);
         let output = dir.path().join("out");
         let python = fake_official_shim_python(dir.path(), "4.0.0a6", false);
         let model_dir = dir.path().join("models");
@@ -2833,9 +2931,12 @@ async fn official_worker_reaps_successful_child_process_group() {
         .args(["-o", output.to_str().unwrap()])
         .args(["--backend", "hybrid-http-client", "--official-python"])
         .arg(python);
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), command(cmd))
+    // This covers process startup and input preflight as well as worker cleanup;
+    // keep it below the fake descendant's 30-second lifetime while allowing
+    // concurrent test suites enough scheduler headroom.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), command(cmd))
         .await
-        .expect("successful worker leaked a child holding the protocol pipes");
+        .expect("successful worker command timed out during process-group cleanup");
     assert!(
         result.status.success(),
         "{}",
@@ -3643,7 +3744,7 @@ async fn chinese_basename_stem_reaches_final_output_paths_and_artifacts() {
 async fn selected_page_and_disabled_semantics_only_request_layout() {
     let dir = tempfile::tempdir().unwrap();
     let pdf = dir.path().join("document.pdf");
-    multipage_pdf(&pdf);
+    multipage_pdf(&pdf, 2);
     let (url, seen) = mock_with(true, None).await;
     let mut cmd = mineru();
     cmd.args(["-p"])

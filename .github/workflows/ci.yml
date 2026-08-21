@@ -122,55 +122,12 @@ jobs:
               "mineru-office-convert",
           }
           PY
-      - name: List and inspect package files
-        run: |
-          cargo +1.89.0 package -p mineru --list --locked > "$RUNNER_TEMP/mineru-package-files.txt"
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          files = set(Path(os.environ["RUNNER_TEMP"], "mineru-package-files.txt").read_text().splitlines())
-          required = {
-              "Cargo.lock",
-              "Cargo.toml",
-              "Cargo.toml.orig",
-              "LICENSE-APACHE",
-              "LICENSE-MIT",
-              "README.md",
-              "README.zh-CN.md",
-              "docs/compatibility.md",
-              "docs/usage.md",
-              "docs/usage.en.md",
-              "python/mineru_official_worker.py",
-              "python/mineru_official_worker_protocol.py",
-              "src/lib.rs",
-              "tests/fixtures/pdf/minimal.pdf",
-              "tests/fixtures/vlm/layout.txt",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_middle.json",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list.json",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list_v2.json",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5.md",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg",
-          }
-          assert required <= files, sorted(required - files)
-          assert any(path.startswith("src/") for path in files)
-          allowed = required | {".cargo_vcs_info.json"}
-          unexpected = {
-              path
-              for path in files
-              if path not in allowed
-              and not path.startswith("src/")
-          }
-          assert not unexpected, sorted(unexpected)
-          PY
       - name: Package root crate
         run: cargo +1.89.0 package -p mineru --locked
       - name: Inspect and test packaged crate
         run: |
           cargo +1.89.0 metadata --locked --format-version 1 --no-deps > "$RUNNER_TEMP/package-metadata.json"
-          PACKAGE_DIR="target/package/mineru-$(python3 - <<'PY'
+          PACKAGE_VERSION="$(python3 - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -181,45 +138,10 @@ jobs:
           print(packages[0]["version"])
           PY
           )"
-          export PACKAGE_DIR
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          package = Path(os.environ["PACKAGE_DIR"])
-          required = {
-              "Cargo.lock",
-              "Cargo.toml",
-              "Cargo.toml.orig",
-              "LICENSE-APACHE",
-              "LICENSE-MIT",
-              "README.md",
-              "README.zh-CN.md",
-              "docs/compatibility.md",
-              "docs/usage.md",
-              "docs/usage.en.md",
-              "src/lib.rs",
-              "tests/fixtures/pdf/minimal.pdf",
-              "tests/fixtures/vlm/layout.txt",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_middle.json",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list.json",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_content_list_v2.json",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5.md",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/cc9d646c918053bb628e661ed5772ce1ec4682952a90dc8e687eff8cb42f5df2.jpg",
-              "tests/fixtures/official/arxiv_2410.21169v5/vlm/images/c87758e60fb7ba943d6d429071e045b3ea6c5305534d4799a5797960ea34699e.jpg",
-          }
-          missing = sorted(path for path in required if not (package / path).is_file())
-          assert not missing, missing
-          fixtures = {
-              path.relative_to(package).as_posix()
-              for path in (package / "tests/fixtures").rglob("*")
-              if path.is_file()
-          }
-          assert fixtures == {path for path in required if path.startswith("tests/fixtures/")}
-          assert Path(f"{package}.crate").is_file()
-          PY
-          cargo +1.89.0 test --manifest-path "$PACKAGE_DIR/Cargo.toml" --lib --locked -- --test-threads=1
+          python3 .github/scripts/verify_release.py crate --directory target/package \
+            --version "$PACKAGE_VERSION" --extract "$RUNNER_TEMP/crate-unpacked"
+          cargo +1.89.0 test --locked -p mineru --all-targets --features office \
+            --manifest-path "$RUNNER_TEMP/crate-unpacked/mineru-$PACKAGE_VERSION/Cargo.toml"
       - name: Dry-run crates.io publication
         run: cargo +1.89.0 publish -p mineru --dry-run --locked
 
@@ -234,11 +156,17 @@ jobs:
           persist-credentials: false
       - name: Install Rust 1.89.0
         run: rustup toolchain install 1.89.0 --profile minimal && rustup target add --toolchain 1.89.0 aarch64-pc-windows-msvc
+      - name: Set up Python for official worker lifecycle tests
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.14.6
       - name: Test Windows path safety
         run: |
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc command::direct::tests -- --test-threads=4
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_output::tests -- --test-threads=4
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=4
+      - name: Test Windows official worker Job Object lifecycle
+        run: cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_worker::process::windows_tests -- --test-threads=1
       - name: Test Windows Office helper containment and conversion
         run: |
           cargo +1.89.0 test --locked -p mineru --features office,legacy-office --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=1

@@ -24,7 +24,11 @@ use std::{
     time::Instant,
 };
 #[cfg(feature = "legacy-office")]
-use std::{io::Write, time::Duration};
+use std::{
+    io::Write,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 pub(super) type WarningCallback = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
 type DirectError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -84,7 +88,8 @@ pub(super) struct DirectOptions {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub official_hybrid: bool,
-    pub official_worker_mode: super::OfficialWorkerMode,
+    /// An explicit CLI/environment override; `None` selects after batch preflight.
+    pub official_worker_mode: Option<super::OfficialWorkerMode>,
     pub effort: String,
     pub model_stack: String,
     pub model_stack_explicit: bool,
@@ -535,8 +540,91 @@ fn native_output_bytes(
         .min(usize::try_from(document_limits.max_output_bytes).unwrap_or(usize::MAX))
 }
 
-/// Opens or creates `{root}/{stem}/office` with no-follow directory walks and writes
-/// `{stem}.md` with the symlink-free open the snapshot path uses for reads.
+#[cfg(feature = "legacy-office")]
+static TEXT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "legacy-office")]
+fn create_text_temp_file(current: &Dir) -> Result<(OsString, cap_std::fs::File), DirectError> {
+    for _ in 0..32 {
+        let name = OsString::from(format!(
+            ".mineru-text-{}-{}",
+            std::process::id(),
+            TEXT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::{Foundation::GENERIC_WRITE, Storage::FileSystem::DELETE};
+            options.access_mode(GENERIC_WRITE | DELETE);
+        }
+        match current.open_with(&name, &options) {
+            Ok(file) => return Ok((name, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(err("output file creation failed")),
+        }
+    }
+    Err(err("output file creation failed"))
+}
+
+#[cfg(all(feature = "legacy-office", windows))]
+fn replace_text_temp_file(
+    current: &Dir,
+    file: &cap_std::fs::File,
+    target: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::{
+        mem::size_of,
+        os::windows::{ffi::OsStrExt, io::AsRawHandle},
+        ptr::copy_nonoverlapping,
+    };
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle},
+    };
+
+    let target: Vec<u16> = target.encode_wide().collect();
+    let name_bytes = target
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "target too long"))?;
+    let name_offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let size = name_offset
+        .checked_add(name_bytes)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "target too long"))?;
+    let size_u32 = u32::try_from(size)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "target too long"))?;
+    let mut info = vec![0u64; size.div_ceil(size_of::<u64>())];
+
+    // SAFETY: `info` is aligned for FILE_RENAME_INFO and large enough for its variable name.
+    let info = info.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = true;
+        (*info).RootDirectory = current.as_raw_handle() as HANDLE;
+        (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "target too long")
+        })?;
+        copy_nonoverlapping(target.as_ptr(), (*info).FileName.as_mut_ptr(), target.len());
+        if SetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            FileRenameInfo,
+            info.cast(),
+            size_u32,
+        ) == 0
+        {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Opens or creates `{root}/{stem}/office` with no-follow directory walks and atomically replaces
+/// `{stem}.md` with the symlink-free descriptor-relative publication used for local text output.
 #[cfg(feature = "legacy-office")]
 fn write_text_profile(
     root: &Path,
@@ -564,19 +652,39 @@ fn write_text_profile(
             Err(e) => return Err(e.into()),
         }
     }
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .follow(FollowSymlinks::No);
-    let mut file = current
-        .open_with(format!("{stem}.md"), &options)
-        .map_err(|_| err("output file creation failed"))?;
-    file.write_all(text)
-        .map_err(|_| err("output write failed"))?;
-    file.flush().map_err(|_| err("output write failed"))?;
-    Ok(())
+    let target = OsString::from(format!("{stem}.md"));
+    match current.symlink_metadata(&target) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            return Err(err("output file creation failed"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(err("output file creation failed")),
+    }
+
+    let (temporary, mut file) = create_text_temp_file(&current)?;
+    let write_result = file
+        .write_all(text)
+        .and_then(|_| file.flush())
+        .map_err(|_| err("output write failed"));
+    #[cfg(windows)]
+    let result = write_result.and_then(|()| {
+        replace_text_temp_file(&current, &file, &target)
+            .map_err(|_| err("output file replacement failed"))
+    });
+    #[cfg(windows)]
+    drop(file);
+    #[cfg(not(windows))]
+    let result = write_result.and_then(|()| {
+        drop(file);
+        current
+            .rename(&temporary, &current, &target)
+            .map_err(|_| err("output file replacement failed"))
+    });
+    if result.is_err() {
+        let _ = current.remove_file(&temporary);
+    }
+    result
 }
 
 #[cfg(feature = "legacy-office")]
@@ -711,11 +819,24 @@ fn official_image_or_pdf(kind: DocumentKind) -> bool {
     )
 }
 
+fn validate_official_hybrid_input(
+    kind: DocumentKind,
+    route: &OfficialPdfOptions,
+    bytes: &[u8],
+) -> Result<(), DirectError> {
+    if kind == DocumentKind::Pdf {
+        validate_official_page_selection(kind, route, bytes)
+    } else {
+        crate::input_prepare::preflight_image(bytes, kind, route).map_err(err)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_official_hybrid_documents(
     options: &DirectOptions,
     route: &OfficialPdfOptions,
     config: OfficialHybridConfig,
+    worker_mode: Option<super::OfficialWorkerMode>,
     candidates: &[(usize, PathBuf, DocumentKind, String)],
     doomed: &HashSet<PathBuf>,
     output: &Path,
@@ -723,8 +844,48 @@ async fn run_official_hybrid_documents(
     events: &Option<ProgressCallback>,
     failures: &mut Vec<(String, String)>,
 ) -> Result<(), DirectError> {
-    let persistent_worker = if options.official_worker_mode == super::OfficialWorkerMode::Persistent
-    {
+    let mut doomed = doomed.clone();
+    for (candidate_id, path, kind, stem) in candidates {
+        if doomed.contains(path) {
+            continue;
+        }
+        let preflight = snapshot(
+            path,
+            route.max_pdf_bytes,
+            options.document_limits.max_input_bytes,
+        )
+        .and_then(|snapshot| validate_official_hybrid_input(*kind, route, &snapshot.bytes));
+        if let Err(error) = preflight {
+            let message = error.to_string();
+            let task_events = document_events(command_events, events, *candidate_id);
+            emit_event(
+                &task_events,
+                ProgressEvent::DocumentFailed {
+                    document: stem.clone(),
+                    message: message.clone(),
+                },
+            );
+            failures.push((stem.clone(), message));
+            doomed.insert(path.clone());
+        }
+    }
+    if doomed.len() == candidates.len() {
+        return Err(err(format_failures(failures)));
+    }
+
+    // Automatic selection must use the fully validated runnable set, not just size/feature gates.
+    let runnable = candidates
+        .iter()
+        .filter(|(_, path, _, _)| !doomed.contains(path))
+        .count();
+    let worker_mode = worker_mode.unwrap_or_else(|| {
+        if runnable == 1 {
+            super::OfficialWorkerMode::PerDocument
+        } else {
+            super::OfficialWorkerMode::Persistent
+        }
+    });
+    let persistent_worker = if worker_mode == super::OfficialWorkerMode::Persistent {
         let session = OfficialSessionConfig::new(
             config.model_stack.clone(),
             config.model_dir.clone(),
@@ -758,7 +919,7 @@ async fn run_official_hybrid_documents(
                 options.document_limits.max_input_bytes,
             )?
             .bytes;
-            validate_official_page_selection(*kind, route, &bytes)?;
+            validate_official_hybrid_input(*kind, route, &bytes)?;
             emit_event(
                 &task_events,
                 ProgressEvent::DocumentPrepared {
@@ -839,17 +1000,38 @@ fn validate_official_page_selection(
     if kind != DocumentKind::Pdf {
         return Ok(());
     }
-    let selected = if let Some(end) = route.end_page {
-        end.checked_sub(route.start_page)
-            .and_then(|count| count.checked_add(1))
-            .ok_or_else(|| err("invalid official page range"))?
-    } else {
-        let document = lopdf::Document::load_mem(bytes).map_err(|_| err("invalid official PDF"))?;
-        if document.is_encrypted() || document.was_encrypted() {
-            return Err(err("encrypted PDFs are unsupported"));
+    let document = lopdf::Document::load_mem(bytes).map_err(|_| err("invalid official PDF"))?;
+    if document.is_encrypted() || document.was_encrypted() {
+        return Err(err("encrypted PDFs are unsupported"));
+    }
+    let pages = document.get_pages().len();
+    if pages == 0 {
+        return Err(err("official PDF has no pages"));
+    }
+    let selected = match route.end_page {
+        Some(end) => {
+            if route.start_page > end {
+                return Err(err("invalid official page range"));
+            }
+            if route.start_page >= pages || end >= pages {
+                return Err(err(format!(
+                    "official page range {}~{} is outside PDF with {pages} page(s)",
+                    route.start_page, end
+                )));
+            }
+            end.checked_sub(route.start_page)
+                .and_then(|count| count.checked_add(1))
+                .ok_or_else(|| err("invalid official page range"))?
         }
-        let pages = document.get_pages().len();
-        pages.saturating_sub(route.start_page)
+        None => {
+            if route.start_page >= pages {
+                return Err(err(format!(
+                    "official page start {} is outside PDF with {pages} page(s)",
+                    route.start_page
+                )));
+            }
+            pages - route.start_page
+        }
     };
     if selected > route.max_pages {
         return Err(Box::new(crate::VlmError::LimitExceeded {
@@ -1290,6 +1472,7 @@ async fn run_inner(
             options,
             &route,
             official_config.expect("official Hybrid configuration"),
+            options.official_worker_mode,
             &candidates,
             &doomed,
             &output,
@@ -1590,7 +1773,7 @@ mod tests {
             model: None,
             api_key: None,
             official_hybrid: false,
-            official_worker_mode: super::super::OfficialWorkerMode::PerDocument,
+            official_worker_mode: None,
             effort: "medium".into(),
             model_stack: "auto".into(),
             model_stack_explicit: false,
@@ -1604,6 +1787,170 @@ mod tests {
             no_image_analysis: None,
             document_limits: crate::DocumentLimitPolicy::defaults(),
         }
+    }
+
+    fn pdf_with_pages(count: usize) -> Vec<u8> {
+        use lopdf::{Document, Object, dictionary};
+
+        let mut document = Document::with_version("1.5");
+        let pages = document.new_object_id();
+        let page_ids: Vec<_> = (0..count)
+            .map(|_| {
+                let page = document.new_object_id();
+                document.objects.insert(
+                    page,
+                    Object::Dictionary(dictionary! {
+                        "Type" => "Page",
+                        "Parent" => pages,
+                        "MediaBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+                    }),
+                );
+                page
+            })
+            .collect();
+        document.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+                "Count" => count as i64,
+            }),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn official_pdf_page_validation_uses_zero_based_inclusive_bounds() {
+        let bytes = pdf_with_pages(3);
+        let mut route = OfficialPdfOptions::default();
+
+        route.start_page = 0;
+        route.end_page = Some(0);
+        assert!(validate_official_page_selection(DocumentKind::Pdf, &route, &bytes).is_ok());
+        route.start_page = 2;
+        route.end_page = Some(2);
+        assert!(validate_official_page_selection(DocumentKind::Pdf, &route, &bytes).is_ok());
+
+        route.start_page = 0;
+        route.end_page = Some(3);
+        assert!(validate_official_page_selection(DocumentKind::Pdf, &route, &bytes).is_err());
+        route.start_page = 3;
+        route.end_page = None;
+        assert!(validate_official_page_selection(DocumentKind::Pdf, &route, &bytes).is_err());
+
+        route.start_page = 2;
+        route.end_page = Some(1);
+        assert!(validate_official_page_selection(DocumentKind::Pdf, &route, &bytes).is_err());
+
+        route.start_page = 0;
+        route.end_page = Some(2);
+        route.max_pages = 2;
+        let error = validate_official_page_selection(DocumentKind::Pdf, &route, &bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("limit exceeded for pages"), "{error}");
+
+        let empty = pdf_with_pages(0);
+        route.max_pages = 3;
+        assert!(validate_official_page_selection(DocumentKind::Pdf, &route, &empty).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn official_hybrid_page_rejection_does_not_spawn_python() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let pdf = temp.path().join("one.pdf");
+        std::fs::write(&pdf, pdf_with_pages(1)).unwrap();
+        let marker = temp.path().join("spawned");
+        let python = temp.path().join("worker.sh");
+        std::fs::write(
+            &python,
+            format!("#!/bin/sh\nprintf spawned > \"{}\"\n", marker.display()),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&python).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&python, permissions).unwrap();
+
+        let mut route = OfficialPdfOptions::default();
+        route.start_page = 1;
+        route.end_page = Some(1);
+        let candidates = vec![(1, pdf, DocumentKind::Pdf, "one".into())];
+        let mut failures = Vec::new();
+        let error = run_official_hybrid_documents(
+            &test_options(),
+            &route,
+            OfficialHybridConfig {
+                python: Some(python),
+                model_stack: "auto".into(),
+                model_dir: None,
+                config: None,
+                server_url: None,
+                api_key: None,
+                model_name: None,
+            },
+            Some(super::super::OfficialWorkerMode::PerDocument),
+            &candidates,
+            &HashSet::new(),
+            temp.path(),
+            &None,
+            &None,
+            &mut failures,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("outside PDF"), "{error}");
+        assert_eq!(failures.len(), 1);
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn official_hybrid_truncated_image_fails_before_worker_creation() {
+        use std::io::Cursor;
+
+        let temp = tempfile::tempdir().unwrap();
+        let image = temp.path().join("truncated.png");
+        let mut bytes = Vec::new();
+        image::DynamicImage::new_rgb8(2, 3)
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes.truncate(bytes.len() / 2);
+        std::fs::write(&image, bytes).unwrap();
+
+        let candidates = vec![(1, image, DocumentKind::Png, "truncated".into())];
+        let mut failures = Vec::new();
+        let error = run_official_hybrid_documents(
+            &test_options(),
+            &OfficialPdfOptions::default(),
+            OfficialHybridConfig {
+                python: Some("/definitely/missing/python".into()),
+                model_stack: "auto".into(),
+                model_dir: None,
+                config: None,
+                server_url: None,
+                api_key: None,
+                model_name: None,
+            },
+            Some(super::super::OfficialWorkerMode::PerDocument),
+            &candidates,
+            &HashSet::new(),
+            temp.path(),
+            &None,
+            &None,
+            &mut failures,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "1 document(s) failed: truncated: invalid image");
+        assert_eq!(failures.len(), 1);
     }
 
     #[test]
@@ -1679,6 +2026,7 @@ mod tests {
                 api_key: None,
                 model_name: None,
             },
+            Some(super::super::OfficialWorkerMode::PerDocument),
             &candidates,
             &HashSet::new(),
             temp.path(),
@@ -1997,6 +2345,67 @@ mod tests {
         assert!(output_chain(&nested, "a", Some(&input_dir), "vlm").is_err());
     }
 
+    #[cfg(feature = "legacy-office")]
+    #[test]
+    fn local_text_profile_replaces_markdown_without_leaving_temps() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = absolute(temp.path()).unwrap();
+        write_text_profile(&root, "doc", "office", b"old").unwrap();
+        write_text_profile(&root, "doc", "office", b"new").unwrap();
+        assert_eq!(
+            std::fs::read(root.join("doc/office/doc.md")).unwrap(),
+            b"new"
+        );
+        assert!(
+            !std::fs::read_dir(root.join("doc/office"))
+                .unwrap()
+                .map(Result::unwrap)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".mineru-text-"))
+        );
+    }
+
+    #[cfg(all(feature = "legacy-office", windows))]
+    #[test]
+    fn windows_text_profile_replaces_an_existing_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = absolute(temp.path()).unwrap();
+        write_text_profile(&root, "doc", "office", b"old").unwrap();
+        write_text_profile(&root, "doc", "office", b"new").unwrap();
+        assert_eq!(
+            std::fs::read(root.join("doc/office/doc.md")).unwrap(),
+            b"new"
+        );
+    }
+
+    #[cfg(all(feature = "legacy-office", unix))]
+    #[test]
+    fn local_text_write_failure_preserves_previous_markdown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = absolute(temp.path()).unwrap();
+        write_text_profile(&root, "doc", "office", b"old").unwrap();
+        let profile = root.join("doc/office");
+        let mut permissions = std::fs::metadata(&profile).unwrap().permissions();
+        permissions.set_mode(0o500);
+        std::fs::set_permissions(&profile, permissions).unwrap();
+        let result = write_text_profile(&root, "doc", "office", b"new");
+        let mut restore = std::fs::metadata(&profile).unwrap().permissions();
+        restore.set_mode(0o700);
+        std::fs::set_permissions(&profile, restore).unwrap();
+
+        if result.is_err() {
+            assert_eq!(std::fs::read(profile.join("doc.md")).unwrap(), b"old");
+        } else {
+            // Privileged test runners may bypass the directory permission used to force the
+            // temporary-file write failure; the successful atomic path is covered above.
+            assert_eq!(std::fs::read(profile.join("doc.md")).unwrap(), b"new");
+        }
+    }
+
     #[test]
     fn output_chain_rejects_filesystem_anchor_input_before_traversal() {
         let temp = tempfile::tempdir().unwrap();
@@ -2153,7 +2562,7 @@ mod tests {
                 model: Some("mock".into()),
                 api_key: None,
                 official_hybrid: false,
-                official_worker_mode: super::super::OfficialWorkerMode::PerDocument,
+                official_worker_mode: None,
                 effort: "medium".into(),
                 model_stack: "auto".into(),
                 model_stack_explicit: false,
@@ -2331,7 +2740,7 @@ mod tests {
                 model: Some("mock".into()),
                 api_key: None,
                 official_hybrid: false,
-                official_worker_mode: super::super::OfficialWorkerMode::PerDocument,
+                official_worker_mode: None,
                 effort: "medium".into(),
                 model_stack: "auto".into(),
                 model_stack_explicit: false,

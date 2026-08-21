@@ -69,7 +69,7 @@ export MINERU_VL_MODEL_NAME="<model-id>"
 
 ## Canonical `mineru` command (PDF / images / Office)
 
-`mineru` is the canonical product binary, supporting PDF, image, and Office input and an optional `--api-url` remote API server mode. `--backend=local` is a project-private AnyDoc native-Markdown lane for supported legacy formats and conservative clean text PDFs, isolated in the bundled Rust `mineru-office-convert` helper; it is not a local ML model, `llama-server`, or the official `hybrid-engine`. The helper invokes no Python, Microsoft Office/LibreOffice, model, or network. Direct `hybrid-http-client` now uses a separate per-document Python boundary for official MinerU 4.0.0a6; it never enters the 3.4.5 VLM or Office routes.
+`mineru` is the canonical product binary, supporting PDF, image, and Office input and an optional `--api-url` remote API server mode. `--backend=local` is a project-private AnyDoc native-Markdown lane for supported legacy formats and conservative clean text PDFs, isolated in the bundled Rust `mineru-office-convert` helper; it is not a local ML model, `llama-server`, or the official `hybrid-engine`. The helper invokes no Python, Microsoft Office/LibreOffice, model, or network. Direct `hybrid-http-client` now uses a separate Python worker boundary for official MinerU 4.0.0a6; it never enters the 3.4.5 VLM or Office routes.
 
 OOXML conversion requires the `mineru-office-convert` helper. Local legacy and native-PDF extraction also uses this bundled Rust helper; those routes invoke no Python, Microsoft Office/LibreOffice, model, or network. Capabilities depend on two optional features:
 
@@ -104,20 +104,29 @@ Without `--api-url`, `mineru` calls the external VLM service directly. The servi
 
 Direct `-b hybrid-http-client` requires an installed Python environment containing
 exactly `mineru==4.0.0a6`. The Rust binary embeds its narrow adapter shim; it does
-not bundle Python, MinerU, or model assets. The default `per-document` mode launches
-one fresh subprocess per document, with parent-owned timeout, cancellation, pipe limits,
-and descendant cleanup. Accepted inputs are PDF and official image kinds only; OOXML and
+not bundle Python, MinerU, or model assets. When no worker mode is specified, selection
+is automatic after input preflight: one runnable document uses `per-document`, while
+multiple runnable documents use `persistent`. The `per-document` mode launches one fresh
+subprocess per document, with parent-owned timeout, cancellation, pipe limits, and
+descendant cleanup. Accepted inputs are PDF and official image kinds only; OOXML and
 legacy Office are rejected before the worker starts.
 
-You may explicitly select `--official-worker-mode persistent`, or set
-`MINERU_OFFICIAL_WORKER_MODE=persistent`, to reuse one worker and its loaded model within
-one direct CLI run. This performance mode still admits one active request only: documents
+You may explicitly select `--official-worker-mode per-document` or
+`--official-worker-mode persistent`, or set `MINERU_OFFICIAL_WORKER_MODE` to either value.
+The persistent setting reuses one worker and its loaded model within one direct CLI run.
+This performance mode still admits one active request only: documents
 remain sequential and use independent private snapshots and bundles. Startup and
 handshake happen once; cancellation or a crash makes the next document create a new
 session. A committed request is never automatically retried, and this mode provides no
-hard RSS/GPU isolation. The default remains `per-document`; an explicit CLI value wins
-over the environment, and the environment setting applies only to direct
-`hybrid-http-client`.
+hard RSS/GPU isolation. An explicit CLI value wins over the environment; with neither
+override, the automatic document-count selection applies. The environment setting
+applies only to direct `hybrid-http-client`.
+
+On Windows, worker assignment to a `KILL_ON_JOB_CLOSE` Job Object is fail-closed,
+but Tokio spawns first and `WindowsJob::attach` runs afterward. A very fast
+descendant created before assignment can therefore escape the job; cleanup is
+best effort for that narrow race. The official worker has no hard RSS or GPU
+quota.
 
 `medium` keeps the official `hybrid-http-client` backend and is local-only, so it
 does not require a VLM URL. `high` and `xhigh` use the same official
@@ -135,9 +144,9 @@ optional `model_output.json`, and `images/`; they are never passed through the
 `--client-side-output-generation`, instead of silently ignoring them. The
 official parser fields and project-owned input/output caps remain available.
 
-The project-owned adapter envelope is `mineru-rs-official-worker/1` in the default mode,
-or internal persistent `mineru-rs-official-worker/2`; neither is an official MinerU
-stdin/stdout protocol.
+The project-owned adapter envelope is `mineru-rs-official-worker/1` in `per-document`
+mode, or internal persistent `mineru-rs-official-worker/2`; neither is an official
+MinerU stdin/stdout protocol.
 Configure the interpreter and official paths only with the fields below. Supplied
 executable, model, and config paths must be absolute.
 
@@ -203,7 +212,7 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.0.0a6 worker; API Hybrid remains unsupported. |
 | `--effort <medium\|high\|xhigh>` | `medium` | Official direct Hybrid effort. `medium` is local-only; `high`/`xhigh` require an explicit HTTP(S) VLM URL. Other direct backends accept only `medium`/`high`. |
 | `--model-stack <auto\|light\|full>` | `auto` | Official direct Hybrid model stack. An explicitly supplied value, including `auto`, overrides `MINERU_MODEL_STACK`; when omitted, the environment value is used. |
-| `--official-worker-mode <per-document\|persistent>` | `per-document` | Official Hybrid worker lifecycle. `persistent` is an explicit single-worker, single-active-request performance mode and overrides `MINERU_OFFICIAL_WORKER_MODE`. |
+| `--official-worker-mode <per-document\|persistent>` | automatic (by runnable document count) | Official Hybrid worker lifecycle. One runnable document uses `per-document`; multiple runnable documents use `persistent`. An explicit value overrides `MINERU_OFFICIAL_WORKER_MODE`. |
 | `--official-python <absolute-path>` | Python `python3`/`python` | Official direct Hybrid interpreter. Overrides `MINERU_OFFICIAL_PYTHON`; the executable is not bundled. |
 | `--official-model-dir <absolute-path>` | None | Official direct Hybrid model root; overrides `MINERU_MODEL_BASE_DIR`. |
 | `--official-config <absolute-path>` | None | Official direct Hybrid config; overrides `MINERU_CONFIG`. |
@@ -385,7 +394,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | Page-pipeline concurrency cap (any positive value), bounding only the number of simultaneously running page pipelines; request-level concurrency is governed by `MINERU_VLM_HTTP_CONCURRENCY`. |
 | `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | Concurrency model, one of `classic\|two-phase`. `classic`: the long-standing single-encoder pipeline (default); `two-phase`: splits each page's semantic work into an encode-all → request-all two-stage flow, removing the CPU-encode serialization bottleneck in front of request dispatch (opt-in). |
 | `MINERU_MODEL_STACK` | `auto` | Official direct Hybrid stack: `auto\|light\|full`. |
-| `MINERU_OFFICIAL_WORKER_MODE` | `per-document` | Official Hybrid worker mode: `per-document\|persistent`. Applies only to direct Hybrid; an explicit CLI value wins. |
+| `MINERU_OFFICIAL_WORKER_MODE` | automatic (by runnable document count) | Official Hybrid worker mode: `per-document\|persistent`. Applies only to direct Hybrid; an explicit CLI value wins. |
 | `MINERU_OFFICIAL_PYTHON` | Python `python3`/`python` | Absolute official Hybrid interpreter path. |
 | `MINERU_MODEL_BASE_DIR` | None | Absolute official Hybrid model root. |
 | `MINERU_CONFIG` | None | Absolute official Hybrid config path. |

@@ -1,4 +1,5 @@
 use super::*;
+use std::path::{Path, PathBuf};
 
 fn bundle(root: &Path, middle: &str) -> PathBuf {
     let bundle = root.join("bundle");
@@ -11,6 +12,14 @@ fn bundle(root: &Path, middle: &str) -> PathBuf {
 }
 
 const VALID_MIDDLE: &str = r#"{"schema_version":"1.0","pages":[{}],"_backend":"hybrid"}"#;
+
+fn stage_validation(bundle: &Path, byte_cap: u64) -> Result<(), String> {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("stage")).unwrap();
+    let directory = crate::official_output::open_or_create_root(root.path()).unwrap();
+    let stage = crate::official_output::open_child_nofollow(directory, "stage").unwrap();
+    copy_bundle(bundle, &stage, byte_cap).and_then(|()| validate_staged(&stage, byte_cap))
+}
 
 #[test]
 fn accepts_v4_shape_and_replaces_atomically() {
@@ -52,19 +61,80 @@ fn rejects_schema_backend_empty_pages_unknown_and_cap() {
     ] {
         let temp = tempfile::tempdir().unwrap();
         let input = bundle(temp.path(), middle);
-        assert!(validate_bundle(&input, 1024).is_err(), "{middle}");
+        assert!(stage_validation(&input, 1024).is_err(), "{middle}");
     }
     let temp = tempfile::tempdir().unwrap();
     let input = bundle(temp.path(), VALID_MIDDLE);
     std::fs::write(input.join("unknown.txt"), b"x").unwrap();
-    assert!(validate_bundle(&input, 1024).is_err());
+    assert!(stage_validation(&input, 1024).is_err());
     let cap_root = tempfile::tempdir().unwrap();
     let cap_input = bundle(cap_root.path(), VALID_MIDDLE);
     let total: u64 = std::fs::read_dir(&cap_input)
         .unwrap()
         .map(|entry| entry.unwrap().metadata().unwrap().len())
         .sum();
-    assert!(validate_bundle(&cap_input, total - 1).is_err());
+    assert!(stage_validation(&cap_input, total - 1).is_err());
+}
+
+#[test]
+fn rejects_entry_depth_component_and_path_caps() {
+    let many_root = tempfile::tempdir().unwrap();
+    let many = bundle(many_root.path(), VALID_MIDDLE);
+    let images = many.join("images");
+    std::fs::create_dir(&images).unwrap();
+    for index in 0..(MAX_ENTRIES as usize - 4) {
+        std::fs::write(images.join(format!("empty-{index}")), []).unwrap();
+    }
+    assert!(validate_and_publish(&many, many_root.path(), "document", u64::MAX).is_err());
+
+    let deep_root = tempfile::tempdir().unwrap();
+    let deep = bundle(deep_root.path(), VALID_MIDDLE);
+    let mut current = deep.join("images");
+    std::fs::create_dir(&current).unwrap();
+    for index in 0..31 {
+        current = current.join(format!("d{index}"));
+        std::fs::create_dir(&current).unwrap();
+    }
+    std::fs::write(current.join("leaf.bin"), []).unwrap();
+    assert!(validate_and_publish(&deep, deep_root.path(), "document", u64::MAX).is_err());
+
+    let component = "x".repeat(usize::try_from(MAX_COMPONENT_BYTES).unwrap() + 1);
+    assert!(RelativePath::root().child(&component).is_err());
+    let component = "x".repeat(usize::try_from(MAX_COMPONENT_BYTES).unwrap());
+    let mut path = RelativePath::root();
+    for _ in 0..16 {
+        path = path.child(&component).unwrap();
+    }
+    assert!(path.child("leaf").is_err());
+
+    let mut budget = TreeState::default();
+    budget.name_bytes = MAX_NAME_BUDGET;
+    assert!(budget.admit(&RelativePath::root(), "x").is_err());
+}
+
+#[test]
+fn rejects_oversized_text_and_json_before_dom_parsing() {
+    for name in ["markdown.md", "content_list.json"] {
+        let temp = tempfile::tempdir().unwrap();
+        let input = bundle(temp.path(), VALID_MIDDLE);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(input.join(name))
+            .unwrap();
+        file.set_len(MAX_RESIDENT_BYTES.checked_add(1).unwrap())
+            .unwrap();
+        assert!(
+            validate_and_publish(
+                &input,
+                temp.path(),
+                "document",
+                MAX_RESIDENT_BYTES.checked_add(1024).unwrap()
+            )
+            .is_err(),
+            "{name}"
+        );
+        assert!(!temp.path().join("document/hybrid-v4").exists());
+    }
 }
 
 #[test]
@@ -106,10 +176,76 @@ fn validation_failure_preserves_existing_output() {
 }
 
 #[test]
+fn publication_failure_rolls_back_the_previous_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = bundle(temp.path(), VALID_MIDDLE);
+    validate_and_publish(&input, temp.path(), "document", 1024).unwrap();
+
+    let root = crate::official_output::open_or_create_root(temp.path()).unwrap();
+    let document = crate::official_output::open_child_nofollow(root, "document").unwrap();
+    let (transaction_name, transaction, stage) = create_transaction(&document).unwrap();
+    drop(stage);
+    transaction.remove_dir("stage").unwrap();
+    assert!(
+        publish_transaction_inner(&document, &transaction, "stage", BUNDLE_NAME, false).is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("document/hybrid-v4/markdown.md")).unwrap(),
+        "# document\n"
+    );
+    cleanup_transaction(&document, &transaction_name, transaction).unwrap();
+}
+
+#[test]
+fn rollback_failure_preserves_transaction_and_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = bundle(temp.path(), VALID_MIDDLE);
+    validate_and_publish(&input, temp.path(), "document", 1024).unwrap();
+
+    let root = crate::official_output::open_or_create_root(temp.path()).unwrap();
+    let document = crate::official_output::open_child_nofollow(root, "document").unwrap();
+    let (transaction_name, transaction, stage) = create_transaction(&document).unwrap();
+    drop(stage);
+    transaction.remove_dir("stage").unwrap();
+    let transaction_path = temp.path().join("document").join(&transaction_name);
+    let error = finish_transaction(
+        &document,
+        &transaction_name,
+        transaction,
+        &transaction_path,
+        true,
+    )
+    .unwrap_err();
+
+    assert!(error.contains("preserved"), "{error}");
+    assert!(
+        error.contains("restoring previous output failed"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(transaction_path.join("backup/markdown.md")).unwrap(),
+        "# document\n"
+    );
+    assert!(!transaction_path.join("stage").exists());
+    assert!(temp.path().join("document/hybrid-v4").is_file());
+    std::fs::remove_file(temp.path().join("document/hybrid-v4")).unwrap();
+    std::fs::remove_dir_all(transaction_path).unwrap();
+}
+
+#[test]
 fn rejects_unsafe_portable_names() {
     assert!(!portable_name("../escape"));
     assert!(!portable_name("name\\escape"));
+    assert!(!portable_name("bad:name"));
     assert!(!portable_name("CON"));
+}
+
+#[test]
+fn rejects_portable_case_collisions() {
+    let mut state = TreeState::default();
+    let root = RelativePath::root();
+    state.admit(&root, "asset.png").unwrap();
+    assert!(state.admit(&root, "ASSET.PNG").is_err());
 }
 
 #[test]
@@ -118,29 +254,20 @@ fn rejects_unsafe_image_entries() {
     let input = bundle(temp.path(), VALID_MIDDLE);
     std::fs::create_dir(input.join("images")).unwrap();
     std::fs::write(input.join("images/name\\escape"), b"x").unwrap();
-    assert!(validate_bundle(&input, 1024).is_err());
+    assert!(stage_validation(&input, 1024).is_err());
 }
 
-#[cfg(unix)]
 #[test]
-fn opened_bundle_handles_survive_a_symlink_swap() {
-    use std::os::unix::fs::symlink;
-
+fn staged_snapshot_survives_same_size_source_mutation() {
     let temp = tempfile::tempdir().unwrap();
     let input = bundle(temp.path(), VALID_MIDDLE);
-    let files = validate_bundle(&input, 1024).unwrap();
-    let markdown = input.join("markdown.md");
-    let original = input.join("markdown.original");
-    let outside = temp.path().join("outside");
-    std::fs::rename(&markdown, &original).unwrap();
-    std::fs::write(&outside, b"attacker content\n").unwrap();
-    symlink(&outside, &markdown).unwrap();
-
     let stage_root_path = temp.path().join("stage-root");
     let stage_root = crate::official_output::open_or_create_root(&stage_root_path).unwrap();
     stage_root.create_dir("stage").unwrap();
     let stage = crate::official_output::open_child_nofollow(stage_root, "stage").unwrap();
-    copy_bundle(files, &stage, 1024).unwrap();
+    copy_bundle(&input, &stage, 1024).unwrap();
+    std::fs::write(input.join("markdown.md"), b"# changed\n").unwrap();
+    validate_staged(&stage, 1024).unwrap();
     assert_eq!(
         std::fs::read_to_string(stage_root_path.join("stage/markdown.md")).unwrap(),
         "# document\n"

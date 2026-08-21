@@ -141,12 +141,30 @@ def _emit(response: dict[str, object], diagnostic: str = "") -> None:
     if diagnostic:
         diagnostic = diagnostic.replace("\x00", " ")
         response = {**response, "diagnostic": diagnostic}
-        sys.stderr.write(diagnostic + "\n")
+        sys.stderr.write(_bounded_text(diagnostic, DIAGNOSTIC_CAP - 1) + "\n")
     if response.get("protocol") == PERSISTENT_PROTOCOL:
         encoded = _persistent_response_bytes(response)
     else:
+        limit = PROTOCOL_CAP - 1
         encoded = json.dumps(response, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-        if len(encoded) > PROTOCOL_CAP:
+        if len(encoded) > limit and isinstance(response.get("diagnostic"), str):
+            full = cast(str, response["diagnostic"])
+            low, high, best = 0, len(full), None
+            while low <= high:
+                middle = (low + high) // 2
+                response["diagnostic"] = full[:middle]
+                candidate = json.dumps(response, ensure_ascii=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+                if len(candidate) <= limit:
+                    best, low = candidate, middle + 1
+                else:
+                    high = middle - 1
+            if best is None:
+                response.pop("diagnostic")
+            else:
+                encoded = best
+        if len(encoded) > limit:
             encoded = json.dumps(
                 {
                     key: response[key]
