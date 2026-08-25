@@ -7,6 +7,7 @@ import argparse
 import email.parser
 import gzip
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -105,7 +106,32 @@ BINARY_TARGETS = {
     "x86_64-pc-windows-msvc": ("windows", 0x8664),
     "aarch64-pc-windows-msvc": ("windows", 0xAA64),
 }
+LINUX_BINARY_TARGETS = tuple(target for target, (os_name, _) in BINARY_TARGETS.items() if os_name == "linux")
 BINARY_TIMESTAMP = 315532800  # 1980-01-01, valid for both gzip and ZIP.
+RELEASE_JOB_RE = re.compile(
+    r"^  (?P<name>[A-Za-z0-9_-]+):\n"
+    r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+RELEASE_MATRIX_RE = re.compile(
+    r"^      matrix:\n"
+    r"^        include:\n"
+    r"(?P<entries>(?:"
+    r"^          - runner: [^\n]+\n"
+    r"(?:^            [a-z][a-z0-9-]*: [^\n]+\n)+"
+    r")+)"
+    r"^    runs-on:",
+    re.MULTILINE,
+)
+RELEASE_MATRIX_ENTRY_RE = re.compile(
+    r"^          - runner: (?P<runner>[^\n]+)\n"
+    r"(?P<fields>(?:^            [a-z][a-z0-9-]*: [^\n]+\n)+)",
+    re.MULTILINE,
+)
+RELEASE_MATRIX_FIELD_RE = re.compile(
+    r"^            (?P<name>[a-z][a-z0-9-]*): (?P<value>[^\n]+)\n",
+    re.MULTILINE,
+)
 
 
 def fail(message: str) -> typing.NoReturn:
@@ -115,6 +141,155 @@ def fail(message: str) -> typing.NoReturn:
 def load_json(path: Path) -> dict:
     with path.open(encoding="utf-8") as f:
         return json.load(f)
+
+
+def parse_release_matrix(workflow: str, job: str) -> list[dict[str, str]]:
+    """Parse the deliberately narrow include-matrix shape used by release.yml."""
+    jobs = [match for match in RELEASE_JOB_RE.finditer(workflow) if match.group("name") == job]
+    if len(jobs) != 1:
+        fail(f"cannot parse release workflow job {job!r}: expected one job block, found {len(jobs)}")
+    body = jobs[0].group("body")
+    matrix_headers = re.findall(r"^      matrix:\n", body, re.MULTILINE)
+    matrices = list(RELEASE_MATRIX_RE.finditer(body))
+    if len(matrix_headers) != 1 or len(matrices) != 1:
+        fail(f"cannot parse {job!r} matrix: expected one include matrix in the supported shape")
+
+    entries_text = matrices[0].group("entries")
+    entries: list[dict[str, str]] = []
+    offset = 0
+    while offset < len(entries_text):
+        entry = RELEASE_MATRIX_ENTRY_RE.match(entries_text, offset)
+        if entry is None:
+            fail(f"cannot parse {job!r} matrix entry near {entries_text[offset : offset + 40]!r}")
+        fields = {"runner": entry.group("runner")}
+        field_text = entry.group("fields")
+        field_offset = 0
+        for field in RELEASE_MATRIX_FIELD_RE.finditer(field_text):
+            if field.start() != field_offset:
+                fail(f"cannot parse {job!r} matrix fields near {field_text[field_offset:]!r}")
+            name = field.group("name")
+            if name in fields:
+                fail(f"duplicate {name!r} field in {job!r} matrix entry")
+            fields[name] = field.group("value")
+            field_offset = field.end()
+        if field_offset != len(field_text):
+            fail(f"cannot parse {job!r} matrix fields near {field_text[field_offset:]!r}")
+        entries.append(fields)
+        offset = entry.end()
+    if not entries:
+        fail(f"cannot parse {job!r} matrix: include list is empty")
+    return entries
+
+
+def stage_target_suffixes(root: Path) -> dict[str, str]:
+    """Load the sibling staging script and return its target-to-suffix mapping."""
+    path = root / ".github/scripts/stage_binding_artifacts.py"
+    if not path.is_file():
+        fail(f"cannot load binding targets: missing staging script {path}")
+    try:
+        spec = importlib.util.spec_from_file_location("mineru_stage_binding_artifacts", path)
+        if spec is None or spec.loader is None:
+            fail(f"cannot load binding targets: no import loader for {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except SystemExit:
+        raise
+    except Exception as error:
+        fail(f"cannot import binding targets from {path}: {error}")
+    targets = getattr(module, "TARGETS", None)
+    if not isinstance(targets, dict) or not targets:
+        fail(f"cannot load binding targets from {path}: TARGETS must be a non-empty mapping")
+    suffixes: dict[str, str] = {}
+    for target, config in targets.items():
+        if not isinstance(target, str) or not target:
+            fail(f"invalid binding target in {path}: {target!r}")
+        if not isinstance(config, dict) or not isinstance(config.get("suffix"), str) or not config["suffix"]:
+            fail(f"invalid binding target configuration for {target!r} in {path}")
+        suffixes[target] = config["suffix"]
+    return suffixes
+
+
+def package_napi_targets(path: Path) -> set[str]:
+    """Read and validate the root package's napi target list."""
+    try:
+        package = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        fail(f"cannot read Node package metadata {path}: {error}")
+    if not isinstance(package, dict) or not isinstance(package.get("napi"), dict):
+        fail(f"cannot parse {path}: napi must be an object")
+    targets = package["napi"].get("targets")
+    if not isinstance(targets, list):
+        fail(f"cannot parse {path}: napi.targets must be a non-empty string list")
+    target_names: list[str] = []
+    for target in targets:
+        if not isinstance(target, str) or not target:
+            fail(f"cannot parse {path}: napi.targets must be a non-empty string list")
+        target_names.append(target)
+    if len(target_names) != len(set(target_names)):
+        fail(f"cannot parse {path}: napi.targets contains duplicates")
+    return set(target_names)
+
+
+def require_matrix_fields(job: str, entries: list[dict[str, str]], expected: set[str]) -> None:
+    for index, entry in enumerate(entries, 1):
+        actual = set(entry)
+        if actual != expected:
+            fail(
+                f"cannot parse {job!r} matrix entry {index}: fields {sorted(actual)} "
+                f"!= {sorted(expected)}"
+            )
+
+
+def check_release_platform_matrix(root: Path | None = None) -> None:
+    """Check release platform declarations against the live binding and binary targets."""
+    repository = Path(__file__).resolve().parents[2] if root is None else root.resolve()
+    package_path = repository / "bindings/node/package.json"
+    workflow_path = repository / ".github/workflows/release.yml"
+    try:
+        workflow = workflow_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        fail(f"cannot read release workflow {workflow_path}: {error}")
+
+    stage_suffixes = stage_target_suffixes(repository)
+    package_targets = package_napi_targets(package_path)
+    if package_targets != set(stage_suffixes):
+        fail(
+            "package.json napi.targets differs from stage_binding_artifacts.py TARGETS: "
+            f"package={sorted(package_targets)}, stage={sorted(stage_suffixes)}"
+        )
+
+    node_entries = parse_release_matrix(workflow, "node-native")
+    require_matrix_fields("node-native", node_entries, {"runner", "target", "node-arch", "suffix"})
+    node_mapping: dict[str, str] = {}
+    for index, entry in enumerate(node_entries, 1):
+        target = entry["target"]
+        if target in node_mapping:
+            fail(f"duplicate target {target!r} in node-native matrix entry {index}")
+        node_mapping[target] = entry["suffix"]
+    if node_mapping != stage_suffixes:
+        fail(
+            "node-native matrix target-to-suffix mapping differs from TARGETS: "
+            f"matrix={sorted(node_mapping.items())}, stage={sorted(stage_suffixes.items())}"
+        )
+
+    binary_entries = parse_release_matrix(workflow, "build-binary")
+    require_matrix_fields("build-binary", binary_entries, {"runner", "target", "helper", "deployment"})
+    binary_targets = [entry["target"] for entry in binary_entries]
+    if len(binary_targets) != len(set(binary_targets)):
+        fail("build-binary matrix contains duplicate targets")
+    if set(binary_targets) != set(BINARY_TARGETS):
+        fail(
+            "build-binary matrix target set differs from BINARY_TARGETS: "
+            f"matrix={sorted(binary_targets)}, verifier={sorted(BINARY_TARGETS)}"
+        )
+    for entry in binary_entries:
+        target = entry["target"]
+        expected_helper = binary_names(target)[2]
+        if entry["helper"] != expected_helper:
+            fail(
+                f"build-binary helper for target {target!r} is {entry['helper']!r}; "
+                f"expected {expected_helper!r}"
+            )
 
 
 def repository_url(value: object) -> str:
@@ -441,6 +616,24 @@ def check_binary_set(args: argparse.Namespace) -> None:
     paths = sorted(entries)
     for path in paths:
         validate_binary_archive(path, expected[path.name], args.version)
+    print("\n".join(str(path) for path in paths))
+
+
+def check_binary_files(args: argparse.Namespace) -> None:
+    if args.target not in LINUX_BINARY_TARGETS:
+        fail(f"binary-files requires a supported Linux target: {args.target!r}")
+    if args.directory.is_symlink() or not args.directory.is_dir():
+        fail(f"binary files directory is not a real directory: {args.directory}")
+    entries = list(args.directory.iterdir())
+    if (
+        len(entries) != len(BINS)
+        or any(entry.is_symlink() or not stat.S_ISREG(entry.lstat().st_mode) for entry in entries)
+        or {entry.name for entry in entries} != BINS
+    ):
+        fail(f"binary files directory must contain exactly {sorted(BINS)}: {args.directory}")
+    paths = [args.directory / name for name in sorted(BINS)]
+    for path in paths:
+        input_binary(path, args.target, path.name)
     print("\n".join(str(path) for path in paths))
 
 
@@ -1194,6 +1387,7 @@ def check_node_native(args: argparse.Namespace) -> None:
 
 
 def self_test(_: argparse.Namespace) -> None:
+    check_release_platform_matrix()
     assert repository_url({"url": "git+https://github.com/agentsyaml/mineru-rs.git"}) == REPOSITORY
     assert expected_wheel_tags("manylinux_2_17_aarch64.manylinux2014_aarch64") == {
         "cp39-abi3-manylinux_2_17_aarch64", "cp39-abi3-manylinux2014_aarch64",
@@ -1592,6 +1786,11 @@ def self_test(_: argparse.Namespace) -> None:
             helper.write_bytes(synthetic_binary(target_name))
             mineru.chmod(0o755)
             helper.chmod(0o755)
+            if target_name in LINUX_BINARY_TARGETS:
+                api = target_dir / "mineru-api"
+                api.write_bytes(synthetic_binary(target_name))
+                api.chmod(0o755)
+                check_binary_files(argparse.Namespace(directory=target_dir, target=target_name))
             binary_args = argparse.Namespace(target=target_name, version=version, mineru=mineru, helper=helper, output_directory=archives)
             package_binary_archive(binary_args)
             asset = archives / binary_asset_name(target_name, version)
@@ -1610,6 +1809,34 @@ def self_test(_: argparse.Namespace) -> None:
         assert binary_names("x86_64-pc-windows-msvc")[0] == ".zip"
         assert binary_names("aarch64-pc-windows-msvc")[0] == ".zip"
         must_fail(lambda: binary_names("x86_64-unknown-linux-musl"), "unknown binary target was accepted")
+        linux_files = binary_dir / "x86_64-unknown-linux-gnu"
+        extra = linux_files / "extra"
+        extra.write_bytes(b"extra")
+        must_fail(
+            lambda: check_binary_files(argparse.Namespace(directory=linux_files, target="x86_64-unknown-linux-gnu")),
+            "extra container binary was accepted",
+        )
+        extra.unlink()
+        api = linux_files / "mineru-api"
+        api.unlink()
+        api.symlink_to(linux_files / "mineru")
+        must_fail(
+            lambda: check_binary_files(argparse.Namespace(directory=linux_files, target="x86_64-unknown-linux-gnu")),
+            "symlinked container binary was accepted",
+        )
+        api.unlink()
+        api.write_bytes(synthetic_binary("aarch64-unknown-linux-gnu"))
+        api.chmod(0o755)
+        must_fail(
+            lambda: check_binary_files(argparse.Namespace(directory=linux_files, target="x86_64-unknown-linux-gnu")),
+            "wrong container binary architecture was accepted",
+        )
+        api.write_bytes(synthetic_binary("x86_64-unknown-linux-gnu"))
+        api.chmod(0o755)
+        must_fail(
+            lambda: check_binary_files(argparse.Namespace(directory=linux_files, target="x86_64-apple-darwin")),
+            "non-Linux container target was accepted",
+        )
         wrong = binary_dir / "wrong-mineru"
         wrong.write_bytes(synthetic_binary("aarch64-unknown-linux-gnu"))
         must_fail(lambda: input_binary(wrong, "x86_64-unknown-linux-gnu", "wrong-mineru"), "wrong binary architecture was accepted")
@@ -1748,6 +1975,11 @@ def parser() -> argparse.ArgumentParser:
     binary_set.add_argument("--directory", type=Path, required=True)
     binary_set.add_argument("--version", required=True)
     binary_set.set_defaults(func=check_binary_set)
+
+    binary_files = sub.add_parser("binary-files")
+    binary_files.add_argument("--directory", type=Path, required=True)
+    binary_files.add_argument("--target", choices=LINUX_BINARY_TARGETS, required=True)
+    binary_files.set_defaults(func=check_binary_files)
 
     test = sub.add_parser("self-test")
     test.set_defaults(func=self_test)

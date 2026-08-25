@@ -219,6 +219,8 @@ feature；这不包含 Python 或本地模型推理。
 该镜像只包含 Rust 二进制：不包含 Python、`mineru==4.0.0a6` 或模型文件。
 因此，官方 Hybrid 需要显式提供一个另行准备好的环境；API Hybrid 在该镜像中仍
 fail-closed，绝不会冒充 3.4.5 VLM 路径。
+已发布镜像请使用明确的版本化 tag，例如当前的 `:0.3.0`；发布流程不会发布或
+更新可变的 `latest` tag。
 
 ```sh
 mkdir -p output
@@ -230,7 +232,7 @@ docker run --rm \
   --env MINERU_VL_MODEL_NAME="<model-id>" \
   --env MINERU_VL_API_KEY="<your-key>" \
   --env MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
-  ghcr.io/agentsyaml/mineru-cli:latest
+  ghcr.io/agentsyaml/mineru-cli:0.3.0
 
 curl http://127.0.0.1:8000/health
 ```

@@ -251,6 +251,8 @@ API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--concurrency-mod
 `8000`，提供 `GET /health`，将任务输出写入 `/app/output`，并以默认的非
 root 用户运行。发布二进制包含 `office,legacy-office` feature，但镜像只打包
 Rust 二进制：不包含 Python、`mineru==4.0.0a6` 或模型文件。
+请在命令中使用明确的版本化 tag，例如当前的 `:0.3.0`；发布流程不会发布或
+更新可变的 `latest` tag。
 
 ```sh
 mkdir -p output
@@ -262,7 +264,7 @@ docker run --rm \
   --env MINERU_VL_MODEL_NAME="<model-id>" \
   --env MINERU_VL_API_KEY="<your-key>" \
   --env MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
-  ghcr.io/agentsyaml/mineru-cli:latest
+  ghcr.io/agentsyaml/mineru-cli:0.3.0
 
 curl http://127.0.0.1:8000/health
 ```

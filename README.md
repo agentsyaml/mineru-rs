@@ -317,6 +317,8 @@ The stock image bundles Rust binaries only: it does not contain Python,
 `mineru==4.0.0a6`, or model assets. Direct official Hybrid therefore requires a
 separately prepared environment explicitly supplied to the container, while
 API Hybrid remains fail-closed and never aliases the 3.4.5 VLM route.
+Use an explicit version tag for published images, such as `:0.3.0`; releases do
+not publish or update the mutable `latest` tag.
 
 ```sh
 mkdir -p output
@@ -328,7 +330,7 @@ docker run --rm \
   --env MINERU_VL_MODEL_NAME="<model-id>" \
   --env MINERU_VL_API_KEY="<your-key>" \
   --env MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
-  ghcr.io/agentsyaml/mineru-cli:latest
+  ghcr.io/agentsyaml/mineru-cli:0.3.0
 
 curl http://127.0.0.1:8000/health
 ```

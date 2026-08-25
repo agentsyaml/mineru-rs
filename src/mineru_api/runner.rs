@@ -7,7 +7,13 @@ use super::{
 use crate::{OfficeWorkers, RasterWorkers};
 use crate::{ProgressCallback, ProgressEvent};
 use futures_util::future::join_all;
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 pub(super) async fn run_documents_scoped_with_workers(
     documents: Vec<super::RemoteApiDocument>,
@@ -192,6 +198,14 @@ async fn run_core_owned(
     response_cap: usize,
     service: crate::command::service::ResolvedService,
 ) -> Result<Vec<TaskFailure>, String> {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let publication_gate = Arc::new(Mutex::new(()));
+    let mut cancellation_guard = CancellationGuard::new(
+        Arc::clone(&cancellation),
+        Arc::clone(&publication_gate),
+        office.clone(),
+        raster.clone(),
+    );
     let result = run_core(
         documents,
         output,
@@ -201,12 +215,70 @@ async fn run_core_owned(
         events,
         command_events,
         Some((&route, response_cap, &office, &raster)),
+        Some(cancellation),
+        Some(publication_gate),
         service,
     )
     .await;
     office.drain().await;
     raster.drain().await;
+    cancellation_guard.disarm();
     result
+}
+
+struct CancellationGuard {
+    cancellation: Arc<AtomicBool>,
+    publication_gate: Arc<Mutex<()>>,
+    workers: Option<(OfficeWorkers, RasterWorkers)>,
+    handle: Option<tokio::runtime::Handle>,
+    armed: bool,
+}
+
+impl CancellationGuard {
+    fn new(
+        cancellation: Arc<AtomicBool>,
+        publication_gate: Arc<Mutex<()>>,
+        office: OfficeWorkers,
+        raster: RasterWorkers,
+    ) -> Self {
+        Self {
+            cancellation,
+            publication_gate,
+            workers: Some((office, raster)),
+            handle: tokio::runtime::Handle::try_current().ok(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+        self.workers.take();
+        self.handle.take();
+    }
+}
+
+impl Drop for CancellationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let publication_gate = self
+            .publication_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.cancellation.store(true, Ordering::Release);
+        drop(publication_gate);
+        let Some((office, raster)) = self.workers.take() else {
+            return;
+        };
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        // The publication gate above provides the ordering guarantee; this task only reaps workers.
+        handle.spawn(async move {
+            tokio::join!(office.drain(), raster.drain());
+        });
+    }
 }
 
 fn valid_url(value: &str) -> bool {
@@ -234,6 +306,8 @@ async fn run_core(
         &OfficeWorkers,
         &RasterWorkers,
     )>,
+    cancellation: Option<Arc<AtomicBool>>,
+    publication_gate: Option<Arc<Mutex<()>>>,
     service: crate::command::service::ResolvedService,
 ) -> Result<Vec<TaskFailure>, String> {
     archive::preflight_output_root(output)?;
@@ -259,8 +333,6 @@ async fn run_core(
             api_tasks: tasks.len(),
         },
     );
-    drop(super::request_form(&options));
-
     let output = output.to_path_buf();
     let mut failures = Vec::new();
     for wave in tasks.chunks(concurrency) {
@@ -296,8 +368,19 @@ async fn run_core(
                     let destination = output.clone();
                     let index = task.index;
                     let stems = stems(&task.documents);
+                    let cancellation_for_extract = cancellation.clone();
+                    let publication_gate_for_extract = publication_gate.clone();
                     let extracted = tokio::task::spawn_blocking(move || {
-                        zip.extract(&destination, options.archive_limits)
+                        if let Some(cancellation) = cancellation_for_extract.as_deref() {
+                            zip.extract_cancellable(
+                                &destination,
+                                options.archive_limits,
+                                cancellation,
+                                publication_gate_for_extract.as_deref(),
+                            )
+                        } else {
+                            zip.extract(&destination, options.archive_limits)
+                        }
                     })
                     .await
                     .unwrap_or_else(|_| Err("internal archive extraction task failed".into()));
@@ -332,6 +415,8 @@ async fn run_core(
                                     task_events.clone(),
                                     response_cap,
                                     service.ooxml,
+                                    cancellation.clone(),
+                                    publication_gate.clone(),
                                 )
                                 .await
                             {
@@ -691,6 +776,59 @@ mod tests {
             .is_err()
         );
         assert_workers_draining(&office_clone, &raster_clone).await;
+    }
+
+    #[tokio::test]
+    async fn run_core_owned_cancellation_drains_workers_without_late_output() {
+        async fn health(
+            State(waiter): State<Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>>,
+        ) -> axum::Json<Value> {
+            if let Some(sender) = waiter.lock().unwrap().take() {
+                let _ = sender.send(());
+            }
+            std::future::pending::<axum::Json<Value>>().await
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("sentinel"), b"old").unwrap();
+        let input = root.path().join("doc.png");
+        std::fs::write(&input, b"x").unwrap();
+        let (started, wait_started) = tokio::sync::oneshot::channel();
+        let app = Router::new()
+            .route("/health", get(health))
+            .with_state(Arc::new(Mutex::new(Some(started))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        let office = OfficeWorkers::with_executable("unused".into());
+        let raster = RasterWorkers::default();
+        let office_clone = office.clone();
+        let raster_clone = raster.clone();
+        let mut future = Box::pin(run_core_owned(
+            vec![document(input, "doc", 1, 0)],
+            root.path(),
+            &base,
+            RemoteOptions::default(),
+            env(),
+            None,
+            None,
+            crate::OfficialPdfOptions::default(),
+            office,
+            raster,
+            10 * 1024 * 1024,
+            service(),
+        ));
+        tokio::select! {
+            result = &mut future => panic!("run completed before cancellation: {result:?}"),
+            _ = wait_started => {}
+        }
+        drop(future);
+        tokio::task::yield_now().await;
+
+        assert_workers_draining(&office_clone, &raster_clone).await;
+        assert_eq!(std::fs::read(root.path().join("sentinel")).unwrap(), b"old");
+        assert!(!root.path().join("doc/vlm/doc_layout.pdf").exists());
     }
 
     #[tokio::test]
@@ -1061,6 +1199,8 @@ mod tests {
                     Some(callback),
                     None,
                     None,
+                    None,
+                    None,
                     service(),
                 )
             )
@@ -1168,6 +1308,8 @@ mod tests {
                 max_concurrent_requests: 3,
                 ..env()
             },
+            None,
+            None,
             None,
             None,
             None,

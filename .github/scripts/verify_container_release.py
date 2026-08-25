@@ -90,7 +90,6 @@ def expected_tags(image, release_tag):
         f"{image}:{major}.{minor}.{patch}",
         f"{image}:{major}.{minor}",
         f"{image}:{major}",
-        f"{image}:latest",
     }
 
 
@@ -160,7 +159,6 @@ def self_test():
         "ghcr.io/agentsyaml/mineru-cli:1.2.3",
         "ghcr.io/agentsyaml/mineru-cli:1.2",
         "ghcr.io/agentsyaml/mineru-cli:1",
-        "ghcr.io/agentsyaml/mineru-cli:latest",
     }
     assert parse_platforms("linux/amd64") == {("linux", "amd64")}
     try:

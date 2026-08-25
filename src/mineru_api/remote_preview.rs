@@ -7,6 +7,10 @@ use bytes::Bytes;
 use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -52,7 +56,15 @@ pub(super) fn generate_and_publish(
     route: &OfficialPdfOptions,
     response_cap: usize,
     deadline: Instant,
+    cancellation: Option<&AtomicBool>,
+    publication_gate: Option<&Mutex<()>>,
 ) -> Result<PathBuf, String> {
+    if is_cancelled(cancellation) {
+        return Err("operation cancelled".into());
+    }
+    if cancellation.is_some() && publication_gate.is_none() {
+        return Err("cancellation publication gate unavailable".into());
+    }
     if Instant::now() >= deadline {
         return Err("preview deadline expired".into());
     }
@@ -75,8 +87,21 @@ pub(super) fn generate_and_publish(
     if Instant::now() >= deadline {
         return Err("preview deadline expired".into());
     }
+    if is_cancelled(cancellation) {
+        return Err("operation cancelled".into());
+    }
     let (_, _, layout) = paths(stem, kind)?;
-    archive::write_relative_atomic(root, &layout, &asset.data)?;
+    if cancellation.is_none() && publication_gate.is_none() {
+        archive::write_relative_atomic(root, &layout, &asset.data)?;
+    } else {
+        archive::write_relative_atomic_cancellable(
+            root,
+            &layout,
+            &asset.data,
+            cancellation,
+            publication_gate,
+        )?;
+    }
     Ok(root.join(layout))
 }
 pub(super) async fn prepare_and_publish_downloaded(
@@ -89,6 +114,8 @@ pub(super) async fn prepare_and_publish_downloaded(
     events: Option<ProgressCallback>,
     response_cap: usize,
     ooxml: crate::command::service::OoxmlLimits,
+    cancellation: Option<Arc<AtomicBool>>,
+    publication_gate: Option<Arc<Mutex<()>>>,
 ) -> Result<PathBuf, String> {
     let deadline = Instant::now()
         .checked_add(route.total_deadline)
@@ -143,11 +170,18 @@ pub(super) async fn prepare_and_publish_downloaded(
             &route,
             response_cap,
             deadline,
+            cancellation.as_deref(),
+            publication_gate.as_deref(),
         )
     })
     .await
     .map_err(|_| "preview worker stopped")?
 }
+
+fn is_cancelled(cancellation: Option<&AtomicBool>) -> bool {
+    cancellation.is_some_and(|flag| flag.load(Ordering::Acquire))
+}
+
 fn parse_middle(bytes: &[u8], route: &OfficialPdfOptions) -> Result<Vec<PageResult>, String> {
     let pages = serde_json::from_slice::<Value>(bytes)
         .ok()
@@ -386,6 +420,8 @@ mod tests {
                 &route,
                 10 * 1024 * 1024,
                 Instant::now() + std::time::Duration::from_secs(2),
+                None,
+                None,
             )
             .unwrap();
             assert_eq!(path, dir.join(format!("{stem}_layout.pdf")));
@@ -420,6 +456,8 @@ mod tests {
             None,
             10 * 1024 * 1024,
             crate::command::service::OoxmlLimits::default_resolved(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -427,6 +465,43 @@ mod tests {
         office.drain().await;
         raster.drain().await;
     }
+
+    #[tokio::test]
+    async fn cancelled_downloaded_preview_does_not_publish() {
+        let root = tempfile::tempdir().unwrap();
+        write_artifacts(
+            root.path(),
+            "doc",
+            DocumentKind::Pdf,
+            include_bytes!("../../tests/fixtures/pdf/minimal.pdf"),
+        );
+        let office = OfficeWorkers::with_executable("unused".into());
+        let raster = RasterWorkers::default();
+        let cancellation = Arc::new(AtomicBool::new(true));
+
+        assert_eq!(
+            prepare_and_publish_downloaded(
+                root.path(),
+                "doc",
+                DocumentKind::Pdf,
+                &route(),
+                &office,
+                &raster,
+                None,
+                10 * 1024 * 1024,
+                crate::command::service::OoxmlLimits::default_resolved(),
+                Some(cancellation),
+                None,
+            )
+            .await
+            .unwrap_err(),
+            "operation cancelled"
+        );
+        assert!(!root.path().join("doc/vlm/doc_layout.pdf").exists());
+        office.drain().await;
+        raster.drain().await;
+    }
+
     #[tokio::test]
     async fn publishes_downloaded_office_origin_and_emits_warning() {
         let root = tempfile::tempdir().unwrap();
@@ -448,6 +523,8 @@ mod tests {
             Some(callback),
             10 * 1024 * 1024,
             crate::command::service::OoxmlLimits::default_resolved(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -481,6 +558,8 @@ mod tests {
                 None,
                 10 * 1024 * 1024,
                 crate::command::service::OoxmlLimits::default_resolved(),
+                None,
+                None,
             )
             .await
             .unwrap_err(),
@@ -497,6 +576,8 @@ mod tests {
                 None,
                 10 * 1024 * 1024,
                 crate::command::service::OoxmlLimits::default_resolved(),
+                None,
+                None,
             )
             .await
             .unwrap_err(),

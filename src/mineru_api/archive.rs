@@ -10,9 +10,13 @@ use futures_util::StreamExt;
 use reqwest::{Client, Response, StatusCode};
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tempfile::NamedTempFile;
@@ -110,7 +114,27 @@ impl DownloadedZip {
 
     /// Extracts a result archive into an existing output root without following links.
     pub(super) fn extract(&self, destination: &Path, limits: ArchiveLimits) -> Result<(), String> {
-        self.extract_impl(destination, limits, CommitFault::default())
+        self.extract_impl(destination, limits, CommitFault::default(), None, None)
+    }
+
+    pub(super) fn extract_cancellable(
+        &self,
+        destination: &Path,
+        limits: ArchiveLimits,
+        cancellation: &AtomicBool,
+        publication_gate: Option<&Mutex<()>>,
+    ) -> Result<(), String> {
+        check_cancellation(Some(cancellation))?;
+        if publication_gate.is_none() {
+            return Err("cancellation publication gate unavailable".into());
+        }
+        self.extract_impl(
+            destination,
+            limits,
+            CommitFault::default(),
+            Some(cancellation),
+            publication_gate,
+        )
     }
 
     fn extract_impl(
@@ -118,7 +142,10 @@ impl DownloadedZip {
         destination: &Path,
         limits: ArchiveLimits,
         fault: CommitFault,
+        cancellation: Option<&AtomicBool>,
+        publication_gate: Option<&Mutex<()>>,
     ) -> Result<(), String> {
+        check_cancellation(cancellation)?;
         let limits = limits.validate()?;
         let compressed = self
             .0
@@ -134,6 +161,7 @@ impl DownloadedZip {
             limits.scan,
         )
         .map_err(|_| "invalid result archive")?;
+        check_cancellation(cancellation)?;
         let mut zip = ZipArchive::with_config(
             Config {
                 archive_offset: ArchiveOffset::Known(0),
@@ -155,6 +183,7 @@ impl DownloadedZip {
         let mut folded_bytes = 0u64;
         let mut expanded = 0u64;
         for index in 0..zip.len() {
+            check_cancellation(cancellation)?;
             let file = zip.by_index(index).map_err(|_| "invalid result archive")?;
             if !raw_names.insert(file.name_raw().to_vec()) {
                 return Err("result archive has duplicate paths".into());
@@ -210,13 +239,16 @@ impl DownloadedZip {
             }
         }
 
-        validate_contents(self, &entries, limits, compressed)?;
+        validate_contents(self, &entries, limits, compressed, cancellation)?;
+        check_cancellation(cancellation)?;
         let root = output_root(destination)?;
+        check_cancellation(cancellation)?;
         let transaction = ExtractionTransaction::new(&root, &entries)?;
         let mut total = 0u64;
         let mut buffer = [0u8; 64 * 1024];
         let result = (|| {
             for (index, (path, directory, expected, _)) in entries.iter().enumerate() {
+                check_cancellation(cancellation)?;
                 if *directory {
                     ensure_directory(&transaction.stage, path)?;
                     continue;
@@ -230,6 +262,7 @@ impl DownloadedZip {
                             zip.by_index(index).map_err(|_| "invalid result archive")?;
                         let mut actual = 0u64;
                         loop {
+                            check_cancellation(cancellation)?;
                             let read = input
                                 .read(&mut buffer)
                                 .map_err(|_| "invalid result archive")?;
@@ -260,23 +293,25 @@ impl DownloadedZip {
                         if actual != *expected {
                             return Err("result archive entry size does not match metadata".into());
                         }
-                        output
-                            .flush()
-                            .map_err(|_| "unable to write extracted file")?;
+                        check_cancellation(cancellation)?;
                         Ok(())
                     },
                     publish_file,
                 )?;
             }
             for (path, directory, _, _) in &entries {
+                check_cancellation(cancellation)?;
                 preflight_destination(&root, path, *directory)?;
             }
+            check_cancellation(cancellation)?;
             commit_staged_overlay(
                 &root,
                 &transaction.stage,
                 &transaction.backup,
                 &entries,
                 fault,
+                cancellation,
+                publication_gate,
             )
         })();
         if !result
@@ -303,6 +338,8 @@ impl DownloadedZip {
                 fail_after: Some(fail_after),
                 fail_restore_a,
             },
+            None,
+            None,
         )
     }
 }
@@ -415,12 +452,14 @@ struct CommitState<'a> {
     backed_up: Vec<PathBuf>,
     created_dirs: Vec<PathBuf>,
     publications: usize,
+    cancellation: Option<&'a AtomicBool>,
     #[cfg_attr(not(test), allow(dead_code))] // test fault-injection plumbing
     fault: CommitFault,
 }
 
 impl CommitState<'_> {
     fn published(&mut self) -> Result<(), String> {
+        check_cancellation(self.cancellation)?;
         self.publications += 1;
         #[cfg(test)]
         if self.fault.fail_after == Some(self.publications) {
@@ -430,6 +469,7 @@ impl CommitState<'_> {
     }
 
     fn ensure_directory(&mut self, path: &Path) -> Result<Dir, String> {
+        check_cancellation(self.cancellation)?;
         let mut dir = self
             .root
             .try_clone()
@@ -444,6 +484,7 @@ impl CommitState<'_> {
                 Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
                 Ok(_) => return Err("output path contains a symlink or non-directory".into()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    check_cancellation(self.cancellation)?;
                     dir.create_dir(name)
                         .map_err(|_| "unable to create output directory")?;
                     self.created_dirs.push(current.clone());
@@ -459,6 +500,7 @@ impl CommitState<'_> {
     }
 
     fn install(&mut self, stage: &Dir, path: &Path) -> Result<(), String> {
+        check_cancellation(self.cancellation)?;
         let leaf = path
             .file_name()
             .ok_or_else(|| "result archive has an unsafe path".to_string())?;
@@ -481,6 +523,7 @@ impl CommitState<'_> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err("unable to inspect output path".into()),
         }
+        check_cancellation(self.cancellation)?;
         staged_parent
             .rename(leaf, &destination_parent, leaf)
             .map_err(|_| "unable to publish extracted file")?;
@@ -517,7 +560,13 @@ fn commit_staged_overlay(
     backup: &Dir,
     entries: &[(PathBuf, bool, u64, u64)],
     fault: CommitFault,
+    cancellation: Option<&AtomicBool>,
+    publication_gate: Option<&Mutex<()>>,
 ) -> Result<(), String> {
+    // The cancellation guard takes this lock before setting the flag; hold it through every
+    // public rename so cancellation and publication have one linearization point.
+    let _publication_gate =
+        publication_gate.map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
     let mut state = CommitState {
         root,
         backup,
@@ -525,9 +574,11 @@ fn commit_staged_overlay(
         backed_up: Vec::new(),
         created_dirs: Vec::new(),
         publications: 0,
+        cancellation,
         fault,
     };
     let result = (|| {
+        check_cancellation(cancellation)?;
         for (path, directory, _, _) in entries {
             if *directory {
                 state.ensure_directory(path)?;
@@ -538,7 +589,11 @@ fn commit_staged_overlay(
         Ok(())
     })();
     match result {
-        Ok(()) => Ok(()),
+        Ok(()) => match check_cancellation(cancellation) {
+            Ok(()) => Ok(()),
+            Err(error) if state.rollback() => Err(error),
+            Err(_) => Err("partial publication: unable to fully roll back result archive".into()),
+        },
         Err(error) if state.rollback() => Err(error),
         Err(_) => Err("partial publication: unable to fully roll back result archive".into()),
     }
@@ -582,12 +637,22 @@ fn ratio_exceeded(expanded: u64, compressed: u64, max_ratio: u64) -> Result<bool
             .ok_or_else(|| "archive limits are invalid".to_string())?)
 }
 
+fn check_cancellation(cancellation: Option<&AtomicBool>) -> Result<(), String> {
+    if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        Err("operation cancelled".into())
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_contents(
     archive: &DownloadedZip,
     entries: &[(PathBuf, bool, u64, u64)],
     limits: ArchiveLimits,
     compressed: u64,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<(), String> {
+    check_cancellation(cancellation)?;
     let mut zip = ZipArchive::with_config(
         Config {
             archive_offset: ArchiveOffset::Known(0),
@@ -600,12 +665,14 @@ fn validate_contents(
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     for (index, (_, directory, expected, packed)) in entries.iter().enumerate() {
+        check_cancellation(cancellation)?;
         if *directory {
             continue;
         }
         let mut input = zip.by_index(index).map_err(|_| "invalid result archive")?;
         let mut actual = 0u64;
         loop {
+            check_cancellation(cancellation)?;
             let read = input
                 .read(&mut buffer)
                 .map_err(|_| "invalid result archive")?;
@@ -622,13 +689,11 @@ fn validate_contents(
                 .checked_add(bytes)
                 .filter(|v| *v <= limits.max_expanded_bytes)
                 .ok_or_else(|| "result archive exceeds expanded size limit".to_string())?;
-            std::io::sink()
-                .write_all(&buffer[..read])
-                .map_err(|_| "unable to validate result archive")?;
         }
         if actual != *expected {
             return Err("result archive entry size does not match metadata".into());
         }
+        check_cancellation(cancellation)?;
         if ratio_exceeded(actual, *packed, limits.max_ratio)? {
             return Err("result archive exceeds expansion ratio limit".into());
         }
@@ -637,6 +702,7 @@ fn validate_contents(
             return Err("result archive exceeds expansion ratio limit".into());
         }
     }
+    check_cancellation(cancellation)?;
     Ok(())
 }
 
@@ -936,6 +1002,20 @@ pub(super) fn write_relative_atomic(
     relative: &Path,
     bytes: &[u8],
 ) -> Result<(), String> {
+    write_relative_atomic_cancellable(root, relative, bytes, None, None)
+}
+
+pub(super) fn write_relative_atomic_cancellable(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    cancellation: Option<&AtomicBool>,
+    publication_gate: Option<&Mutex<()>>,
+) -> Result<(), String> {
+    check_cancellation(cancellation)?;
+    if cancellation.is_some() && publication_gate.is_none() {
+        return Err("cancellation publication gate unavailable".into());
+    }
     let root = open_output_root(root, false)?;
     let (parts, leaf) = relative_parts(relative)?;
     let parent = existing_parent(&root, &parts)?;
@@ -946,7 +1026,14 @@ pub(super) fn write_relative_atomic(
             file.write_all(bytes)
                 .map_err(|_| "unable to write output file".into())
         },
-        publish_file,
+        |parent, temp, leaf| {
+            // The final rename must be ordered with the cancellation guard, not just preceded by
+            // an atomic flag load.
+            let _publication_gate = publication_gate
+                .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+            check_cancellation(cancellation)?;
+            publish_file(parent, temp, leaf)
+        },
     )
 }
 
@@ -1023,12 +1110,18 @@ pub(super) async fn download(
         serde_json::to_string(task).unwrap_or_default().as_bytes(),
         DIAG_BODY_CAP,
     );
-    let response = tokio::time::timeout(timeout, client.get(result_url).send())
+    if timeout.is_zero() {
+        return Err(format!("{task} result download timed out"));
+    }
+    let deadline = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| format!("{task} result download timed out"))?;
+    let response = tokio::time::timeout_at(deadline, client.get(result_url).send())
         .await
         .map_err(|_| format!("{task} result download timed out"))?
         .map_err(|_| format!("{task} result download failed"))?;
     if response.status() != StatusCode::OK {
-        return Err(http_error(&task, response, timeout).await);
+        return Err(http_error(&task, response, deadline).await);
     }
     let content_type = response
         .headers()
@@ -1050,7 +1143,7 @@ pub(super) async fn download(
     );
     let mut stream = response.bytes_stream();
     let mut total = 0_u64;
-    while let Some(chunk) = tokio::time::timeout(timeout, stream.next())
+    while let Some(chunk) = tokio::time::timeout_at(deadline, stream.next())
         .await
         .map_err(|_| format!("{task} result download timed out"))?
     {
@@ -1065,22 +1158,32 @@ pub(super) async fn download(
             )
             .filter(|size| *size <= limits.max_compressed_bytes)
             .ok_or_else(|| "result archive exceeds compressed size limit".to_string())?;
-        file.write_all(&chunk)
-            .await
-            .map_err(|_| "unable to write result archive".to_string())?;
+        download_io(&task, deadline, file.write_all(&chunk)).await?;
     }
-    file.flush()
-        .await
-        .map_err(|_| "unable to write result archive".to_string())?;
+    download_io(&task, deadline, file.flush()).await?;
     Ok(DownloadedZip(temp))
 }
 
-async fn http_error(task: &str, response: Response, timeout: Duration) -> String {
+async fn download_io<T, F>(
+    task: &str,
+    deadline: tokio::time::Instant,
+    operation: F,
+) -> Result<T, String>
+where
+    F: Future<Output = std::io::Result<T>>,
+{
+    tokio::time::timeout_at(deadline, operation)
+        .await
+        .map_err(|_| format!("{task} result download timed out"))?
+        .map_err(|_| "unable to write result archive".to_string())
+}
+
+async fn http_error(task: &str, response: Response, deadline: tokio::time::Instant) -> String {
     let status = response.status();
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     loop {
-        let next = tokio::time::timeout(timeout, stream.next())
+        let next = tokio::time::timeout_at(deadline, stream.next())
             .await
             .map_err(|_| format!("{task} result download timed out"));
         let chunk = match next {
@@ -1094,6 +1197,9 @@ async fn http_error(task: &str, response: Response, timeout: Duration) -> String
         };
         let remain = DIAG_BODY_CAP.saturating_sub(body.len());
         body.extend_from_slice(&chunk[..chunk.len().min(remain)]);
+        if body.len() >= DIAG_BODY_CAP {
+            break;
+        }
     }
     format!(
         "{task} result download HTTP {status}: {}",
@@ -1104,13 +1210,74 @@ async fn http_error(task: &str, response: Response, timeout: Duration) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::{
         fs::{FileTypeExt, symlink},
         net::UnixListener,
     };
+    use std::{
+        io::{self, Write},
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::io::AsyncWriteExt;
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+    struct PendingWriter;
+    impl tokio::io::AsyncWrite for PendingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn download_write_and_flush_share_the_deadline() {
+        let mut writer = PendingWriter;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        assert_eq!(
+            download_io("\"task\"", deadline, writer.write_all(b"x"))
+                .await
+                .unwrap_err(),
+            "\"task\" result download timed out"
+        );
+        assert_eq!(
+            download_io("\"task\"", deadline, writer.flush())
+                .await
+                .unwrap_err(),
+            "\"task\" result download timed out"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_rejects_zero_and_overflowing_deadlines() {
+        let client = Client::new();
+        for timeout in [Duration::ZERO, Duration::MAX] {
+            assert_eq!(
+                download(
+                    &client,
+                    "http://127.0.0.1:1/result",
+                    "task",
+                    timeout,
+                    limits()
+                )
+                .await
+                .unwrap_err(),
+                "\"task\" result download timed out"
+            );
+        }
+    }
 
     fn limits() -> ArchiveLimits {
         ArchiveLimits {
@@ -1774,6 +1941,64 @@ mod tests {
         );
         assert!(!output.path().join("new").exists());
         assert!(transaction_artifacts(output.path()).is_empty());
+    }
+
+    #[test]
+    fn cancelled_extraction_publishes_nothing() {
+        let output = sentinel_output();
+        let archive = archive(&[
+            ("sentinel", b"new", CompressionMethod::Stored),
+            ("new", b"also new", CompressionMethod::Stored),
+        ]);
+        let cancellation = std::sync::atomic::AtomicBool::new(true);
+
+        assert_eq!(
+            archive
+                .extract_cancellable(output.path(), limits(), &cancellation, None)
+                .unwrap_err(),
+            "operation cancelled"
+        );
+        assert_eq!(
+            std::fs::read(output.path().join("sentinel")).unwrap(),
+            b"old"
+        );
+        assert!(!output.path().join("new").exists());
+        assert!(transaction_artifacts(output.path()).is_empty());
+    }
+
+    #[test]
+    fn cancellation_is_rechecked_at_archive_commit() {
+        let output = sentinel_output();
+        let archive = archive(&[
+            ("sentinel", b"new", CompressionMethod::Stored),
+            ("new", b"also new", CompressionMethod::Stored),
+        ]);
+        let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let publication_gate = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let held = publication_gate.lock().unwrap();
+        let (started, wait_started) = std::sync::mpsc::channel();
+        let root = output.path().to_path_buf();
+        let cancellation_for_worker = std::sync::Arc::clone(&cancellation);
+        let gate_for_worker = std::sync::Arc::clone(&publication_gate);
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            archive.extract_cancellable(
+                &root,
+                limits(),
+                &cancellation_for_worker,
+                Some(&gate_for_worker),
+            )
+        });
+        wait_started.recv().unwrap();
+        cancellation.store(true, Ordering::Release);
+        drop(held);
+
+        assert_eq!(worker.join().unwrap().unwrap_err(), "operation cancelled");
+        assert_eq!(
+            std::fs::read(output.path().join("sentinel")).unwrap(),
+            b"old"
+        );
+        assert!(!output.path().join("new").exists());
     }
 
     #[test]

@@ -39,6 +39,12 @@ The existing `publish-container` job publishes the Rust API image
 release binaries are built with `office,legacy-office`; the image's default
 command listens on container port `8000`, serves `GET /health`, runs as its
 configured non-root user, and writes task output under `/app/output`.
+Each release publishes version, minor, and major tags, but never publishes or
+updates mutable `latest`; use an explicit version tag in commands:
+
+```sh
+docker pull ghcr.io/agentsyaml/mineru-cli:0.3.0
+```
 
 The image bundles Rust binaries only. It does not contain Python,
 `mineru==4.0.0a6`, or model assets, so direct official Hybrid needs a separately
@@ -49,7 +55,11 @@ is `127.0.0.1:8000:8000`; broader exposure belongs on a private network or
 behind an authenticated reverse proxy. This section describes the immutable
 workflow contract; it does not change that workflow.
 
-## Non-user-facing 0.0.1 bootstrap
+## Historical non-user-facing 0.0.1 bootstrap
+
+This records the one-time `0.0.1` bootstrap that preceded the first automated
+`0.1.0` OIDC release. It is distinct from the current `0.3.0` workspace version
+and is not itself a user-facing release.
 
 Perform bootstrap from a temporary checkout or branch with the Cargo workspace
 version changed to `0.0.1`. Main remains at the current workspace version (`0.3.0`).
@@ -125,8 +135,8 @@ trap - EXIT
 unset NPM_CONFIG_USERCONFIG NODE_AUTH_TOKEN
 ```
 
-After the automated `0.1.0` OIDC release succeeds, obtain a fresh short-lived
-granular token authorized for these packages and remove all bootstrap
+After the historical automated `0.1.0` OIDC release succeeded, obtain a fresh
+short-lived granular token authorized for these packages and remove all bootstrap
 dist-tags using a new temporary config. Ongoing releases remain OIDC-only:
 
 ```sh
@@ -159,6 +169,10 @@ manifests just to prepare the workflow.
 
 The temporary `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` (`quick-xml`) exception is mitigated reachability, not fixed or unreachable: mandatory full OOXML preflight runs before Office conversion. It expires on 2026-09-30 and must be reviewed or removed then. Native macOS has no reliable no-entitlement hard memory cap, so hostile Office processing there requires an external VM or container memory boundary.
 The reviewed lock exception for registry-reported yanked transitive `arrayref` 0.3.9 was removed after crates.io unyanked it.
+The release Node matrix retains all six native runner/architecture pairs. Each
+runs its Node 24 test; five pairs also run the Node 18.20.8 smoke with
+`matrix.node-arch`. The `win32-arm64-msvc` pair intentionally skips the Node 18
+setup and smoke because the official Node 18 win-arm64 build is unavailable.
 
 Run from the repository root unless a subshell changes directory:
 
@@ -184,7 +198,9 @@ python3.9 -m venv /tmp/mineru-release-venv
 
 python3 .github/scripts/verify_release.py self-test
 python3 .github/scripts/attach_release_assets.py self-test
+python3 .github/scripts/check_cargo_audit.py self-test
 python3 .github/scripts/verify_container_release.py self-test
+python3 .github/scripts/container_smoke.py --self-check
 
 /tmp/mineru-release-venv/bin/mineru --help
 /tmp/mineru-release-venv/bin/mineru-rs --help

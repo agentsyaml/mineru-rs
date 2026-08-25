@@ -2110,13 +2110,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_ok_download_stops_after_diagnostic_cap_without_draining_stream() {
+        let base = server(Router::new().route(
+            "/result",
+            get(|| async {
+                let body = Body::from_stream(
+                    stream::once(async {
+                        Ok::<_, std::convert::Infallible>(Bytes::from(vec![b'x'; DIAG_BODY_CAP]))
+                    })
+                    .chain(stream::pending::<Result<Bytes, std::convert::Infallible>>()),
+                );
+                (StatusCode::INTERNAL_SERVER_ERROR, body)
+            }),
+        ))
+        .await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            MineruApiClient::new(&base).unwrap().download_result_zip(
+                &format!("{base}/result"),
+                "task",
+                download_env(5.),
+                ArchiveLimits::default(),
+            ),
+        )
+        .await
+        .expect("diagnostic body drain did not stop at its cap");
+        assert!(result.unwrap_err().contains("HTTP 500"));
+    }
+
+    #[tokio::test]
     async fn download_times_out_for_acquisition_and_each_chunk() {
         let base = server(
             Router::new()
                 .route(
                     "/late",
                     get(|| async {
-                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        std::future::pending::<()>().await;
                         ([("content-type", "application/zip")], "x")
                     }),
                 )
@@ -2127,10 +2156,9 @@ mod tests {
                             stream::once(async {
                                 Ok::<_, std::convert::Infallible>(Bytes::from_static(b"a"))
                             })
-                            .chain(stream::once(async {
-                                tokio::time::sleep(Duration::from_millis(30)).await;
-                                Ok(Bytes::from_static(b"b"))
-                            })),
+                            .chain(stream::once(
+                                std::future::pending::<Result<Bytes, std::convert::Infallible>>(),
+                            )),
                         );
                         ([("content-type", "application/zip")], body)
                     }),
@@ -2144,7 +2172,7 @@ mod tests {
                     .download_result_zip(
                         &format!("{base}/{path}"),
                         "task",
-                        download_env(0.005),
+                        download_env(0.1),
                         ArchiveLimits::default()
                     )
                     .await
@@ -2200,6 +2228,18 @@ mod tests {
                 "result download timeout is invalid"
             );
         }
+        assert_eq!(
+            client
+                .download_result_zip(
+                    &format!("{base}/result"),
+                    "task",
+                    download_env(0.),
+                    ArchiveLimits::default(),
+                )
+                .await
+                .unwrap_err(),
+            "\"task\" result download timed out"
+        );
     }
 
     #[tokio::test]
@@ -2242,10 +2282,9 @@ mod tests {
         let base = server(Router::new().route(
             "/result",
             get(|| async {
-                let body = Body::from_stream(stream::once(async {
-                    tokio::time::sleep(Duration::from_millis(30)).await;
-                    Ok::<_, std::convert::Infallible>(Bytes::from_static(b"diagnostic"))
-                }));
+                let body = Body::from_stream(stream::once(std::future::pending::<
+                    Result<Bytes, std::convert::Infallible>,
+                >()));
                 (StatusCode::INTERNAL_SERVER_ERROR, body)
             }),
         ))
@@ -2256,7 +2295,7 @@ mod tests {
                 .download_result_zip(
                     &format!("{base}/result"),
                     "task",
-                    download_env(0.005),
+                    download_env(0.1),
                     ArchiveLimits::default()
                 )
                 .await
@@ -2306,7 +2345,7 @@ mod tests {
         let delayed = server(Router::new().route(
             "/result",
             get(|| async {
-                tokio::time::sleep(Duration::from_millis(30)).await;
+                std::future::pending::<()>().await;
                 ([("content-type", "application/zip")], "x")
             }),
         ))
@@ -2334,7 +2373,7 @@ mod tests {
             }),
         ))
         .await;
-        for (base, timeout) in [(delayed, 0.005), (non_ok, 1.), (broken, 1.)] {
+        for (base, timeout) in [(delayed, 0.1), (non_ok, 1.), (broken, 1.)] {
             let error = MineruApiClient::new(&base)
                 .unwrap()
                 .download_result_zip(

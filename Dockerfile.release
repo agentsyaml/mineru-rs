@@ -2,8 +2,18 @@ FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bb
 
 ARG TARGETARCH
 
-RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates curl \
+# Debian packages are pinned to the 2025-01-01 snapshot; roll this timestamp
+# forward manually to receive security updates.
+RUN rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list \
+    && printf '%s\n' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20250101T000000Z/ bookworm main' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20250101T000000Z/ bookworm-updates main' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20250101T000000Z/ bookworm-security main' \
+        > /etc/apt/sources.list \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y \
+        ca-certificates=20230311 \
+        curl=7.88.1-10+deb12u8 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system mineru \
     && useradd --system --gid mineru --home-dir /app --shell /usr/sbin/nologin mineru \

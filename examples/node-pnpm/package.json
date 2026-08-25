@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
-    "@alexsun-top/mineru": "^0.2.4"
+    "@alexsun-top/mineru": "^0.3.0"
   },
   "devDependencies": {
     "tsx": "^4.19.0",

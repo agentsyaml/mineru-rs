@@ -284,6 +284,8 @@ container port `8000`, serves `GET /health`, writes task output below
 `/app/output`, and runs its default command as a non-root user. The release
 binaries include the `office,legacy-office` feature set, but the image bundles
 Rust binaries only: it contains no Python, `mineru==4.0.0a6`, or model assets.
+Use an explicit version tag in commands, such as the current `:0.3.0`; releases
+do not publish or update the mutable `latest` tag.
 
 ```sh
 mkdir -p output
@@ -295,7 +297,7 @@ docker run --rm \
   --env MINERU_VL_MODEL_NAME="<model-id>" \
   --env MINERU_VL_API_KEY="<your-key>" \
   --env MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
-  ghcr.io/agentsyaml/mineru-cli:latest
+  ghcr.io/agentsyaml/mineru-cli:0.3.0
 
 curl http://127.0.0.1:8000/health
 ```

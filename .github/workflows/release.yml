@@ -108,6 +108,14 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.14.6
+      - name: Cache Cargo registry, git dependencies, and target
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-cargo-crate-package-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-host-x86_64-unknown-linux-gnu-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Install Rust 1.89.0
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
       - name: Package and verify crate
@@ -179,6 +187,14 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           architecture: ${{ matrix.python-arch }}
+      - name: Cache Cargo registry, git dependencies, and target
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-cargo-python-wheel-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'bindings/python/Cargo.toml', 'bindings/python/pyproject.toml') }}
       - name: Install Rust 1.89.0
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add ${{ matrix.target }}
       - name: Build locked manylinux wheel
@@ -258,6 +274,14 @@ jobs:
         with:
           node-version: 24.18.1
           architecture: ${{ matrix.node-arch }}
+      - name: Cache Cargo registry, git dependencies, and target
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-cargo-node-native-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'bindings/node/Cargo.toml', 'bindings/node/package.json', 'bindings/node/package-lock.json') }}
       - name: Install npm 12.0.2 and dependencies
         working-directory: bindings/node
         run: npm install --global npm@12.0.2 && npm --version && npm ci
@@ -310,13 +334,13 @@ jobs:
           node -e "const api=require('@alexsun-top/mineru');if(api.canonicalStem('a bad/pdf')!=='a bad_pdf'||!api.validatePdfOptions(0,null,true,true,true))process.exit(1)"
           node -e "const fs=require('fs'),Module=require('module'),path=require('path');const root=path.dirname(require.resolve('@alexsun-top/mineru/package.json'));const file=path.join(root,'__test__','smoke.test.js');const test=new Module(file);test.filename=file;test.paths=Module._nodeModulePaths(path.dirname(file));test._compile(fs.readFileSync(process.env.MINERU_NODE_TEST_SOURCE,'utf8'),file)"
       - name: Set up minimum Node runtime
-        if: matrix.suffix == 'linux-x64-gnu'
+        if: matrix.suffix != 'win32-arm64-msvc'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 18.20.8
-          architecture: x64
-      - name: Smoke Linux x64 under Node 18.20.8
-        if: matrix.suffix == 'linux-x64-gnu'
+          architecture: ${{ matrix.node-arch }}
+      - name: Smoke current-build platform package under Node 18.20.8
+        if: matrix.suffix != 'win32-arm64-msvc'
         working-directory: bindings/node
         run: node __test__/smoke.test.js
       - name: Upload exact platform tarball
@@ -426,8 +450,6 @@ jobs:
             -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e TARGET="${{ matrix.target }}" \
             rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff \
             sh -ec '
-              apt-get update
-              rm -rf /var/lib/apt/lists/*
               install -d -m 700 -o "$HOST_UID" -g "$HOST_GID" /tmp/mineru-home /tmp/mineru-cargo
               install -d -m 755 -o "$HOST_UID" -g "$HOST_GID" /workspace/target
               export HOME=/tmp/mineru-home CARGO_HOME=/tmp/mineru-cargo
@@ -443,6 +465,15 @@ jobs:
               chown "$HOST_UID:$HOST_GID" "/workspace/container-binaries-$TARGET.tar.gz"
               chmod 644 "/workspace/container-binaries-$TARGET.tar.gz"
             '
+      - name: Cache Cargo registry, git dependencies, and target
+        if: runner.os != 'Linux'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-cargo-build-binary-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Build native binaries
         if: runner.os != 'Linux'
         shell: bash
@@ -598,6 +629,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: crates-io
     permissions:
+      actions: read
       contents: read
       id-token: write
     steps:
@@ -610,6 +642,14 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.14.6
+      - name: Cache Cargo registry, git dependencies, and target
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-cargo-crate-package-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-host-x86_64-unknown-linux-gnu-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Install Rust 1.89.0
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
       - name: Download verified reference crate
@@ -833,7 +873,6 @@ jobs:
             type=semver,pattern={{version}},value=v${{ needs.identity.outputs.version }}
             type=semver,pattern={{major}}.{{minor}},value=v${{ needs.identity.outputs.version }}
             type=semver,pattern={{major}},value=v${{ needs.identity.outputs.version }}
-            type=raw,value=latest
           labels: |
             org.opencontainers.image.revision=${{ needs.identity.outputs.commit }}
       - name: Download exact amd64 container binary archive
@@ -890,6 +929,10 @@ jobs:
               if sorted(p.name for p in destination.iterdir()) != sorted(expected):
                   raise SystemExit(f"container binaries directory has extras: {sorted(p.name for p in destination.iterdir())}")
           PY
+          python3 .github/scripts/verify_release.py binary-files \
+            --directory container-binaries/amd64 --target x86_64-unknown-linux-gnu
+          python3 .github/scripts/verify_release.py binary-files \
+            --directory container-binaries/arm64 --target aarch64-unknown-linux-gnu
       - name: Build and push multi-platform image
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -936,6 +979,7 @@ jobs:
         env:
           IMAGE: ghcr.io/agentsyaml/mineru-cli
           DIGEST: ${{ steps.container-manifest.outputs.digest }}
+          VERSION: ${{ needs.identity.outputs.version }}
         run: |
           set -euo pipefail
           for platform in linux/amd64 linux/arm64; do
@@ -945,12 +989,12 @@ jobs:
               | if length == 1 then .[0] else error("expected exactly one runtime child manifest") end
             ' "$RUNNER_TEMP/ghcr-manifest.json")"
             docker pull --platform "$platform" "$IMAGE@$child_digest"
-            docker run --rm --platform "$platform" --entrypoint /bin/sh "$IMAGE@$child_digest" -ec '
+            docker run --rm --platform "$platform" --entrypoint /bin/sh -e VERSION="$VERSION" "$IMAGE@$child_digest" -ec '
               test "$(id -u)" -ne 0
               for binary in mineru mineru-api mineru-office-convert; do
                 test -x "/usr/local/bin/$binary"
               done
-              mineru --version
+              test "$(mineru --version)" = "mineru $VERSION"
               mineru-api --help >/dev/null
             '
             echo "- \`$platform\` (\`$child_digest\`): non-root API and CLI smoke passed" >> "$GITHUB_STEP_SUMMARY"
@@ -1072,11 +1116,22 @@ jobs:
           }
           absent "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag"
           absent "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag"
+          verify_tag() {
+            python3 - "$GITHUB_REPOSITORY" "$tag" "$COMMIT" <<'PY'
+          import os
+          import sys
+
+          sys.path.insert(0, ".github/scripts")
+          from attach_release_assets import verify_tag as verify_github_tag
+
+          verify_github_tag(sys.argv[1], sys.argv[2], sys.argv[3], os.environ["GH_TOKEN"])
+          PY
+          }
           release_id="$(gh api --method POST "/repos/$GITHUB_REPOSITORY/releases" -f tag_name="$tag" -f target_commitish="$COMMIT" -f name="$tag" -F draft=true -F prerelease=false -F generate_release_notes=true --jq .id)"
-          absent "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag"
+          verify_tag
           python .github/scripts/attach_release_assets.py attach --repository "$GITHUB_REPOSITORY" --release-id "$release_id" --tag "$tag" --commit "$COMMIT" --version "$VERSION" --directory release-assets
           python .github/scripts/attach_release_assets.py verify-release --repository "$GITHUB_REPOSITORY" --release-id "$release_id" --tag "$tag" --commit "$COMMIT" --version "$VERSION" --directory release-assets --draft true
-          absent "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag"
+          verify_tag
           gh api --method PATCH "/repos/$GITHUB_REPOSITORY/releases/$release_id" -F draft=false >/dev/null
           published=true
           python .github/scripts/attach_release_assets.py verify-release --repository "$GITHUB_REPOSITORY" --release-id "$release_id" --tag "$tag" --commit "$COMMIT" --version "$VERSION" --directory release-assets --draft false
