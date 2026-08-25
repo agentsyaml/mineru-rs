@@ -1064,6 +1064,7 @@ jobs:
           set -euo pipefail
           tag="v$VERSION"
           release_id=''
+          tag_created=false
           published=false
           cleanup() {
             status=$?
@@ -1072,36 +1073,40 @@ jobs:
               if ! gh api "/repos/$GITHUB_REPOSITORY/releases/$release_id" > "$metadata"; then
                 echo "draft cleanup could not re-GET release $release_id; preserve it and recover manually" >&2
               elif ! python3 - "$metadata" "$release_id" "$tag" "$COMMIT" <<'PY'
-              import json
-              import sys
+          import json
+          import sys
 
-              release = json.load(open(sys.argv[1], encoding="utf-8"))
-              assert str(release.get("id")) == sys.argv[2]
-              assert release.get("tag_name") == sys.argv[3]
-              assert release.get("target_commitish") == sys.argv[4]
-              assert release.get("draft") is True
-              assert release.get("prerelease") is False
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert str(release.get("id")) == sys.argv[2]
+          assert release.get("tag_name") == sys.argv[3]
+          assert release.get("target_commitish") == sys.argv[4]
+          assert release.get("draft") is True
+          assert release.get("prerelease") is False
           PY
               then
                 echo "release $release_id is not the exact unpublished draft; preserve it and recover manually" >&2
               elif ! gh api --method DELETE "/repos/$GITHUB_REPOSITORY/releases/$release_id"; then
                 echo "could not delete exact draft $release_id; recover manually" >&2
               else
-                ref="$RUNNER_TEMP/tag-$release_id.json"
-                if gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > "$ref" 2>/dev/null \
-                  && python3 - "$ref" "$COMMIT" <<'PY'
-              import json
-              import sys
+                if test "$tag_created" = true; then
+                  ref="$RUNNER_TEMP/tag-$release_id.json"
+                  if gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > "$ref" 2>/dev/null \
+                    && python3 - "$ref" "$COMMIT" <<'PY'
+          import json
+          import sys
 
-              ref = json.load(open(sys.argv[1], encoding="utf-8"))
-              assert ref["object"]["type"] == "commit"
-              assert ref["object"]["sha"] == sys.argv[2]
+          ref = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert ref["object"]["type"] == "commit"
+          assert ref["object"]["sha"] == sys.argv[2]
           PY
-                then
-                  gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" \
-                    || echo "exact lightweight tag $tag remains; delete it manually" >&2
+                  then
+                    gh api --method DELETE "/repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" \
+                      || echo "exact lightweight tag $tag remains; delete it manually" >&2
+                  else
+                    echo "new tag $tag is no longer the exact lightweight commit tag; preserving it" >&2
+                  fi
                 else
-                  echo "no exact lightweight tag $tag to clean up; preserving any other tag" >&2
+                  echo "tag $tag was not created by this job; preserving it" >&2
                 fi
               fi
             fi
@@ -1127,7 +1132,21 @@ jobs:
           verify_github_tag(sys.argv[1], sys.argv[2], sys.argv[3], os.environ["GH_TOKEN"])
           PY
           }
+          # GitHub draft releases do not guarantee creation of the Git ref, so create it explicitly.
           release_id="$(gh api --method POST "/repos/$GITHUB_REPOSITORY/releases" -f tag_name="$tag" -f target_commitish="$COMMIT" -f name="$tag" -F draft=true -F prerelease=false -F generate_release_notes=true --jq .id)"
+          if gh api --method POST "/repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$tag" -f sha="$COMMIT" >/dev/null; then
+            tag_created=true
+          else
+            existing_tag_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" \
+              --jq 'select(.object.type == "commit") | .object.sha' 2>/dev/null || true)"
+            if test "$existing_tag_sha" = "$COMMIT"; then
+              echo "tag $tag already points to $COMMIT; preserving the existing tag"
+            else
+              echo "could not create a lightweight tag for $tag at $COMMIT" >&2
+              exit 1
+            fi
+          fi
           verify_tag
           python .github/scripts/attach_release_assets.py attach --repository "$GITHUB_REPOSITORY" --release-id "$release_id" --tag "$tag" --commit "$COMMIT" --version "$VERSION" --directory release-assets
           python .github/scripts/attach_release_assets.py verify-release --repository "$GITHUB_REPOSITORY" --release-id "$release_id" --tag "$tag" --commit "$COMMIT" --version "$VERSION" --directory release-assets --draft true
