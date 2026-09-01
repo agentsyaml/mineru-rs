@@ -15,34 +15,6 @@ function patchRun(replacement) {
   }
 }
 
-// Local copy of api.js locate logic, exercised independently of the full parse flow.
-function locateMarkdown(root, stem) {
-  const found = []
-  const walk = (directory, depth) => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const full = path.join(directory, entry.name)
-      if (entry.isDirectory()) {
-        if (depth < 2) walk(full, depth + 1)
-      } else if (entry.name.endsWith('.md')) {
-        found.push(full)
-      }
-    }
-  }
-  walk(root, 0)
-  if (found.length === 0) throw new Error('parse: no markdown output produced')
-  const expected = `${stem}.md`
-  for (const file of found) {
-    if (path.basename(file) === expected) return file
-  }
-  return found.reduce((a, b) => (fs.statSync(a).size >= fs.statSync(b).size ? a : b))
-}
-
-// Mirrors api.js: the CLI writes `{file_stem}/vlm/{file_stem}.md`, so the stem strips the
-// extension before canonicalization.
-function stemOf(source) {
-  return native.canonicalStem(path.basename(source, path.extname(source)))
-}
-
 function tempSource() {
   const source = path.join(os.tmpdir(), `mineru-parse-in-${process.pid}.pdf`)
   fs.writeFileSync(source, 'fake')
@@ -56,7 +28,8 @@ async function testFullFlow() {
     const restore = patchRun(async (options) => {
       calls.push(options.output)
       fs.mkdirSync(options.output, { recursive: true })
-      fs.writeFileSync(path.join(options.output, `${stemOf(options.path)}.md`), '# parsed')
+      const stem = path.basename(options.path, path.extname(options.path))
+      fs.writeFileSync(path.join(options.output, `${stem}.md`), '# parsed')
       return { warnings: ['warn'] }
     })
     try {
@@ -78,7 +51,7 @@ async function testFullFlow() {
     // Markdown inside a `{stem}/` subdirectory is located via the depth-2 walk.
     const restore = patchRun(async (options) => {
       calls.push(options.output)
-      const stem = stemOf(options.path)
+      const stem = path.basename(options.path, path.extname(options.path))
       fs.mkdirSync(path.join(options.output, stem, 'vlm'), { recursive: true })
       fs.writeFileSync(path.join(options.output, stem, 'vlm', `${stem}.md`), '# sub')
       return { warnings: [] }
@@ -126,49 +99,8 @@ async function testFullFlow() {
   }
 }
 
-async function testLocateLogic() {
-  // Root-level `{stem}.md` (stem strips the extension, matching the CLI) is preferred.
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mineru-parse-'))
-  try {
-    fs.writeFileSync(path.join(root, 'other.md'), 'other')
-    fs.writeFileSync(path.join(root, 'report.md'), '# parsed')
-    assert.equal(locateMarkdown(root, 'report'), path.join(root, 'report.md'))
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-
-  // `{stem}/` subdirectory layout is found by the depth-2 walk.
-  const sub = fs.mkdtempSync(path.join(os.tmpdir(), 'mineru-parse-'))
-  try {
-    fs.mkdirSync(path.join(sub, 'report', 'vlm'), { recursive: true })
-    fs.writeFileSync(path.join(sub, 'report', 'vlm', 'report.md'), '# sub')
-    assert.equal(locateMarkdown(sub, 'report'), path.join(sub, 'report', 'vlm', 'report.md'))
-  } finally {
-    fs.rmSync(sub, { recursive: true, force: true })
-  }
-
-  // Without a stem match, the largest `.md` wins.
-  const largest = fs.mkdtempSync(path.join(os.tmpdir(), 'mineru-parse-'))
-  try {
-    fs.writeFileSync(path.join(largest, 'a.md'), 'small')
-    fs.writeFileSync(path.join(largest, 'b.md'), 'a much longer markdown body')
-    assert.equal(locateMarkdown(largest, 'unknown'), path.join(largest, 'b.md'))
-  } finally {
-    fs.rmSync(largest, { recursive: true, force: true })
-  }
-
-  // Missing markdown is reported.
-  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'mineru-parse-'))
-  try {
-    assert.throws(() => locateMarkdown(empty, 'report'), /no markdown output produced/)
-  } finally {
-    fs.rmSync(empty, { recursive: true, force: true })
-  }
-}
-
 async function main() {
   await testFullFlow()
-  await testLocateLogic()
   console.log('node parse: all assertions passed')
 }
 

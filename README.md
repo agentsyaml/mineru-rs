@@ -320,6 +320,11 @@ API Hybrid remains fail-closed and never aliases the 3.4.5 VLM route.
 Use an explicit version tag for published images, such as `:0.3.0`; releases do
 not publish or update the mutable `latest` tag.
 
+The image starts `mineru-api` on `0.0.0.0` and sets
+`MINERU_API_PUBLIC_BIND_EXPOSED=true` so Docker can reach the container port.
+That bind permission is separate from request policy: public HTTP-client access
+remains disabled unless `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` is supplied.
+
 ```sh
 mkdir -p output
 chmod a+rwx output  # grant the image's non-root user write access
@@ -336,11 +341,15 @@ curl http://127.0.0.1:8000/health
 ```
 
 The bind-mounted output directory must be writable by the image's default
-non-root user. `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` is an explicit,
-per-container opt-in to the unauthenticated task API; keep it out of the
-Dockerfile and global image environment. Publish to loopback first as shown;
-broader exposure requires a private network or an authenticated reverse proxy
-because the API has no built-in authentication or task ownership isolation.
+non-root user. The `--publish` address controls host exposure (`127.0.0.1` here;
+`0.0.0.0` would expose the port on all host interfaces), independently of the
+container's bind permission. The command's
+`MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` is an explicit, per-container opt-in
+to the unauthenticated task API; omit it to keep parsing requests disabled, and
+keep it out of the Dockerfile and global image environment. Publish to loopback
+first as shown; broader exposure requires a private network or an authenticated
+reverse proxy because the API has no built-in authentication or task ownership
+isolation.
 
 ### Docker Compose profiles
 

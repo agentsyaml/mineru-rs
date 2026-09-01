@@ -17,12 +17,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version }}
+  group: release-workflow
   cancel-in-progress: false
 
 jobs:
   identity:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     outputs:
       version: ${{ steps.identity.outputs.version }}
       commit: ${{ steps.identity.outputs.commit }}
@@ -98,6 +99,7 @@ jobs:
   crate-package:
     needs: identity
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -174,6 +176,7 @@ jobs:
             slot: windows-x64
             deployment: ""
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
     env:
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment }}
     steps:
@@ -259,6 +262,7 @@ jobs:
             node-arch: arm64
             suffix: win32-arm64-msvc
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
     steps:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -273,6 +277,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.1
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
           architecture: ${{ matrix.node-arch }}
       - name: Cache Cargo registry, git dependencies, and target
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
@@ -338,6 +344,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 18.20.8
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
           architecture: ${{ matrix.node-arch }}
       - name: Smoke current-build platform package under Node 18.20.8
         if: matrix.suffix != 'win32-arm64-msvc'
@@ -353,6 +361,7 @@ jobs:
   node-package:
     needs: [identity, node-native]
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -367,6 +376,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.1
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
           architecture: x64
       - name: Install npm 12.0.2 and dependencies
         working-directory: bindings/node
@@ -430,6 +441,7 @@ jobs:
             helper: mineru-office-convert.exe
             deployment: ""
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
     env:
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment }}
     steps:
@@ -515,7 +527,7 @@ jobs:
           name: container-binaries-${{ matrix.target }}
           path: container-binaries-${{ matrix.target }}.tar.gz
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
       - name: Upload exact binary archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -526,6 +538,7 @@ jobs:
   verify-binary-assets:
     needs: [identity, build-binary]
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - name: Check out immutable release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -560,6 +573,7 @@ jobs:
   release-ready:
     needs: [identity, crate-package, python-wheel, node-package]
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     outputs:
       recovery-run-id: ${{ steps.registry-recovery.outputs.run-id }}
     steps:
@@ -627,6 +641,7 @@ jobs:
   publish-crate:
     needs: [identity, release-ready, require-ci-evidence]
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     environment: crates-io
     permissions:
       actions: read
@@ -694,6 +709,7 @@ jobs:
   publish-python:
     needs: [identity, release-ready, require-ci-evidence]
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     environment: pypi
     permissions:
       actions: read
@@ -760,6 +776,7 @@ jobs:
   publish-node:
     needs: [identity, release-ready, require-ci-evidence]
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     environment: npm
     permissions:
       actions: read
@@ -775,6 +792,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.1
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
           architecture: x64
       - name: Install npm 12.0.2
         run: npm install --global npm@12.0.2 && npm --version
@@ -838,8 +857,11 @@ jobs:
           publish_verified "@alexsun-top/mineru" "$PACKAGE_DIRECTORY/alexsun-top-mineru-$VERSION.tgz"
 
   publish-container:
-    needs: [identity, build-binary, release-ready, require-ci-evidence]
+    needs: [identity, build-binary, release-ready, require-ci-evidence, publish-crate, publish-python, publish-node]
     runs-on: ubuntu-24.04
+    concurrency:
+      group: ${{ github.repository }}-ghcr-promotion
+      cancel-in-progress: false
     timeout-minutes: 240
     environment: ghcr
     permissions:
@@ -870,11 +892,41 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=semver,pattern={{version}},value=v${{ needs.identity.outputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.identity.outputs.version }}
-            type=semver,pattern={{major}},value=v${{ needs.identity.outputs.version }}
+            type=raw,value=candidate-${{ needs.identity.outputs.version }}-${{ needs.identity.outputs.commit }}-${{ github.run_id }}
           labels: |
             org.opencontainers.image.revision=${{ needs.identity.outputs.commit }}
+            org.opencontainers.image.version=${{ needs.identity.outputs.version }}
+      - name: Inspect stable tags and plan GHCR promotion
+        id: ghcr-plan
+        env:
+          IMAGE: ghcr.io/agentsyaml/mineru-cli
+          RELEASE_TAG: v${{ needs.identity.outputs.version }}
+          VERSION: ${{ needs.identity.outputs.version }}
+          COMMIT: ${{ needs.identity.outputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            "/repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            > "$RUNNER_TEMP/github-release-refs-plan.json"
+          python3 .github/scripts/verify_container_release.py plan \
+            --image "$IMAGE" --release-tag "$RELEASE_TAG" --output "$RUNNER_TEMP/ghcr-plan.json" \
+            --version "$VERSION" --commit "$COMMIT" \
+            --release-refs-file "$RUNNER_TEMP/github-release-refs-plan.json" \
+            --username-env GHCR_USERNAME --token-env GHCR_TOKEN | tee "$RUNNER_TEMP/ghcr-plan-summary.txt"
+          mode="$(jq -er '.mode' "$RUNNER_TEMP/ghcr-plan.json")"
+          test "$mode" = build || test "$mode" = reuse
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          digest="$(jq -r '.digest // empty' "$RUNNER_TEMP/ghcr-plan.json")"
+          if test -n "$digest"; then
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "### GHCR promotion plan"
+            cat "$RUNNER_TEMP/ghcr-plan-summary.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Download exact amd64 container binary archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -933,7 +985,8 @@ jobs:
             --directory container-binaries/amd64 --target x86_64-unknown-linux-gnu
           python3 .github/scripts/verify_release.py binary-files \
             --directory container-binaries/arm64 --target aarch64-unknown-linux-gnu
-      - name: Build and push multi-platform image
+      - name: Build and push unique GHCR candidate image
+        if: steps.ghcr-plan.outputs.mode == 'build'
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -947,33 +1000,45 @@ jobs:
           sbom: true
           cache-from: type=gha,scope=release-container
           cache-to: type=gha,mode=max,scope=release-container
-      - name: Verify pushed manifest index
+      - name: Select candidate or reusable manifest digest
+        id: selected-digest
+        env:
+          MODE: ${{ steps.ghcr-plan.outputs.mode }}
+          PLANNED_DIGEST: ${{ steps.ghcr-plan.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if test "$MODE" = reuse; then
+            DIGEST="$PLANNED_DIGEST"
+          elif test "$MODE" = build; then
+            DIGEST="$BUILT_DIGEST"
+          else
+            echo "invalid GHCR promotion mode: $MODE" >&2
+            exit 1
+          fi
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Verify selected manifest, platforms, and OCI revision
         id: container-manifest
         env:
           IMAGE: ghcr.io/agentsyaml/mineru-cli
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.selected-digest.outputs.digest }}
+          VERSION: ${{ needs.identity.outputs.version }}
+          COMMIT: ${{ needs.identity.outputs.commit }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          docker buildx imagetools inspect --raw "$IMAGE@$DIGEST" > "$RUNNER_TEMP/ghcr-manifest.json"
-          python3 .github/scripts/verify_container_release.py manifest --digest "$DIGEST" --file "$RUNNER_TEMP/ghcr-manifest.json" | tee "$RUNNER_TEMP/ghcr-manifest-summary.txt"
+          python3 .github/scripts/verify_container_release.py manifest \
+            --image "$IMAGE" --digest "$DIGEST" --file "$RUNNER_TEMP/ghcr-manifest.json" \
+            --version "$VERSION" --commit "$COMMIT" \
+            --username-env GHCR_USERNAME --token-env GHCR_TOKEN \
+            | tee "$RUNNER_TEMP/ghcr-manifest-summary.txt"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           {
             echo "### GHCR manifest"
             echo "\`$IMAGE@$DIGEST\`"
             cat "$RUNNER_TEMP/ghcr-manifest-summary.txt"
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Verify stable tags resolve to pushed digest
-        env:
-          IMAGE: ghcr.io/agentsyaml/mineru-cli
-          DIGEST: ${{ steps.container-manifest.outputs.digest }}
-          RELEASE_TAG: v${{ needs.identity.outputs.version }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' '${{ steps.meta.outputs.tags }}' > "$RUNNER_TEMP/ghcr-tags.txt"
-          python3 .github/scripts/verify_container_release.py tags --digest "$DIGEST" --image "$IMAGE" --release-tag "$RELEASE_TAG" --tags-file "$RUNNER_TEMP/ghcr-tags.txt" | tee "$RUNNER_TEMP/ghcr-tags-summary.txt"
-          {
-            echo "### GHCR stable tags"
-            cat "$RUNNER_TEMP/ghcr-tags-summary.txt"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Pull and smoke each immutable platform image
         env:
@@ -999,10 +1064,52 @@ jobs:
             '
             echo "- \`$platform\` (\`$child_digest\`): non-root API and CLI smoke passed" >> "$GITHUB_STEP_SUMMARY"
           done
+      - name: Promote immutable patch and moving aliases
+        env:
+          IMAGE: ghcr.io/agentsyaml/mineru-cli
+          RELEASE_TAG: v${{ needs.identity.outputs.version }}
+          VERSION: ${{ needs.identity.outputs.version }}
+          DIGEST: ${{ steps.container-manifest.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            "/repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            > "$RUNNER_TEMP/github-release-refs-promote.json"
+          python3 .github/scripts/verify_container_release.py promote \
+            --image "$IMAGE" --release-tag "$RELEASE_TAG" --digest "$DIGEST" \
+            --plan "$RUNNER_TEMP/ghcr-plan.json" \
+            --version "$VERSION" --release-refs-file "$RUNNER_TEMP/github-release-refs-promote.json" \
+            --username-env GHCR_USERNAME --token-env GHCR_TOKEN \
+            | tee "$RUNNER_TEMP/ghcr-promotion-summary.txt"
+          {
+            echo "### GHCR promotion"
+            cat "$RUNNER_TEMP/ghcr-promotion-summary.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify promoted stable tags
+        env:
+          IMAGE: ghcr.io/agentsyaml/mineru-cli
+          DIGEST: ${{ steps.container-manifest.outputs.digest }}
+          RELEASE_TAG: v${{ needs.identity.outputs.version }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_container_release.py tags \
+            --digest "$DIGEST" --image "$IMAGE" --release-tag "$RELEASE_TAG" \
+            --username-env GHCR_USERNAME --token-env GHCR_TOKEN \
+            | tee "$RUNNER_TEMP/ghcr-tags-summary.txt"
+          {
+            echo "### GHCR stable tags"
+            cat "$RUNNER_TEMP/ghcr-tags-summary.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   require-ci-evidence:
     needs: identity
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Require successful push CI for the exact protected-main commit
         env:
@@ -1029,6 +1136,7 @@ jobs:
   publish-release:
     needs: [identity, verify-binary-assets, require-ci-evidence, publish-crate, publish-python, publish-node, publish-container]
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: write

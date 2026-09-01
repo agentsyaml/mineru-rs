@@ -1,5 +1,6 @@
 import asyncio
 import io
+import os
 import sys
 import tempfile
 import types
@@ -7,9 +8,13 @@ import unittest
 import zipfile
 from pathlib import Path
 
+_USING_FACADE_FALLBACK = False
+
 try:
     import mineru_rs  # noqa: F401  (installed wheel / built native module)
 except ImportError:
+    if os.environ.get("MINERU_TEST_REQUIRE_NATIVE") == "1":
+        raise
     # Plain source checkout: mineru_rs is importable but the compiled
     # `_native` module may be absent (maturin build not run). Resolve the
     # source package and stub `_native` so the facade tests can still run.
@@ -17,6 +22,7 @@ except ImportError:
     try:
         import mineru_rs  # noqa: F401
     except ImportError:
+        _USING_FACADE_FALLBACK = True
         stub = types.ModuleType("mineru_rs._native")
         stub.canonical_stem = lambda value: Path(value).stem  # mirror stem semantics
         stub.validate_pdf_options = lambda *args: True
@@ -24,6 +30,14 @@ except ImportError:
         sys.modules["mineru_rs._native"] = stub
         sys.modules.pop("mineru_rs", None)
         import mineru_rs  # noqa: F401
+
+
+_NATIVE_AVAILABLE = (
+    not _USING_FACADE_FALLBACK
+    and getattr(mineru_rs._native, "_run", None) is not None
+)
+if os.environ.get("MINERU_TEST_REQUIRE_NATIVE") == "1" and not _NATIVE_AVAILABLE:
+    raise ImportError("native mineru_rs module is required for wheel tests")
 
 
 class FakeRun:
@@ -92,8 +106,8 @@ class ParseTests(unittest.TestCase):
                 asyncio.run(mineru_rs.parse(source))
         self.assertFalse(fake.output_paths[0].exists())
 
-    @unittest.skipIf(
-        getattr(mineru_rs._native, "_run", None) is None,
+    @unittest.skipUnless(
+        _NATIVE_AVAILABLE,
         "compiled native module unavailable; cannot exercise the office helper contract",
     )
     def test_office_conversion_unavailable_is_reported(self):

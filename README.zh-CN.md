@@ -222,6 +222,11 @@ fail-closed，绝不会冒充 3.4.5 VLM 路径。
 已发布镜像请使用明确的版本化 tag，例如当前的 `:0.3.0`；发布流程不会发布或
 更新可变的 `latest` tag。
 
+该镜像默认用 `--host 0.0.0.0` 启动 `mineru-api`，并设置
+`MINERU_API_PUBLIC_BIND_EXPOSED=true`，使 Docker 可以访问容器端口。该监听权限
+与请求策略相互独立：除非显式提供 `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true`，
+公开 HTTP client 访问仍保持关闭。
+
 ```sh
 mkdir -p output
 chmod a+rwx output  # 让镜像的非 root 用户可以写入
@@ -237,11 +242,13 @@ docker run --rm \
 curl http://127.0.0.1:8000/health
 ```
 
-宿主机绑定的输出目录必须允许镜像默认的非 root 用户写入。
+宿主机绑定的输出目录必须允许镜像默认的非 root 用户写入。`--publish` 地址控制
+宿主机暴露范围（此处为 `127.0.0.1`；改为 `0.0.0.0` 会在所有宿主机网卡上暴露），
+这与容器内的监听权限相互独立。命令中的
 `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` 是显式的、针对单个容器的未认证任务 API
-opt-in；不要将它放入 Dockerfile 或镜像的全局 ENV。优先按上例只发布到 loopback；
-若要扩大暴露范围，必须放在私有网络中，或置于带认证的反向代理之后，因为 API
-没有内置认证或任务所有权隔离。
+opt-in；省略它即可保持解析请求关闭，不要将它放入 Dockerfile 或镜像的全局 ENV。
+优先按上例只发布到 loopback；若要扩大暴露范围，必须放在私有网络中，或置于带认证的
+反向代理之后，因为 API 没有内置认证或任务所有权隔离。
 
 ### Docker Compose 配置
 

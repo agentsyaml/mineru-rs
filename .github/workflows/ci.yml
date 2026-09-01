@@ -82,7 +82,15 @@ jobs:
         run: cargo +1.89.0 test --locked -p mineru --all-targets --features office,legacy-office -- --test-threads=4
       - name: Run hermetic API process end-to-end tests
         run: |
-          cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --ignored --test-threads=1
+          for test_name in \
+            help_health_cwd_and_eof \
+            invalid_log_level_exits_before_bind_or_output \
+            public_bind_matrix \
+            sigint_exits_while_stdin_watcher_is_blocked \
+            active_worker_drains_before_exit
+          do
+            cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact "$test_name" --ignored --test-threads=1
+          done
           cargo +1.89.0 test --locked -p mineru --features office --test mineru_api_server -- --exact canonical_client_consumes_real_api_server_zip_and_publishes_layout --ignored --test-threads=1
           cargo +1.89.0 test --locked -p mineru --features office --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
       - name: Check root package without default features
@@ -226,7 +234,7 @@ jobs:
           assert mineru_rs.canonical_stem("a bad/pdf") == "a bad_pdf"
           assert mineru_rs.validate_pdf_options(0, None, True, True, True) is True
           PY
-          python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+          MINERU_TEST_REQUIRE_NATIVE=1 python -m unittest discover -s bindings/python/tests -p 'test_*.py'
 
   node-binding:
     name: Node 18–24 binding
@@ -244,6 +252,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.1
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
       - name: Install npm 12.0.2
         run: npm install --global npm@12.0.2
       - name: Install Node dependencies
@@ -282,6 +292,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 18.20.8
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
       - name: Test on Node 18
         run: npm test
 
