@@ -1,3 +1,8 @@
+use super::transaction::{cleanup_transaction, create_transaction, publish_transaction_inner};
+use super::tree::{
+    MAX_COMPONENT_BYTES, MAX_ENTRIES, MAX_NAME_BUDGET, MAX_RESIDENT_BYTES, RelativePath, TreeState,
+    portable_name,
+};
 use super::*;
 use std::path::{Path, PathBuf};
 
@@ -6,12 +11,11 @@ fn bundle(root: &Path, middle: &str) -> PathBuf {
     std::fs::create_dir(&bundle).unwrap();
     std::fs::write(bundle.join("markdown.md"), "# document\n").unwrap();
     std::fs::write(bundle.join("middle_json.json"), middle).unwrap();
-    std::fs::write(bundle.join("content_list.json"), "[]").unwrap();
     std::fs::write(bundle.join("structured_content.json"), "{}").unwrap();
     bundle
 }
 
-const VALID_MIDDLE: &str = r#"{"schema_version":"1.0","pages":[{}],"_backend":"hybrid"}"#;
+const VALID_MIDDLE: &str = r#"{"schema":"docvortex.middle","schema_version":"2.0","pages":[{}]}"#;
 
 fn stage_validation(bundle: &Path, byte_cap: u64) -> Result<(), String> {
     let root = tempfile::tempdir().unwrap();
@@ -55,9 +59,9 @@ fn accepts_v4_shape_and_replaces_atomically() {
 #[test]
 fn rejects_schema_backend_empty_pages_unknown_and_cap() {
     for middle in [
-        r#"{"schema_version":"0.9","pages":[{}],"_backend":"hybrid"}"#,
-        r#"{"schema_version":"1.0","pages":[{}],"_backend":"vlm"}"#,
-        r#"{"schema_version":"1.0","pages":[],"_backend":"hybrid"}"#,
+        r#"{"schema":"docvortex.middle","schema_version":"1.0","pages":[{}]}"#,
+        r#"{"schema":"docvortex.other","schema_version":"2.0","pages":[{}]}"#,
+        r#"{"schema":"docvortex.middle","schema_version":"2.0","pages":[]}"#,
     ] {
         let temp = tempfile::tempdir().unwrap();
         let input = bundle(temp.path(), middle);
@@ -82,7 +86,9 @@ fn rejects_entry_depth_component_and_path_caps() {
     let many = bundle(many_root.path(), VALID_MIDDLE);
     let images = many.join("images");
     std::fs::create_dir(&images).unwrap();
-    for index in 0..(MAX_ENTRIES as usize - 4) {
+    // ponytail: bundle now ships three required files, so one fewer filler is needed to
+    // push the walk past MAX_ENTRIES.
+    for index in 0..(MAX_ENTRIES as usize - 3) {
         std::fs::write(images.join(format!("empty-{index}")), []).unwrap();
     }
     assert!(validate_and_publish(&many, many_root.path(), "document", u64::MAX).is_err());
@@ -114,7 +120,7 @@ fn rejects_entry_depth_component_and_path_caps() {
 
 #[test]
 fn rejects_oversized_text_and_json_before_dom_parsing() {
-    for name in ["markdown.md", "content_list.json"] {
+    for name in ["markdown.md", "middle_json.json"] {
         let temp = tempfile::tempdir().unwrap();
         let input = bundle(temp.path(), VALID_MIDDLE);
         let file = std::fs::OpenOptions::new()
@@ -141,7 +147,6 @@ fn rejects_oversized_text_and_json_before_dom_parsing() {
 fn rejects_invalid_text_and_json_without_publishing() {
     let cases = [
         ("markdown.md", vec![0xff, 0xfe]),
-        ("content_list.json", b"{".to_vec()),
         ("structured_content.json", b"{".to_vec()),
         ("model_output.json", b"{".to_vec()),
     ];
@@ -166,7 +171,7 @@ fn validation_failure_preserves_existing_output() {
     let replacement_root = tempfile::tempdir().unwrap();
     let replacement = bundle(
         replacement_root.path(),
-        r#"{"schema_version":"0.9","pages":[{}],"_backend":"hybrid"}"#,
+        r#"{"schema":"docvortex.middle","schema_version":"1.0","pages":[{}]}"#,
     );
     assert!(validate_and_publish(&replacement, temp.path(), "document", 1024).is_err());
     assert_eq!(

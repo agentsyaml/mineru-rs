@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import email.parser
 import gzip
 import hashlib
@@ -65,7 +66,10 @@ CRATES_DOWNLOAD_MAX_BYTES = 16 * 1024 * 1024
 # Version 0.2.3 was first published from cc3c1d8d (run 30886924848). A rerun
 # dispatches from a later recovery commit and repackages the same source, so the
 # only difference vs. the published artifact is .cargo_vcs_info.json.git.sha1.
-# Permit exactly this version->first-published-commit pair for that lineage.
+# Permit exactly this version->first-published-commit pair for that lineage,
+# but only while today is before RECOVERY_EXPIRY: past that date the pardons
+# self-disable for new releases. Pass --as-of with a date before the expiry to
+# verify historical releases from the 0.2.3 lineage reproducibly.
 RECOVERY_CRATE_COMMITS = {"0.2.3": "cc3c1d8d2ca0b1c873e401b08423232db139cee1"}
 RECOVERY_REGISTRY_RUNS = {
     "0.2.3": (
@@ -80,6 +84,16 @@ RECOVERY_REGISTRY_PATHS = {
     ".github/workflows/release.yml",
     "Dockerfile.release",
 }
+# Release 0.2.3 and its recovery commits date from 2026-08; anything released
+# after this cutoff is not part of the recovery lineage.
+RECOVERY_EXPIRY = dt.date(2026, 9, 1)
+
+
+def recovery_active(today: dt.date) -> bool:
+    """Mirrors check_cargo_audit.check_expiry: pardons are inert past the cutoff."""
+    return today < RECOVERY_EXPIRY
+
+
 PYTHON_SCRIPTS = {"mineru": "mineru_rs._cli:main", "mineru-rs": "mineru_rs._cli:main"}
 NODE_ROOT_BIN = {"mineru": "bin/mineru.js", "mineru-rs": "bin/mineru.js"}
 WHEEL_ENTRY_POINTS = b"[console_scripts]\nmineru=mineru_rs._cli:main\nmineru-rs=mineru_rs._cli:main\n"
@@ -688,7 +702,6 @@ def expected_crate_files(source: Path) -> set[str]:
         "LICENSE-MIT",
         "LICENSE-APACHE",
         "docs/usage.md",
-        "docs/usage.en.md",
         "docs/compatibility.md",
     }
     # Cargo emits this generated file only when the source has a VCS revision.
@@ -723,7 +736,7 @@ def validate_crate_manifest(files: dict[str, bytes], version: str) -> None:
     if set(package.get("include", [])) != {
         "Cargo.toml", "Cargo.lock", "src/**", "/README.md", "README.zh-CN.md",
         "LICENSE-MIT", "LICENSE-APACHE",
-        "docs/usage.md", "docs/usage.en.md", "docs/compatibility.md", "!tests/fixtures/input/README.md", *CRATE_FIXTURES, *CRATE_PYTHON_FILES,
+        "docs/usage.md", "docs/compatibility.md", "!tests/fixtures/input/README.md", *CRATE_FIXTURES, *CRATE_PYTHON_FILES,
     }:
         fail("normalized Cargo.toml include policy differs")
 
@@ -1041,10 +1054,21 @@ def require_commit(commit: str) -> str:
     return commit
 
 
+def recovery_table(version: str, today: dt.date) -> tuple | None:
+    if not recovery_active(today):
+        return None
+    return RECOVERY_REGISTRY_RUNS.get(version)
+
+
 def registry_recovery_decision(
-    version: str, commit: str, head: str, parents: list[str], changed_paths: set[str]
+    version: str,
+    commit: str,
+    head: str,
+    parents: list[str],
+    changed_paths: set[str],
+    today: dt.date | None = None,
 ) -> str:
-    recovery = RECOVERY_REGISTRY_RUNS.get(version)
+    recovery = recovery_table(version, today or dt.datetime.now(dt.timezone.utc).date())
     if recovery is None:
         return ""
     _, required_parent, run_id = recovery
@@ -1060,7 +1084,7 @@ def registry_recovery_decision(
 
 
 def registry_recovery(args: argparse.Namespace) -> None:
-    recovery = RECOVERY_REGISTRY_RUNS.get(args.version)
+    recovery = recovery_table(args.version, args.as_of)
     if recovery is None:
         return
     first_publish, _, _ = recovery
@@ -1135,7 +1159,13 @@ def read_bounded(response: typing.IO[bytes], max_bytes: int) -> bytes:
     return payload
 
 
-def verify_crate_lineage(local: dict[str, bytes], remote: dict[str, bytes], version: str, commit: str) -> None:
+def verify_crate_lineage(
+    local: dict[str, bytes],
+    remote: dict[str, bytes],
+    version: str,
+    commit: str,
+    today: dt.date | None = None,
+) -> None:
     if set(local) != set(remote):
         fail(f"crate path sets differ: missing={sorted(set(remote) - set(local))!r}, extra={sorted(set(local) - set(remote))!r}")
     for name in sorted(local):
@@ -1151,7 +1181,10 @@ def verify_crate_lineage(local: dict[str, bytes], remote: dict[str, bytes], vers
         fail(f"local crate path_in_vcs {local_path!r} is not the package root")
     if remote_path != local_path:
         fail(f"remote crate path_in_vcs {remote_path!r} != local {local_path!r}")
+    today = today if today is not None else dt.datetime.now(dt.timezone.utc).date()
     pinned = RECOVERY_CRATE_COMMITS.get(version)
+    if not (pinned is not None and today < RECOVERY_EXPIRY):
+        pinned = None
     if remote_sha != commit and not (pinned is not None and remote_sha == pinned):
         fail(f"remote crate VCS sha {remote_sha} does not match dispatch commit {commit} or a pinned recovery commit")
 
@@ -1513,7 +1546,7 @@ def self_test(_: argparse.Namespace) -> None:
         }
         crate_include = {
             "Cargo.toml", "Cargo.lock", "src/**", "/README.md", "README.zh-CN.md",
-            "LICENSE-MIT", "LICENSE-APACHE", "docs/usage.md", "docs/usage.en.md", "docs/compatibility.md",
+            "LICENSE-MIT", "LICENSE-APACHE", "docs/usage.md", "docs/compatibility.md",
             "!tests/fixtures/input/README.md", *CRATE_FIXTURES, *CRATE_PYTHON_FILES,
         }
 
@@ -1541,6 +1574,9 @@ def self_test(_: argparse.Namespace) -> None:
         vcs_other = "2" * 40
         pinned_commit = RECOVERY_CRATE_COMMITS["0.2.3"]
         assert pinned_commit == "cc3c1d8d2ca0b1c873e401b08423232db139cee1"
+        # Exercise the recovery pardons while they are still active.
+        recovery_active_date = RECOVERY_EXPIRY - dt.timedelta(days=1)
+        expired_date = RECOVERY_EXPIRY
 
         def crate_files(sha: str, path_in_vcs: str = "") -> dict[str, bytes]:
             return {
@@ -1549,8 +1585,8 @@ def self_test(_: argparse.Namespace) -> None:
                 "src/lib.rs": b"fn f() {}\n",
             }
 
-        verify_crate_lineage(crate_files(vcs_commit), crate_files(pinned_commit), "0.2.3", vcs_commit)
-        verify_crate_lineage(crate_files(vcs_commit), crate_files(vcs_commit), "0.2.3", vcs_commit)
+        verify_crate_lineage(crate_files(vcs_commit), crate_files(pinned_commit), "0.2.3", vcs_commit, recovery_active_date)
+        verify_crate_lineage(crate_files(vcs_commit), crate_files(vcs_commit), "0.2.3", vcs_commit, recovery_active_date)
         drift = crate_files(pinned_commit)
         drift["src/lib.rs"] = b"fn g() {}\n"
         must_fail(
@@ -1584,6 +1620,14 @@ def self_test(_: argparse.Namespace) -> None:
             "unrelated future version used the pinned recovery commit",
         )
         verify_crate_lineage(crate_files(vcs_commit), crate_files(vcs_commit), "0.2.4", vcs_commit)
+        # Past the expiry the pinned-commit pardon is inert: a remote sha that
+        # only matches the pinned recovery commit must now fail.
+        must_fail(
+            lambda: verify_crate_lineage(
+                crate_files(vcs_commit), crate_files(pinned_commit), "0.2.3", vcs_commit, expired_date
+            ),
+            "expired recovery pardon was accepted",
+        )
         api_obj = {"crate": CRATES_CRATE, "num": "0.2.3", "checksum": "c" * 64, "yanked": False}
         assert require_crate_api(api_obj, "0.2.3") == "c" * 64
         must_fail(lambda: require_crate_api({**api_obj, "yanked": True}, "0.2.3"), "yanked crates.io version was accepted")
@@ -1606,34 +1650,42 @@ def self_test(_: argparse.Namespace) -> None:
         must_fail(lambda: require_commit("ABC"), "invalid commit was accepted")
         recovery_commit = "3" * 40
         recovery_parent = RECOVERY_REGISTRY_RUNS["0.2.3"][1]
-        assert registry_recovery_decision("0.2.4", "bad", "wrong", [], {"src/lib.rs"}) == ""
+        assert registry_recovery_decision("0.2.4", "bad", "wrong", [], {"src/lib.rs"}, recovery_active_date) == ""
+        # Past the expiry the registry-recovery pardon is inert even for 0.2.3.
         assert (
             registry_recovery_decision(
-                "0.2.3", recovery_commit, recovery_commit, [recovery_parent], {".github/workflows/release.yml"}
+                "0.2.3", recovery_commit, recovery_commit, [recovery_parent], {".github/workflows/release.yml"}, expired_date
+            )
+            == ""
+        )
+        assert registry_recovery_decision("0.2.3", "bad", "wrong", [], {"src/lib.rs"}, expired_date) == ""
+        assert (
+            registry_recovery_decision(
+                "0.2.3", recovery_commit, recovery_commit, [recovery_parent], {".github/workflows/release.yml"}, recovery_active_date
             )
             == "30886924848"
         )
         must_fail(
             lambda: registry_recovery_decision(
-                "0.2.3", recovery_commit, "4" * 40, [recovery_parent], set()
+                "0.2.3", recovery_commit, "4" * 40, [recovery_parent], set(), recovery_active_date
             ),
             "registry recovery with wrong HEAD was accepted",
         )
         must_fail(
             lambda: registry_recovery_decision(
-                "0.2.3", recovery_commit, recovery_commit, [recovery_parent, "5" * 40], set()
+                "0.2.3", recovery_commit, recovery_commit, [recovery_parent, "5" * 40], set(), recovery_active_date
             ),
             "registry recovery merge commit was accepted",
         )
         must_fail(
             lambda: registry_recovery_decision(
-                "0.2.3", recovery_commit, recovery_commit, ["5" * 40], set()
+                "0.2.3", recovery_commit, recovery_commit, ["5" * 40], set(), recovery_active_date
             ),
             "registry recovery with wrong parent was accepted",
         )
         must_fail(
             lambda: registry_recovery_decision(
-                "0.2.3", recovery_commit, recovery_commit, [recovery_parent], {"src/lib.rs"}
+                "0.2.3", recovery_commit, recovery_commit, [recovery_parent], {"src/lib.rs"}, recovery_active_date
             ),
             "registry recovery source drift was accepted",
         )
@@ -1951,6 +2003,12 @@ def parser() -> argparse.ArgumentParser:
     recovery.add_argument("--root", type=Path, default=Path("."))
     recovery.add_argument("--version", required=True)
     recovery.add_argument("--commit", required=True)
+    recovery.add_argument(
+        "--as-of",
+        type=dt.date.fromisoformat,
+        default=dt.datetime.now(dt.timezone.utc).date(),
+        help="effective date for recovery-pardon expiry (historical reproducibility)",
+    )
     recovery.set_defaults(func=registry_recovery)
 
     npm = sub.add_parser("npm")

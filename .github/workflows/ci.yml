@@ -130,8 +130,11 @@ jobs:
               "mineru-office-convert",
           }
           PY
+      # Package once with --no-verify: the unpacked-crate test below performs
+      # the build verification, and the dry-run publication gate repackages
+      # without compiling (--no-verify), so no pass is duplicated.
       - name: Package root crate
-        run: cargo +1.89.0 package -p mineru --locked
+        run: cargo +1.89.0 package -p mineru --locked --no-verify
       - name: Inspect and test packaged crate
         run: |
           cargo +1.89.0 metadata --locked --format-version 1 --no-deps > "$RUNNER_TEMP/package-metadata.json"
@@ -151,7 +154,9 @@ jobs:
           cargo +1.89.0 test --locked -p mineru --all-targets --features office \
             --manifest-path "$RUNNER_TEMP/crate-unpacked/mineru-$PACKAGE_VERSION/Cargo.toml"
       - name: Dry-run crates.io publication
-        run: cargo +1.89.0 publish -p mineru --dry-run --locked
+        # --no-verify keeps this a pure packaging/registry validation gate;
+        # compilation of the packaged crate is already covered above.
+        run: cargo +1.89.0 publish -p mineru --dry-run --locked --no-verify
 
   windows-path-safety-msrv:
     name: Windows path safety, Rust 1.89.0

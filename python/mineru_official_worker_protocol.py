@@ -27,49 +27,49 @@ WORKER_SOURCE_CONTRACT = (
 )
 PROTOCOL = "mineru-rs-official-worker/1"
 PERSISTENT_PROTOCOL = "mineru-rs-official-worker/2"
-PACKAGE_VERSION = "4.0.0a6"
-SCHEMA_VERSION = "1.0"
+PACKAGE_VERSION = "4.0.4"
+SCHEMA_VERSION = "2.0"
 BUNDLE_NAME = "hybrid-v4"
 PROTOCOL_CAP = 64 * 1024
 DIAGNOSTIC_CAP = 64 * 1024
 PERSISTENT_FRAME_CAP = 64 * 1024
 PERSISTENT_RECENT_REQUEST_CAPACITY = 64
-PERSISTENT_EFFORTS = ("medium", "high", "xhigh")
-PERSISTENT_MODEL_STACKS = ("auto", "light", "full")
+PERSISTENT_TIERS = ("standard", "advanced")
+# Mirror src/official_worker.rs PERSISTENT_OCR_MODES: this lane only ever
+# requests "auto", so the handshake must advertise exactly that set.
+PERSISTENT_OCR_MODES = ("auto",)
 PERSISTENT_INPUT_FORMATS = (
-    "pdf",
-    "png",
-    "jpeg",
-    "jpg",
-    "jp2",
-    "webp",
-    "gif",
-    "bmp",
-    "tiff",
+    "pdf", "png", "jpeg", "jpg", "jp2", "webp", "gif", "bmp", "tiff",
 )
 PERSISTENT_CAPABILITIES = {
-    "efforts": list(PERSISTENT_EFFORTS),
-    "model_stacks": list(PERSISTENT_MODEL_STACKS),
+    "tiers": list(PERSISTENT_TIERS),
+    "ocr_modes": list(PERSISTENT_OCR_MODES),
     "input_formats": list(PERSISTENT_INPUT_FORMATS),
     "bundle_name": BUNDLE_NAME,
     "cancellation": "process-terminate",
 }
 
+# Exact per-document request field set (parse_async kwargs plus transport
+# metadata).  Optional fields may be omitted entirely or be null.
+DOCUMENT_REQUEST_FIELDS = frozenset(
+    {"protocol", "request_id", "max_bundle_bytes", "bundle_name", "input_path",
+     "bundle_path", "tier", "ocr_mode", "image_analysis"}
+)
+DOCUMENT_OPTIONAL_FIELDS = frozenset(
+    {"page_range", "vlm_server_url", "vlm_api_key", "vlm_model", "model_home", "config"}
+)
+
+# Only these variables are injected into the environment.  Legacy MinerU
+# variables such as MINERU_VL_API_KEY and MINERU_VL_MODEL_NAME are neither
+# injected nor popped: upstream conflicts with an explicit VlmConfig api_key,
+# so relying on them would be incorrect.
+_REQUEST_ENV_KEYS = (("MINERU_HOME", "model_home"), ("MINERU_CONFIG", "config"))
+
 __all__ = (
-    "WORKER_SOURCE_CONTRACT",
-    "PROTOCOL",
-    "PERSISTENT_PROTOCOL",
-    "PACKAGE_VERSION",
-    "SCHEMA_VERSION",
-    "BUNDLE_NAME",
-    "PROTOCOL_CAP",
-    "DIAGNOSTIC_CAP",
-    "LimitError",
-    "BoundedCapture",
-    "_bounded_text",
-    "_emit",
-    "_persistent_main",
-    "_response",
+    "WORKER_SOURCE_CONTRACT", "PROTOCOL", "PERSISTENT_PROTOCOL", "PACKAGE_VERSION",
+    "SCHEMA_VERSION", "BUNDLE_NAME", "PROTOCOL_CAP", "DIAGNOSTIC_CAP", "LimitError",
+    "BoundedCapture", "_bounded_text", "_emit", "_persistent_main", "_response",
+    "_validate_document_request", "_document_parse_kwargs", "_document_env",
 )
 
 
@@ -128,12 +128,76 @@ def _response(
         "status": status,
         "package_version": package,
         "schema_version": SCHEMA_VERSION,
-        "backend": request.get("backend", ""),
         "bundle_name": BUNDLE_NAME,
     }
     if error:
         response["error"] = _bounded_text(error)
     return response
+
+
+def _validate_document_request(request: dict[str, object]) -> None:
+    """Strict field-set validation for one per-document request frame."""
+    if request.get("protocol") != PROTOCOL:
+        raise ValueError("unsupported adapter protocol")
+    if request.get("bundle_name") != BUNDLE_NAME:
+        raise ValueError("unsupported bundle name")
+    present = set(request)
+    if not (DOCUMENT_REQUEST_FIELDS <= present <= DOCUMENT_REQUEST_FIELDS | DOCUMENT_OPTIONAL_FIELDS):
+        raise ValueError("request has unknown or missing fields")
+    if not isinstance(request["request_id"], str):
+        raise ValueError("request_id must be a string")
+    if request["tier"] not in PERSISTENT_TIERS:
+        raise ValueError("request tier capability mismatch")
+    if request["ocr_mode"] not in PERSISTENT_OCR_MODES:
+        raise ValueError("request ocr_mode capability mismatch")
+    if not isinstance(request["image_analysis"], bool):
+        raise ValueError("image_analysis must be boolean")
+    for name in ("input_path", "bundle_path"):
+        if not isinstance(request[name], str) or not request[name]:
+            raise ValueError(f"{name} must be a nonempty string")
+    max_bundle_bytes = request["max_bundle_bytes"]
+    if isinstance(max_bundle_bytes, bool) or not isinstance(max_bundle_bytes, int) or max_bundle_bytes <= 0:
+        raise ValueError("max_bundle_bytes must be a positive integer")
+    for name in ("page_range", "vlm_server_url", "vlm_api_key", "vlm_model", "model_home", "config"):
+        value = request.get(name)
+        if value is not None and (not isinstance(value, str) or (name != "page_range" and not value)):
+            raise ValueError(f"{name} must be a string")
+    vlm_server_url = request.get("vlm_server_url")
+    if isinstance(vlm_server_url, str) and not vlm_server_url.startswith(("http://", "https://")):
+        raise ValueError("vlm_server_url must be an HTTP(S) URL")
+
+
+def _document_parse_kwargs(request: dict[str, object]) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "tier": request["tier"],
+        "ocr_mode": request["ocr_mode"],
+        "image_analysis": bool(request["image_analysis"]),
+    }
+    page_range = request.get("page_range")
+    if page_range:
+        kwargs["page_range"] = page_range
+    # Upstream VlmConfig (mineru.config) fields are server_url/api_key/model;
+    # request frames carry the vlm_-prefixed transport names.
+    vlm_fields = {
+        {"vlm_server_url": "server_url", "vlm_api_key": "api_key", "vlm_model": "model"}[name]: request[name]
+        for name in ("vlm_server_url", "vlm_api_key", "vlm_model")
+        if request.get(name)
+    }
+    if vlm_fields:
+        from mineru.config import VlmConfig
+
+        kwargs["vlm_config"] = VlmConfig(**vlm_fields)
+    return kwargs
+
+
+def _document_env(request: dict[str, object]) -> None:
+    """Inject only supported MinerU variables; never MINERU_MODEL_STACK."""
+    for key, request_key in _REQUEST_ENV_KEYS:
+        value = request.get(request_key)
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = str(value)
 
 
 def _emit(response: dict[str, object], diagnostic: str = "") -> None:
@@ -174,7 +238,6 @@ def _emit(response: dict[str, object], diagnostic: str = "") -> None:
                         "status",
                         "package_version",
                         "schema_version",
-                        "backend",
                         "bundle_name",
                     )
                     if key in response
@@ -220,17 +283,8 @@ def _persistent_required_string(value: object, name: str) -> str:
 
 def _persistent_start(frame: dict[str, object]) -> dict[str, object]:
     fields = {
-        "type",
-        "protocol",
-        "package_version",
-        "schema_version",
-        "backend",
-        "model_stack",
-        "model_base_dir",
-        "config",
-        "vl_api_key",
-        "vl_model_name",
-        "capabilities",
+        "type", "protocol", "package_version", "schema_version", "model_home",
+        "config", "vlm_api_key", "vlm_model", "capabilities",
     }
     if set(frame) != fields:
         raise ValueError("persistent startup frame has unknown or missing fields")
@@ -238,14 +292,9 @@ def _persistent_start(frame: dict[str, object]) -> dict[str, object]:
         raise ValueError("persistent startup frame protocol mismatch")
     if frame["package_version"] != PACKAGE_VERSION or frame["schema_version"] != SCHEMA_VERSION:
         raise ValueError("persistent startup package/schema mismatch")
-    if frame["backend"] != "hybrid-http-client":
-        raise ValueError("persistent startup backend mismatch")
-    model_stack = _persistent_required_string(frame["model_stack"], "model_stack")
-    if model_stack not in PERSISTENT_MODEL_STACKS:
-        raise ValueError("persistent startup model_stack capability mismatch")
     if frame["capabilities"] != PERSISTENT_CAPABILITIES:
         raise ValueError("persistent startup capability mismatch")
-    for name in ("model_base_dir", "config", "vl_api_key", "vl_model_name"):
+    for name in ("model_home", "config", "vlm_api_key", "vlm_model"):
         _persistent_string(frame[name], name, allow_none=True)
     return frame
 
@@ -257,7 +306,6 @@ def _persistent_handshake(start: dict[str, object]) -> dict[str, object]:
         "status": "ready",
         "package_version": PACKAGE_VERSION,
         "schema_version": SCHEMA_VERSION,
-        "backend": start["backend"],
         "max_in_flight": 1,
         "capabilities": PERSISTENT_CAPABILITIES,
     }
@@ -270,51 +318,36 @@ def _persistent_request(
     recent_requests: _PersistentRecentRequests,
 ) -> tuple[str, int, str, str]:
     fields = {
-        "type",
-        "protocol",
-        "request_id",
-        "sequence",
-        "package_version",
-        "schema_version",
-        "backend",
-        "effort",
-        "server_url",
-        "method",
-        "lang",
-        "image_analysis",
-        "page_range",
-        "bundle_name",
-        "input_path",
-        "bundle_path",
-        "max_bundle_bytes",
-    }
-    without_page_range = fields - {"page_range"}
-    if set(frame) not in (fields, without_page_range):
+        "type", "protocol", "request_id", "sequence", "package_version",
+        "schema_version", "bundle_name", "input_path", "bundle_path",
+        "max_bundle_bytes", "tier", "ocr_mode", "image_analysis",
+    } | DOCUMENT_OPTIONAL_FIELDS
+    present = set(frame)
+    if not (fields - DOCUMENT_OPTIONAL_FIELDS <= present <= fields):
         raise ValueError("persistent request has unknown or missing fields")
     if frame["type"] != "request" or frame["protocol"] != PERSISTENT_PROTOCOL:
         raise ValueError("persistent request protocol mismatch")
     if frame["package_version"] != PACKAGE_VERSION or frame["schema_version"] != SCHEMA_VERSION:
         raise ValueError("persistent request package/schema mismatch")
-    if frame["backend"] != start["backend"] or frame["bundle_name"] != BUNDLE_NAME:
-        raise ValueError("persistent request backend or bundle mismatch")
+    if frame["bundle_name"] != BUNDLE_NAME:
+        raise ValueError("persistent request bundle mismatch")
     request_id = _persistent_required_string(frame["request_id"], "request_id")
     if request_id in recent_requests.request_ids:
         raise ValueError("persistent request id was repeated")
     sequence = frame["sequence"]
     if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence != expected_sequence:
         raise ValueError("persistent request sequence was repeated or out of order")
-    effort = _persistent_required_string(frame["effort"], "effort")
-    if effort not in PERSISTENT_EFFORTS:
-        raise ValueError("persistent effort capability mismatch")
-    server_url = _persistent_string(frame["server_url"], "server_url", allow_none=True)
-    if effort in ("high", "xhigh") and (
-        server_url is None or not server_url.startswith(("http://", "https://"))
-    ):
-        raise ValueError("persistent high/xhigh requests require an HTTP(S) server_url")
-    method = _persistent_required_string(frame["method"], "method")
-    lang = _persistent_required_string(frame["lang"], "lang")
+    if frame["tier"] not in PERSISTENT_TIERS:
+        raise ValueError("persistent tier capability mismatch")
+    if frame["ocr_mode"] not in PERSISTENT_OCR_MODES:
+        raise ValueError("persistent ocr_mode capability mismatch")
     if not isinstance(frame["image_analysis"], bool):
         raise ValueError("persistent image_analysis must be boolean")
+    for name in ("vlm_server_url", "vlm_api_key", "vlm_model", "model_home", "config"):
+        _persistent_string(frame[name], name, allow_none=True)
+    vlm_server_url = frame["vlm_server_url"]
+    if isinstance(vlm_server_url, str) and not vlm_server_url.startswith(("http://", "https://")):
+        raise ValueError("persistent vlm_server_url must be an HTTP(S) URL")
     input_path = _persistent_required_string(frame["input_path"], "input_path")
     bundle_path = _persistent_required_string(frame["bundle_path"], "bundle_path")
     if (
@@ -328,10 +361,10 @@ def _persistent_request(
         raise ValueError("persistent max_bundle_bytes must be positive")
     assert isinstance(sequence, int) and not isinstance(sequence, bool)
     assert isinstance(max_bundle_bytes, int)
-    if "page_range" in frame and (
+    if frame.get("page_range") is not None and (
         not isinstance(frame["page_range"], str) or not frame["page_range"]
     ):
-        raise ValueError("persistent page_range must be nonempty when supplied")
+        raise ValueError("persistent page_range must be a nonempty string when supplied")
     recent_requests.remember(request_id, input_path, bundle_path)
     return request_id, sequence, input_path, bundle_path
 
@@ -347,7 +380,6 @@ def _persistent_result(
         "status": status,
         "package_version": PACKAGE_VERSION,
         "schema_version": SCHEMA_VERSION,
-        "backend": request["backend"],
         "bundle_name": BUNDLE_NAME,
     }
     if error:
@@ -403,20 +435,9 @@ def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
         _persistent_start(startup)
         package = importlib.metadata.version("mineru")
         if package != PACKAGE_VERSION:
-            raise ValueError("MinerU package version is not 4.0.0a6")
+            raise ValueError("MinerU package version is not 4.0.4")
         with contextlib.redirect_stdout(startup_capture), contextlib.redirect_stderr(startup_capture):
-            for key, frame_key in (
-                ("MINERU_MODEL_STACK", "model_stack"),
-                ("MINERU_MODEL_BASE_DIR", "model_base_dir"),
-                ("MINERU_CONFIG", "config"),
-                ("MINERU_VL_API_KEY", "vl_api_key"),
-                ("MINERU_VL_MODEL_NAME", "vl_model_name"),
-            ):
-                value = startup[frame_key]
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = str(value)
+            _document_env(startup)
             parser = importlib.import_module("mineru.parser")
         _emit(_persistent_handshake(startup), startup_capture.getvalue())
     except Exception as error:
@@ -427,7 +448,6 @@ def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
                 "status": "error",
                 "package_version": locals().get("package", ""),
                 "schema_version": SCHEMA_VERSION,
-                "backend": "hybrid-http-client",
                 "bundle_name": BUNDLE_NAME,
                 "error": _bounded_text(str(error)),
             },
@@ -456,7 +476,6 @@ def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
                     "status": "error",
                     "package_version": PACKAGE_VERSION,
                     "schema_version": SCHEMA_VERSION,
-                    "backend": startup["backend"],
                     "bundle_name": BUNDLE_NAME,
                     "error": _bounded_text(str(error)),
                 }
@@ -465,16 +484,7 @@ def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
 
         capture = BoundedCapture(DIAGNOSTIC_CAP)
         try:
-            kwargs = {
-                "backend": request["backend"],
-                "effort": request["effort"],
-                "server_url": request["server_url"],
-                "method": request["method"],
-                "lang": request["lang"],
-                "image_analysis": request["image_analysis"],
-            }
-            if request.get("page_range"):
-                kwargs["page_range"] = request["page_range"]
+            kwargs = _document_parse_kwargs(request)
             with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
                 result = asyncio.run(parser.parse_async(request["input_path"], **kwargs))
                 result.save(

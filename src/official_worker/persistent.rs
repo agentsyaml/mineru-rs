@@ -19,57 +19,42 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::{
-    OfficialBundle, OfficialRequest, PACKAGE_VERSION, PERSISTENT_BACKEND, PERSISTENT_MODEL_STACKS,
-    SCHEMA_VERSION,
-};
+use super::{OfficialBundle, OfficialRequest, PACKAGE_VERSION, SCHEMA_VERSION};
 use child::{PersistentChild, persistent_error_text, persistent_stderr_text};
 use protocol::validate_persistent_request;
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct OfficialSessionConfig {
-    backend: &'static str,
     package_version: &'static str,
     schema_version: &'static str,
-    model_stack: String,
-    model_base_dir: Option<PathBuf>,
+    model_home: Option<PathBuf>,
     config: Option<PathBuf>,
-    vl_api_key: Option<String>,
-    vl_model_name: Option<String>,
+    vlm_api_key: Option<String>,
+    vlm_model: Option<String>,
 }
 
-#[allow(dead_code)]
 impl OfficialSessionConfig {
     pub(crate) fn new(
-        model_stack: String,
-        model_base_dir: Option<PathBuf>,
+        model_home: Option<PathBuf>,
         config: Option<PathBuf>,
-        vl_api_key: Option<String>,
-        vl_model_name: Option<String>,
+        vlm_api_key: Option<String>,
+        vlm_model: Option<String>,
     ) -> Result<Self, String> {
-        if !PERSISTENT_MODEL_STACKS.contains(&model_stack.as_str()) {
-            return Err("official persistent model stack is unsupported".into());
-        }
         Ok(Self {
-            backend: PERSISTENT_BACKEND,
             package_version: PACKAGE_VERSION,
             schema_version: SCHEMA_VERSION,
-            model_stack,
-            model_base_dir,
+            model_home,
             config,
-            vl_api_key,
-            vl_model_name,
+            vlm_api_key,
+            vlm_model,
         })
     }
 
     fn matches_request(&self, request: &OfficialRequest) -> Result<(), String> {
-        if request.backend != self.backend
-            || request.model_stack != self.model_stack
-            || request.model_base_dir != self.model_base_dir
+        if request.model_home != self.model_home
             || request.config != self.config
-            || request.vl_api_key != self.vl_api_key
-            || request.vl_model_name != self.vl_model_name
+            || request.vlm_api_key != self.vlm_api_key
+            || request.vlm_model != self.vlm_model
         {
             return Err("official persistent request does not match its session config".into());
         }
@@ -77,7 +62,6 @@ impl OfficialSessionConfig {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) struct OfficialPersistentWorker {
     executable: PathBuf,
     config: OfficialSessionConfig,
@@ -89,7 +73,6 @@ pub(crate) struct OfficialPersistentWorker {
     owner: Arc<StdMutex<Option<JoinHandle<()>>>>,
 }
 
-#[allow(dead_code)]
 struct PersistentCommand {
     request: OfficialRequest,
     temporary: TempDir,
@@ -99,7 +82,6 @@ struct PersistentCommand {
     response: oneshot::Sender<Result<OfficialBundle, String>>,
 }
 
-#[allow(dead_code)]
 impl OfficialPersistentWorker {
     pub(crate) fn new(
         executable: Option<PathBuf>,
@@ -224,10 +206,6 @@ impl OfficialPersistentWorker {
         }
     }
 
-    pub(crate) async fn drain(&self) -> Result<(), String> {
-        self.shutdown().await
-    }
-
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
         self.closed.store(true, Ordering::Release);
         let _ = self.shutdown.send(true);
@@ -255,13 +233,11 @@ impl Drop for OfficialPersistentWorker {
     }
 }
 
-#[allow(dead_code)]
 enum PersistentFailure {
     Dead(String),
     Document(String),
 }
 
-#[allow(dead_code)]
 async fn ensure_persistent_session(
     session: &mut Option<PersistentChild>,
     executable: &Path,
@@ -283,7 +259,6 @@ async fn ensure_persistent_session(
     Ok(())
 }
 
-#[allow(dead_code)]
 async fn execute_persistent_request(
     session: &mut Option<PersistentChild>,
     executable: &Path,
@@ -324,7 +299,6 @@ async fn execute_persistent_request(
     Ok(())
 }
 
-#[allow(dead_code)]
 async fn persistent_owner_loop(
     mut receiver: mpsc::Receiver<PersistentCommand>,
     executable: PathBuf,
@@ -385,7 +359,6 @@ async fn persistent_owner_loop(
     }
 }
 
-#[allow(dead_code)]
 async fn acquire_persistent_permit(
     admission: &Arc<Semaphore>,
     shutdown: &watch::Sender<bool>,

@@ -5,19 +5,10 @@ const os = require('os')
 const path = require('path')
 const native = require('./index.js')
 
+// Type gate only: encoding validity (NUL, lone surrogates) is owned by the Rust
+// side (`_runCli` validates UTF-16 before converting to OsString).
 function validArg(value) {
-  if (typeof value !== 'string' || value.includes('\0') || value.includes('\ufffd')) return false
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index)
-    if (unit >= 0xd800 && unit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1)
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
-      index += 1
-    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
-      return false
-    }
-  }
-  return true
+  return typeof value === 'string'
 }
 
 // The `mineru-office-convert` helper binary is not bundled in the npm package, so this
@@ -36,7 +27,16 @@ function validatePdfOptions(start, end, formula, table, imageAnalysis) {
   return native.validatePdfOptions(start, end, formula, table, imageAnalysis)
 }
 
-function locateMarkdown(root, stem) {
+async function locateMarkdown(root, stem) {
+  if (typeof native._locateMarkdown === 'function') {
+    return native._locateMarkdown(String(root), stem)
+  }
+  // Fallback for prebuilt native binaries without the locator: reproduce the
+  // retired depth-2 walk so `parse` keeps working with old `.node` artifacts.
+  return legacyLocateMarkdown(root, stem)
+}
+
+function legacyLocateMarkdown(root, stem) {
   const found = []
   const walk = (directory, depth) => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
@@ -72,11 +72,15 @@ async function parse(options) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mineru-'))
   try {
     const report = await native._run({ ...options, output: tmp }, helperPath())
-    // The CLI writes `{file_stem}/vlm/{file_stem}.md`; derive the stem the same way (strip
-    // the extension from the basename) so the exact-match branch below is the live path.
+    // The runner publishes `{file_stem}/vlm/{file_stem}.md`; the Rust locator knows
+    // every layout, so only a missing file still needs the friendly error here.
     const basename = path.basename(options.path, path.extname(options.path))
     const stem = native.canonicalStem(basename)
-    const markdown = fs.readFileSync(locateMarkdown(tmp, stem), 'utf8')
+    const markdownPath = await locateMarkdown(tmp, stem)
+    if (markdownPath === null || markdownPath === undefined) {
+      throw new Error('parse: no markdown output produced')
+    }
+    const markdown = fs.readFileSync(markdownPath, 'utf8')
     return { markdown, warnings: report.warnings }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })

@@ -1,5 +1,7 @@
 #[cfg(unix)]
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::{
@@ -9,19 +11,18 @@ use super::{
 
 fn test_request() -> OfficialRequest {
     OfficialRequest::new(
-        "hybrid-http-client".into(),
-        "medium".into(),
-        None,
+        "standard".into(),
         "auto".into(),
-        "ch".into(),
         true,
         None,
-        "auto".into(),
+        None,
         None,
         None,
         None,
         None,
         1024,
+        PathBuf::new(),
+        PathBuf::new(),
     )
 }
 
@@ -94,7 +95,7 @@ async fn verbose_stderr_does_not_reject_a_valid_response() {
 request=$(cat)
 request_id=$(printf '%s' "$request" | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_id"])')
 python3 -c 'import sys; sys.stderr.buffer.write(b"x" * 65537 + bytes([255]))'
-printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.0a6","schema_version":"1.0","backend":"hybrid-http-client","bundle_name":"hybrid-v4","error":null}\n' "$request_id"
+printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.4","schema_version":"2.0","bundle_name":"hybrid-v4","error":null}\n' "$request_id"
 "#,
     );
     let worker = OfficialWorker::new(Some(script)).unwrap();

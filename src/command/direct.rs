@@ -81,8 +81,6 @@ pub(super) struct DirectOptions {
     pub input: PathBuf,
     pub output: PathBuf,
     pub local_backend: bool,
-    pub method: String,
-    pub lang: String,
     pub base_url: Option<String>,
     pub server_option_label: &'static str,
     pub model: Option<String>,
@@ -819,6 +817,15 @@ fn official_image_or_pdf(kind: DocumentKind) -> bool {
     )
 }
 
+/// Maps the CLI effort knob onto the MinerU 4.0.4 parse tier: "medium" maps to
+/// "standard"; "high"/"xhigh" map to "advanced".
+fn effort_tier(effort: &str) -> &'static str {
+    match effort {
+        "high" | "xhigh" => "advanced",
+        _ => "standard",
+    }
+}
+
 fn validate_official_hybrid_input(
     kind: DocumentKind,
     route: &OfficialPdfOptions,
@@ -887,8 +894,7 @@ async fn run_official_hybrid_documents(
     });
     let persistent_worker = if worker_mode == super::OfficialWorkerMode::Persistent {
         let session = OfficialSessionConfig::new(
-            config.model_stack.clone(),
-            config.model_dir.clone(),
+            config.model_home.clone(),
             config.config.clone(),
             config.api_key.clone(),
             config.model_name.clone(),
@@ -934,19 +940,18 @@ async fn run_official_hybrid_documents(
                 None
             };
             let request = OfficialRequest::new(
-                "hybrid-http-client".into(),
-                options.effort.clone(),
-                config.server_url.clone(),
-                options.method.clone(),
-                options.lang.clone(),
+                effort_tier(&options.effort).into(),
+                "auto".into(),
                 route.image_analysis,
                 page_range,
-                config.model_stack.clone(),
-                config.model_dir.clone(),
-                config.config.clone(),
+                config.server_url.clone(),
                 config.api_key.clone(),
                 config.model_name.clone(),
+                config.model_home.clone(),
+                config.config.clone(),
                 options.document_limits.max_output_bytes,
+                PathBuf::new(),
+                PathBuf::new(),
             );
             let bundle = if let Some(worker) = persistent_worker.as_ref() {
                 worker.run(&bytes, kind.suffix(), request, deadline).await?
@@ -1104,10 +1109,11 @@ fn config_inputs(
     Ok((server, key))
 }
 
+#[derive(Debug)]
 struct OfficialHybridConfig {
+    #[allow(dead_code)]
     python: Option<PathBuf>,
-    model_stack: String,
-    model_dir: Option<PathBuf>,
+    model_home: Option<PathBuf>,
     config: Option<PathBuf>,
     server_url: Option<String>,
     api_key: Option<String>,
@@ -1145,21 +1151,24 @@ fn resolve_official_hybrid(
     options: &DirectOptions,
     env: &super::Environment,
 ) -> Result<OfficialHybridConfig, DirectError> {
-    let environment_stack = official_text(env, "MINERU_MODEL_STACK")?;
-    let model_stack = if options.model_stack_explicit || options.model_stack != "auto" {
-        options.model_stack.clone()
-    } else {
-        environment_stack.unwrap_or_else(|| "auto".into())
-    };
-    if !matches!(model_stack.as_str(), "auto" | "light" | "full") {
-        return Err(err("model_stack must be auto, light, or full"));
+    // ponytail: MinerU 4.0.4 removed per-run model stacks; engine selection now happens
+    // through MINERU_CONFIG (model.small_backend / model.vlm.engine).
+    if options.model_stack_explicit || options.model_stack != "auto" {
+        return Err(err(
+            "model_stack was removed in MinerU 4.0.4; configure model.small_backend / model.vlm.engine via MINERU_CONFIG",
+        ));
+    }
+    if official_text(env, "MINERU_MODEL_STACK")?.is_some() {
+        return Err(err(
+            "MINERU_MODEL_STACK was removed in MinerU 4.0.4; configure model.small_backend / model.vlm.engine via MINERU_CONFIG",
+        ));
     }
     let python = official_path(
         options.official_python.as_deref(),
         official_text(env, "MINERU_OFFICIAL_PYTHON")?,
         "official Python executable",
     )?;
-    let model_dir = official_path(
+    let model_home = official_path(
         options.official_model_dir.as_deref(),
         official_text(env, "MINERU_MODEL_BASE_DIR")?,
         "official model directory",
@@ -1178,11 +1187,16 @@ fn resolve_official_hybrid(
     )?;
     if matches!(options.effort.as_str(), "high" | "xhigh") {
         super::validate_hybrid_server_url(server_url.as_deref()).map_err(err)?;
+    } else if server_url.is_some() {
+        // Tier "standard" (medium effort) is local-only: a VLM URL would be
+        // forwarded inconsistently across worker modes, so reject it up front.
+        return Err(
+            "tier standard (effort medium) is local-only; unset --url or MINERU_VL_SERVER".into(),
+        );
     }
     Ok(OfficialHybridConfig {
         python,
-        model_stack,
-        model_dir,
+        model_home,
         config,
         server_url,
         api_key: clean(
@@ -1766,8 +1780,6 @@ mod tests {
             input: PathBuf::new(),
             output: PathBuf::new(),
             local_backend: false,
-            method: "auto".into(),
-            lang: "ch".into(),
             base_url: None,
             server_option_label: "--url",
             model: None,
@@ -1888,8 +1900,7 @@ mod tests {
             &route,
             OfficialHybridConfig {
                 python: Some(python),
-                model_stack: "auto".into(),
-                model_dir: None,
+                model_home: None,
                 config: None,
                 server_url: None,
                 api_key: None,
@@ -1931,8 +1942,7 @@ mod tests {
             &OfficialPdfOptions::default(),
             OfficialHybridConfig {
                 python: Some("/definitely/missing/python".into()),
-                model_stack: "auto".into(),
-                model_dir: None,
+                model_home: None,
                 config: None,
                 server_url: None,
                 api_key: None,
@@ -2019,8 +2029,7 @@ mod tests {
             &route,
             OfficialHybridConfig {
                 python: Some("/definitely/missing/python".into()),
-                model_stack: "auto".into(),
-                model_dir: None,
+                model_home: None,
                 config: None,
                 server_url: None,
                 api_key: None,
@@ -2042,22 +2051,30 @@ mod tests {
     }
 
     #[test]
-    fn explicit_auto_model_stack_overrides_environment() {
+    fn non_default_model_stack_is_rejected() {
+        let env = super::super::Environment::from_values(HashMap::new());
+        let mut options = test_options();
+        options.model_stack = "full".into();
+        options.model_stack_explicit = true;
+        let error = resolve_official_hybrid(&options, &env)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("model_stack was removed in MinerU 4.0.4"),
+            "{error}"
+        );
+
         let env = super::super::Environment::from_values(HashMap::from([(
             "MINERU_MODEL_STACK",
             OsString::from("full"),
         )]));
-        let mut options = test_options();
-        options.model_stack_explicit = true;
-        assert_eq!(
-            resolve_official_hybrid(&options, &env).unwrap().model_stack,
-            "auto"
-        );
-
-        options.model_stack_explicit = false;
-        assert_eq!(
-            resolve_official_hybrid(&options, &env).unwrap().model_stack,
-            "full"
+        let options = test_options();
+        let error = resolve_official_hybrid(&options, &env)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("MINERU_MODEL_STACK was removed in MinerU 4.0.4"),
+            "{error}"
         );
     }
 
@@ -2555,8 +2572,6 @@ mod tests {
                 input: input.path().to_owned(),
                 output: output.path().to_owned(),
                 local_backend: false,
-                method: "auto".into(),
-                lang: "ch".into(),
                 base_url: Some("http://127.0.0.1:1".into()),
                 server_option_label: "--url",
                 model: Some("mock".into()),
@@ -2733,8 +2748,6 @@ mod tests {
                 input: input.path().to_owned(),
                 output: output.path().to_owned(),
                 local_backend: false,
-                method: "auto".into(),
-                lang: "ch".into(),
                 base_url: Some(base_url),
                 server_option_label: "--url",
                 model: Some("mock".into()),

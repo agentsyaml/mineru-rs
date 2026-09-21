@@ -8,6 +8,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 import mineru_official_worker as worker  # noqa: E402
+import mineru_official_worker_protocol as protocol  # noqa: E402
 
 
 class _BinaryInput:
@@ -100,7 +101,7 @@ class BundleWriterTests(unittest.TestCase):
 
         writer = worker.BundleWriter(self.root, 1)
         with self.assertRaises(worker.LimitError):
-            writer._rewrite_text_bytes("content_list.json", b"{}")
+            writer._rewrite_text_bytes("structured_content.json", b"{}")
 
     def test_temp_file_is_exclusive_and_does_not_collide(self) -> None:
         image_dir = self.root / "images"
@@ -116,6 +117,8 @@ class BundleWriterTests(unittest.TestCase):
 
 class DiagnosticTests(unittest.TestCase):
     def test_both_streams_are_captured_and_large_diagnostics_stay_bounded(self) -> None:
+        captured: dict[str, object] = {}
+
         class Result:
             def save(self, target: object) -> None:
                 sys.stdout.write("save stdout\n" + "s" * 20_000)
@@ -124,6 +127,7 @@ class DiagnosticTests(unittest.TestCase):
 
         class FakeParser:
             async def parse_async(self, _input: str, **_kwargs: object) -> Result:
+                captured["kwargs"] = _kwargs
                 sys.stdout.write("parse stdout\n" + "p" * 20_000)
                 sys.stderr.write("parse stderr\n" + "q" * 20_000)
                 return Result()
@@ -134,16 +138,13 @@ class DiagnosticTests(unittest.TestCase):
         request = {
             "protocol": worker.PROTOCOL,
             "request_id": "diagnostic-test",
-            "bundle_name": worker.BUNDLE_NAME,
-            "backend": "hybrid-http-client",
-            "effort": "medium",
-            "server_url": None,
-            "method": "auto",
-            "lang": "en",
+            "tier": "standard",
+            "ocr_mode": "auto",
             "image_analysis": False,
             "input_path": "input.pdf",
             "bundle_path": str(Path(directory.name) / "bundle"),
             "max_bundle_bytes": 1024,
+            "bundle_name": worker.BUNDLE_NAME,
         }
         output = _BinaryOutput()
         stderr = io.StringIO()
@@ -155,7 +156,11 @@ class DiagnosticTests(unittest.TestCase):
             mock.patch.object(sys, "stdin", _BinaryInput(json.dumps(request).encode())),
             mock.patch.object(sys, "__stdout__", output),
             mock.patch.object(sys, "stderr", stderr),
-            mock.patch.object(worker.importlib.metadata, "version", return_value=worker.PACKAGE_VERSION),
+            mock.patch.object(
+                worker.importlib.metadata,
+                "version",
+                return_value=worker.PACKAGE_VERSION,
+            ),
             mock.patch.object(worker.importlib, "import_module", side_effect=fake_import),
         ):
             worker.main()
@@ -163,6 +168,13 @@ class DiagnosticTests(unittest.TestCase):
         response = json.loads(output.buffer.getvalue().decode().strip())
         diagnostic = response["diagnostic"]
         self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["package_version"], worker.PACKAGE_VERSION)
+        self.assertEqual(response["schema_version"], protocol.SCHEMA_VERSION)
+
+        self.assertEqual(
+            captured["kwargs"],
+            {"tier": "standard", "ocr_mode": "auto", "image_analysis": False},
+        )
         self.assertIn("parse stdout", diagnostic)
         self.assertIn("parse stderr", diagnostic)
         self.assertIn("save stdout", diagnostic)

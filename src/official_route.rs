@@ -761,152 +761,82 @@ impl RouteDeadline {
     }
 }
 
+/// Everything the official route needs for one document. This is the single entry point;
+/// the previous per-callback/concurrency wrapper chain collapsed into callers filling the
+/// optional fields explicitly.
+pub(crate) struct OfficialParseRequest<'a> {
+    pub client: &'a MinerUVlmClient,
+    pub options: OfficialPdfOptions,
+    pub root: &'a Path,
+    pub stem: &'a str,
+    pub source: OfficialRouteSource,
+    pub events: Option<ProgressCallback>,
+    pub cleanup_warning: Option<CleanupWarningCallback>,
+    /// Document-limit totals; defaults to `OfficialDocumentTotals::from_options(&options)`.
+    pub totals: Option<crate::document_limits::OfficialDocumentTotals>,
+    /// Page admission semaphore; defaults to the client's configured page concurrency.
+    pub page_concurrency: Option<OfficialPageConcurrency>,
+}
+
+pub(crate) enum OfficialRouteSource {
+    /// Direct document bytes staged into the VLM output tree.
+    Pdf(PdfInput),
+    /// Direct document bytes staged into the office output tree.
+    Office(PdfInput),
+    /// An already-prepared document; target and origin derive from its kind and its
+    /// page range is suppressed when the kind cannot express one.
+    Prepared(crate::input_prepare::PreparedPdf),
+}
+
 pub(crate) async fn parse_and_write(
-    client: &MinerUVlmClient,
-    input: PdfInput,
-    options: OfficialPdfOptions,
-    root: &Path,
-    stem: &str,
+    request: OfficialParseRequest<'_>,
 ) -> VlmResult<OfficialOutputManifest> {
-    let totals = crate::document_limits::OfficialDocumentTotals::from_options(&options);
-    parse_and_write_to(
+    let OfficialParseRequest {
         client,
-        input,
-        options,
+        mut options,
         root,
         stem,
-        OfficialOutputTarget::Vlm,
-        None,
-        None,
-        None,
-        totals,
-        client.official_page_concurrency(),
-    )
-    .await
-}
-
-pub(crate) async fn parse_and_write_office(
-    client: &MinerUVlmClient,
-    input: PdfInput,
-    options: OfficialPdfOptions,
-    root: &Path,
-    stem: &str,
-) -> VlmResult<OfficialOutputManifest> {
-    let totals = crate::document_limits::OfficialDocumentTotals::from_options(&options);
-    parse_and_write_to(
-        client,
-        input,
-        options,
-        root,
-        stem,
-        OfficialOutputTarget::Office,
-        None,
-        None,
-        None,
-        totals,
-        client.official_page_concurrency(),
-    )
-    .await
-}
-
-pub(crate) async fn parse_and_write_prepared(
-    client: &MinerUVlmClient,
-    prepared: crate::input_prepare::PreparedPdf,
-    options: OfficialPdfOptions,
-    root: &Path,
-    stem: &str,
-) -> VlmResult<OfficialOutputManifest> {
-    let totals = crate::document_limits::OfficialDocumentTotals::from_options(&options);
-    parse_and_write_prepared_with_events_and_cleanup_warning_with_totals(
-        client, prepared, options, root, stem, None, None, totals,
-    )
-    .await
-}
-
-pub(crate) async fn parse_and_write_prepared_with_events_and_cleanup_warning_with_totals(
-    client: &MinerUVlmClient,
-    prepared: crate::input_prepare::PreparedPdf,
-    mut options: OfficialPdfOptions,
-    root: &Path,
-    stem: &str,
-    events: Option<ProgressCallback>,
-    cleanup_warning: Option<CleanupWarningCallback>,
-    totals: crate::document_limits::OfficialDocumentTotals,
-) -> VlmResult<OfficialOutputManifest> {
-    if !prepared.kind.supports_page_range() {
-        options.start_page = 0;
-        options.end_page = None;
-    }
-    let target = if prepared.kind.is_office() {
-        OfficialOutputTarget::Office
-    } else {
-        OfficialOutputTarget::Vlm
-    };
-    parse_and_write_to(
-        client,
-        PdfInput::Bytes(prepared.bytes),
-        options,
-        root,
-        stem,
-        target,
-        Some((prepared.original, prepared.kind.suffix())),
-        events,
-        cleanup_warning,
-        totals,
-        client.official_page_concurrency(),
-    )
-    .await
-}
-
-pub(crate) async fn parse_and_write_prepared_with_events_and_cleanup_warning_with_totals_and_page_concurrency(
-    client: &MinerUVlmClient,
-    prepared: crate::input_prepare::PreparedPdf,
-    options: OfficialPdfOptions,
-    root: &Path,
-    stem: &str,
-    events: Option<ProgressCallback>,
-    cleanup_warning: Option<CleanupWarningCallback>,
-    totals: crate::document_limits::OfficialDocumentTotals,
-    page_concurrency: OfficialPageConcurrency,
-) -> VlmResult<OfficialOutputManifest> {
-    // Keep the existing preparation semantics; only page admission differs.
-    let mut options = options;
-    if !prepared.kind.supports_page_range() {
-        options.start_page = 0;
-        options.end_page = None;
-    }
-    let target = if prepared.kind.is_office() {
-        OfficialOutputTarget::Office
-    } else {
-        OfficialOutputTarget::Vlm
-    };
-    parse_and_write_to(
-        client,
-        PdfInput::Bytes(prepared.bytes),
-        options,
-        root,
-        stem,
-        target,
-        Some((prepared.original, prepared.kind.suffix())),
+        source,
         events,
         cleanup_warning,
         totals,
         page_concurrency,
-    )
-    .await
-}
-
-pub(crate) async fn parse_and_write_prepared_with_events(
-    client: &MinerUVlmClient,
-    prepared: crate::input_prepare::PreparedPdf,
-    options: OfficialPdfOptions,
-    root: &Path,
-    stem: &str,
-    events: Option<ProgressCallback>,
-) -> VlmResult<OfficialOutputManifest> {
-    let totals = crate::document_limits::OfficialDocumentTotals::from_options(&options);
-    parse_and_write_prepared_with_events_and_cleanup_warning_with_totals(
-        client, prepared, options, root, stem, events, None, totals,
+    } = request;
+    let (input, target, origin) = match source {
+        OfficialRouteSource::Pdf(input) => (input, OfficialOutputTarget::Vlm, None),
+        OfficialRouteSource::Office(input) => (input, OfficialOutputTarget::Office, None),
+        OfficialRouteSource::Prepared(prepared) => {
+            if !prepared.kind.supports_page_range() {
+                options.start_page = 0;
+                options.end_page = None;
+            }
+            let target = if prepared.kind.is_office() {
+                OfficialOutputTarget::Office
+            } else {
+                OfficialOutputTarget::Vlm
+            };
+            (
+                PdfInput::Bytes(prepared.bytes),
+                target,
+                Some((prepared.original, prepared.kind.suffix())),
+            )
+        }
+    };
+    let totals = totals
+        .unwrap_or_else(|| crate::document_limits::OfficialDocumentTotals::from_options(&options));
+    let page_concurrency = page_concurrency.unwrap_or_else(|| client.official_page_concurrency());
+    parse_and_write_to(
+        client,
+        input,
+        options,
+        root,
+        stem,
+        target,
+        origin,
+        events,
+        cleanup_warning,
+        totals,
+        page_concurrency,
     )
     .await
 }
@@ -1330,10 +1260,10 @@ async fn parse_and_write_to(
         return Err(dispose_stage(stage, error).await);
     }
     let committed = commit_stage(stage, deadline, &task_work_lease).await?;
-    if committed.cleanup.failed() {
-        if let Some(callback) = cleanup_warning {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback()));
-        }
+    if committed.cleanup.failed()
+        && let Some(callback) = cleanup_warning
+    {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback()));
     }
     Ok(committed.manifest)
 }

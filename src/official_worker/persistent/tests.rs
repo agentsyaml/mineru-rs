@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::super::{
     OfficialPersistentWorker, OfficialRequest, OfficialSessionConfig, PACKAGE_VERSION,
-    PERSISTENT_BACKEND, PERSISTENT_PROTOCOL, SCHEMA_VERSION,
+    PERSISTENT_PROTOCOL, SCHEMA_VERSION,
 };
 use super::protocol::persistent_capabilities;
 
@@ -44,7 +44,7 @@ if [ "$MODE" = bad-handshake ]; then
     printf '%s\n' '{"type":"handshake","protocol":"wrong"}'
     exit 0
 fi
-printf '%s\n' '{"type":"handshake","protocol":"mineru-rs-official-worker/2","status":"ready","package_version":"4.0.0a6","schema_version":"1.0","backend":"hybrid-http-client","max_in_flight":1,"capabilities":{"efforts":["medium","high","xhigh"],"model_stacks":["auto","light","full"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}'
+printf '%s\n' '{"type":"handshake","protocol":"mineru-rs-official-worker/2","status":"ready","package_version":"4.0.4","schema_version":"2.0","max_in_flight":1,"capabilities":{"tiers":["standard","advanced"],"ocr_modes":["auto"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}'
 
 requests=0
 while IFS= read -r request; do
@@ -75,12 +75,12 @@ while IFS= read -r request; do
     fi
     if [ "$MODE" = stderr-error-once ] && [ "$requests" -eq 1 ]; then
         printf '%s\n' 'first-request-stderr' >&2
-        printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"error\",\"package_version\":\"4.0.0a6\",\"schema_version\":\"1.0\",\"backend\":\"hybrid-http-client\",\"bundle_name\":\"hybrid-v4\",\"error\":\"document failed\"}"
+        printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"error\",\"package_version\":\"4.0.4\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\",\"error\":\"document failed\"}"
         continue
     fi
     mkdir -p "$bundle"
     printf 'request-%s\n' "$sequence" > "$bundle/markdown.md"
-    printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"ok\",\"package_version\":\"4.0.0a6\",\"schema_version\":\"1.0\",\"backend\":\"hybrid-http-client\",\"bundle_name\":\"hybrid-v4\"}"
+    printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"ok\",\"package_version\":\"4.0.4\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\"}"
 done
 "##
         .replace("__MODE__", &shell_quote(Path::new(mode)))
@@ -98,7 +98,6 @@ done
 #[cfg(unix)]
 fn persistent_config(root: &Path) -> OfficialSessionConfig {
     OfficialSessionConfig::new(
-        "full".into(),
         Some(root.join("models")),
         Some(root.join("config.toml")),
         Some("test-key".into()),
@@ -112,23 +111,22 @@ fn persistent_request(
     root: &Path,
     config: &OfficialSessionConfig,
     request_id: &str,
-    effort: &str,
+    tier: &str,
 ) -> OfficialRequest {
-    let server_url = (effort != "medium").then(|| "http://model.example/v1".to_owned());
+    let vlm_server_url = (tier == "advanced").then(|| "http://vlm.example/v1".to_owned());
     let mut request = OfficialRequest::new(
-        PERSISTENT_BACKEND.into(),
-        effort.into(),
-        server_url,
-        "ocr".into(),
-        "en".into(),
+        tier.into(),
+        "auto".into(),
         false,
         None,
-        config.model_stack.clone(),
-        config.model_base_dir.clone(),
+        vlm_server_url,
+        config.vlm_api_key.clone(),
+        config.vlm_model.clone(),
+        config.model_home.clone(),
         config.config.clone(),
-        config.vl_api_key.clone(),
-        config.vl_model_name.clone(),
         1024,
+        PathBuf::new(),
+        PathBuf::new(),
     );
     request.request_id = request_id.into();
     let _ = root;
@@ -175,7 +173,7 @@ async fn persistent_worker_reuses_one_pid_and_keeps_bundles_independent() {
         .run(
             b"first",
             "pdf",
-            persistent_request(temp.path(), &config, "first", "high"),
+            persistent_request(temp.path(), &config, "first", "standard"),
             Instant::now() + Duration::from_secs(10),
         )
         .await
@@ -187,14 +185,14 @@ async fn persistent_worker_reuses_one_pid_and_keeps_bundles_independent() {
         .run(
             b"second",
             "pdf",
-            persistent_request(temp.path(), &config, "second", "xhigh"),
+            persistent_request(temp.path(), &config, "second", "standard"),
             Instant::now() + Duration::from_secs(10),
         )
         .await
         .unwrap();
     let second_markdown = std::fs::read_to_string(second.path().join("markdown.md")).unwrap();
     drop(second);
-    worker.drain().await.unwrap();
+    worker.shutdown().await.unwrap();
 
     assert_eq!(first_markdown, "request-1\n");
     assert_eq!(second_markdown, "request-2\n");
@@ -203,14 +201,16 @@ async fn persistent_worker_reuses_one_pid_and_keeps_bundles_independent() {
     assert_eq!(startup["protocol"], PERSISTENT_PROTOCOL);
     assert_eq!(startup["package_version"], PACKAGE_VERSION);
     assert_eq!(startup["schema_version"], SCHEMA_VERSION);
-    assert_eq!(startup["backend"], PERSISTENT_BACKEND);
-    assert_eq!(startup["model_stack"], "full");
+    assert_eq!(
+        startup["model_home"],
+        temp.path().join("models").to_str().unwrap()
+    );
     assert_eq!(
         startup["config"],
         temp.path().join("config.toml").to_str().unwrap()
     );
-    assert_eq!(startup["vl_api_key"], "test-key");
-    assert_eq!(startup["vl_model_name"], "test-model");
+    assert_eq!(startup["vlm_api_key"], "test-key");
+    assert_eq!(startup["vlm_model"], "test-model");
     assert_eq!(startup["capabilities"], persistent_capabilities());
     assert_eq!(std::fs::read_to_string(starts).unwrap(), "1");
     let entries = std::fs::read_to_string(log).unwrap();
@@ -234,7 +234,7 @@ async fn persistent_worker_restarts_only_after_crash_without_retrying_request() 
         .run(
             b"first",
             "pdf",
-            persistent_request(temp.path(), &config, "crashed", "medium"),
+            persistent_request(temp.path(), &config, "crashed", "standard"),
             Instant::now() + Duration::from_secs(10),
         )
         .await;
@@ -244,7 +244,7 @@ async fn persistent_worker_restarts_only_after_crash_without_retrying_request() 
         .run(
             b"second",
             "pdf",
-            persistent_request(temp.path(), &config, "recovered", "medium"),
+            persistent_request(temp.path(), &config, "recovered", "standard"),
             Instant::now() + Duration::from_secs(10),
         )
         .await
@@ -278,7 +278,7 @@ async fn persistent_worker_cancellation_kills_group_and_allows_new_session() {
     let config = persistent_config(temp.path());
     let worker = Arc::new(OfficialPersistentWorker::new(Some(script), config.clone()).unwrap());
     let task_worker = Arc::clone(&worker);
-    let request = persistent_request(temp.path(), &config, "cancelled", "medium");
+    let request = persistent_request(temp.path(), &config, "cancelled", "standard");
     let task = tokio::spawn(async move {
         task_worker
             .run(
@@ -301,7 +301,7 @@ async fn persistent_worker_cancellation_kills_group_and_allows_new_session() {
         .run(
             b"second",
             "pdf",
-            persistent_request(temp.path(), &config, "after-cancel", "medium"),
+            persistent_request(temp.path(), &config, "after-cancel", "standard"),
             Instant::now() + Duration::from_secs(10),
         )
         .await
@@ -329,7 +329,7 @@ async fn persistent_worker_drains_stderr_and_keeps_document_errors_reusable() {
         .run(
             b"first",
             "pdf",
-            persistent_request(temp.path(), &config, "document-error", "medium"),
+            persistent_request(temp.path(), &config, "document-error", "standard"),
             Instant::now() + Duration::from_secs(10),
         )
         .await;
@@ -344,7 +344,7 @@ async fn persistent_worker_drains_stderr_and_keeps_document_errors_reusable() {
         .run(
             b"second",
             "pdf",
-            persistent_request(temp.path(), &config, "document-ok", "medium"),
+            persistent_request(temp.path(), &config, "document-ok", "standard"),
             Instant::now() + Duration::from_secs(10),
         )
         .await
@@ -366,7 +366,7 @@ async fn persistent_worker_fails_closed_on_handshake_frame_and_protocol_errors()
             .run(
                 b"input",
                 "pdf",
-                persistent_request(temp.path(), &config, "bad", "medium"),
+                persistent_request(temp.path(), &config, "bad", "standard"),
                 Instant::now() + Duration::from_secs(10),
             )
             .await;
@@ -388,7 +388,7 @@ async fn persistent_worker_shutdown_reaps_an_active_owner() {
             .run(
                 b"input",
                 "pdf",
-                persistent_request(Path::new("unused"), &config, "shutdown", "medium"),
+                persistent_request(Path::new("unused"), &config, "shutdown", "standard"),
                 Instant::now() + Duration::from_secs(30),
             )
             .await
@@ -410,7 +410,7 @@ async fn persistent_worker_drop_reaps_an_idle_owner() {
         .run(
             b"input",
             "pdf",
-            persistent_request(temp.path(), &config, "drop", "medium"),
+            persistent_request(temp.path(), &config, "drop", "standard"),
             Instant::now() + Duration::from_secs(10),
         )
         .await

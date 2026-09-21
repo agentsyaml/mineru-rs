@@ -232,11 +232,6 @@ fn priority_for(
     match priority {
         VlmBatchPriority::All(None) if incremental => Ok((0..n).map(|i| Some(i as i32)).collect()),
         VlmBatchPriority::All(p) => Ok(vec![p; n]),
-        VlmBatchPriority::PerItem(p) if p.len() == n => Ok(p),
-        VlmBatchPriority::PerItem(p) => Err(protocol(
-            "priority",
-            format!("expected {n} priorities, got {}", p.len()),
-        )),
     }
 }
 
@@ -866,7 +861,18 @@ impl MinerUVlmClient {
         output_root: &std::path::Path,
         stem: &str,
     ) -> VlmResult<OfficialOutputManifest> {
-        crate::official_route::parse_and_write(self, input, options, output_root, stem).await
+        crate::official_route::parse_and_write(crate::official_route::OfficialParseRequest {
+            client: self,
+            options,
+            root: output_root,
+            stem,
+            source: crate::official_route::OfficialRouteSource::Pdf(input),
+            events: None,
+            cleanup_warning: None,
+            totals: None,
+            page_concurrency: None,
+        })
+        .await
     }
     pub async fn parse_and_write_official_office_pdf(
         &self,
@@ -875,7 +881,18 @@ impl MinerUVlmClient {
         output_root: &std::path::Path,
         stem: &str,
     ) -> VlmResult<OfficialOutputManifest> {
-        crate::official_route::parse_and_write_office(self, input, options, output_root, stem).await
+        crate::official_route::parse_and_write(crate::official_route::OfficialParseRequest {
+            client: self,
+            options,
+            root: output_root,
+            stem,
+            source: crate::official_route::OfficialRouteSource::Office(input),
+            events: None,
+            cleanup_warning: None,
+            totals: None,
+            page_concurrency: None,
+        })
+        .await
     }
     #[doc(hidden)]
     pub async fn parse_and_write_prepared_pdf(
@@ -885,7 +902,7 @@ impl MinerUVlmClient {
         output_root: &std::path::Path,
         stem: &str,
     ) -> VlmResult<OfficialOutputManifest> {
-        crate::official_route::parse_and_write_prepared(self, prepared, options, output_root, stem)
+        self.parse_and_write_prepared_pdf_with_events(prepared, options, output_root, stem, None)
             .await
     }
     #[doc(hidden)]
@@ -897,14 +914,17 @@ impl MinerUVlmClient {
         stem: &str,
         events: Option<ProgressCallback>,
     ) -> VlmResult<OfficialOutputManifest> {
-        crate::official_route::parse_and_write_prepared_with_events(
-            self,
-            prepared,
+        crate::official_route::parse_and_write(crate::official_route::OfficialParseRequest {
+            client: self,
             options,
-            output_root,
+            root: output_root,
             stem,
+            source: crate::official_route::OfficialRouteSource::Prepared(prepared),
             events,
-        )
+            cleanup_warning: None,
+            totals: None,
+            page_concurrency: None,
+        })
         .await
     }
     #[allow(clippy::too_many_arguments)]
@@ -919,9 +939,18 @@ impl MinerUVlmClient {
         totals: crate::document_limits::OfficialDocumentTotals,
         page_concurrency: crate::official_route::OfficialPageConcurrency,
     ) -> VlmResult<OfficialOutputManifest> {
-        crate::official_route::parse_and_write_prepared_with_events_and_cleanup_warning_with_totals_and_page_concurrency(
-            self, prepared, options, output_root, stem, events, cleanup_warning, totals, page_concurrency,
-        ).await
+        crate::official_route::parse_and_write(crate::official_route::OfficialParseRequest {
+            client: self,
+            options,
+            root: output_root,
+            stem,
+            source: crate::official_route::OfficialRouteSource::Prepared(prepared),
+            events,
+            cleanup_warning,
+            totals: Some(totals),
+            page_concurrency: Some(page_concurrency),
+        })
+        .await
     }
     /// Official-route seam: this deliberately snapshots replies before the shared
     /// cleaner mutates them.  It is crate-private so public two-step semantics stay
@@ -2648,6 +2677,18 @@ mod tests {
         mock_client_with(state, VlmHttpConfig::default(), MinerUVlmConfig::default()).await
     }
 
+    async fn mock_client_incremental(state: MockState) -> MinerUVlmClient {
+        mock_client_with(
+            state,
+            VlmHttpConfig::default(),
+            MinerUVlmConfig {
+                incremental_priority: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     async fn mock_client_with(
         state: MockState,
         mut http: VlmHttpConfig,
@@ -2764,6 +2805,18 @@ mod tests {
         window_client_with_concurrency(state, 2).await
     }
 
+    async fn window_client_incremental(state: WindowState) -> MinerUVlmClient {
+        window_client_with_concurrency_and_config(
+            state,
+            2,
+            MinerUVlmConfig {
+                incremental_priority: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     async fn window_client_with_layout(state: WindowState, layout: (u32, u32)) -> MinerUVlmClient {
         let app = Router::new()
             .route("/v1/chat/completions", post(window_chat))
@@ -2793,6 +2846,19 @@ mod tests {
         state: WindowState,
         max_concurrency: usize,
     ) -> MinerUVlmClient {
+        window_client_with_concurrency_and_config(
+            state,
+            max_concurrency,
+            MinerUVlmConfig::default(),
+        )
+        .await
+    }
+
+    async fn window_client_with_concurrency_and_config(
+        state: WindowState,
+        max_concurrency: usize,
+        config: MinerUVlmConfig,
+    ) -> MinerUVlmClient {
         let app = Router::new()
             .route("/v1/chat/completions", post(window_chat))
             .with_state(state);
@@ -2808,7 +2874,7 @@ mod tests {
                 max_concurrency,
                 ..Default::default()
             },
-            MinerUVlmConfig::default(),
+            config,
         )
         .await
         .unwrap()
@@ -4731,7 +4797,6 @@ mod tests {
             priority_for(3, VlmBatchPriority::All(None), true).unwrap(),
             vec![Some(0), Some(1), Some(2)]
         );
-        assert!(priority_for(2, VlmBatchPriority::PerItem(vec![None]), false).is_err());
     }
 
     #[test]
@@ -4993,12 +5058,12 @@ mod tests {
     #[tokio::test]
     async fn concurrent_two_step_uses_configured_semaphore_and_keeps_order() {
         let state = window_state();
-        let client = window_client(state.clone()).await;
+        let client = window_client_incremental(state.clone()).await;
         let task = tokio::spawn(async move {
             client
                 .concurrent_two_step_extract(
                     vec![image_input(), image_input(), image_input()],
-                    VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
+                    VlmBatchPriority::All(None),
                     vec![],
                     None,
                 )
@@ -5016,12 +5081,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+        // Incremental priorities admit pages as Some(0), Some(1), Some(2).
         assert_eq!(
             output
                 .iter()
                 .map(|page| page.blocks[0].bbox.left)
                 .collect::<Vec<_>>(),
-            vec![0.03, 0.01, 0.02]
+            vec![0.0, 0.001, 0.002]
         );
     }
 
@@ -5049,34 +5115,35 @@ mod tests {
     #[tokio::test]
     async fn axum_aio_batch_layout_uses_caller_semaphore_and_keeps_order() {
         let state = mock_state();
-        let client = mock_client(state.clone()).await;
+        let client = mock_client_incremental(state.clone()).await;
         let output = client
             .aio_batch_layout_detect(
                 vec![image_input(), image_input(), image_input()],
-                VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
+                VlmBatchPriority::All(None),
                 Some(Arc::new(tokio::sync::Semaphore::new(1))),
             )
             .await
             .unwrap();
         assert_eq!(state.peak.load(Ordering::SeqCst), 1);
+        // Incremental priorities admit pages as Some(0), Some(1), Some(2).
         assert_eq!(
             output
                 .iter()
                 .map(|page| page.blocks[0].bbox.left)
                 .collect::<Vec<_>>(),
-            vec![0.03, 0.01, 0.02]
+            vec![0.0, 0.001, 0.002]
         );
     }
 
     #[tokio::test]
     async fn axum_batch_layout_uses_configured_shared_semaphore() {
         let state = window_state();
-        let client = window_client(state.clone()).await;
+        let client = window_client_incremental(state.clone()).await;
         let task = tokio::spawn(async move {
             client
                 .batch_layout_detect(
                     vec![image_input(), image_input(), image_input()],
-                    VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
+                    VlmBatchPriority::All(None),
                 )
                 .await
         });
@@ -5095,7 +5162,7 @@ mod tests {
                 .iter()
                 .map(|page| page.blocks[0].bbox.left)
                 .collect::<Vec<_>>(),
-            vec![0.03, 0.01, 0.02]
+            vec![0.0, 0.001, 0.002]
         );
     }
 
@@ -5149,33 +5216,34 @@ mod tests {
     #[tokio::test]
     async fn axum_default_aio_layout_and_content_batches_share_configured_semaphore_and_order() {
         let state = mock_state();
-        let client = mock_client(state.clone()).await;
+        let client = mock_client_incremental(state.clone()).await;
         let (layouts, content) = tokio::join!(
             client.aio_batch_layout_detect(
                 vec![image_input(), image_input(), image_input()],
-                VlmBatchPriority::PerItem(vec![Some(30), Some(10), Some(20)]),
+                VlmBatchPriority::All(None),
                 None,
             ),
             client.aio_batch_content_extract(
                 vec![image_input(), image_input(), image_input()],
                 vec!["text".into(), "text".into(), "text".into()],
-                VlmBatchPriority::PerItem(vec![Some(3), Some(1), Some(2)]),
+                VlmBatchPriority::All(None),
                 None,
             ),
         );
         assert!(state.peak.load(Ordering::SeqCst) <= 2);
+        // Incremental priorities admit pages as Some(0), Some(1), Some(2).
         assert_eq!(
             layouts
                 .unwrap()
                 .iter()
                 .map(|page| page.blocks[0].bbox.left)
                 .collect::<Vec<_>>(),
-            vec![0.03, 0.01, 0.02]
+            vec![0.0, 0.001, 0.002]
         );
         assert_eq!(
             content.unwrap(),
             vec![
-                Some("recognized-3".into()),
+                Some("recognized-0".into()),
                 Some("recognized-1".into()),
                 Some("recognized-2".into()),
             ]
@@ -5246,26 +5314,20 @@ mod tests {
     #[tokio::test]
     async fn batch_extract_with_layout_keeps_item_and_priority_order() {
         let state = mock_state();
-        let client = mock_client(state.clone()).await;
+        let client = mock_client_incremental(state.clone()).await;
         let output = client
             .batch_extract_with_layout(
                 vec![image_input(), image_input()],
                 vec![vec![block(BlockKind::TEXT)], vec![block(BlockKind::TEXT)]],
-                VlmBatchPriority::PerItem(vec![Some(20), Some(10)]),
+                VlmBatchPriority::All(None),
                 vec![],
                 None,
             )
             .await
             .unwrap();
         assert_eq!(state.requests.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            output[0].blocks[0].content.as_deref(),
-            Some("recognized-20")
-        );
-        assert_eq!(
-            output[1].blocks[0].content.as_deref(),
-            Some("recognized-10")
-        );
+        assert_eq!(output[0].blocks[0].content.as_deref(), Some("recognized-0"));
+        assert_eq!(output[1].blocks[0].content.as_deref(), Some("recognized-1"));
     }
 
     #[tokio::test]

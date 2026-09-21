@@ -1,50 +1,52 @@
-# 使用说明
+# Usage Guide
 
-[简体中文](usage.md) | [English](usage.en.md)
 
-兼容性基线与可复现安装方式见 [compatibility.md](compatibility.md)。该声明仅覆盖 `vlm-http-client` 的 PDF 流程，不是完整 MinerU 3.4.5 兼容性声明。
+See [compatibility.md](compatibility.md) for the compatibility baseline and reproducible installation. This statement covers only the `vlm-http-client` PDF flow; it is not a full MinerU 3.4.5 compatibility statement.
 
-## 构建与前置条件
+## Build and prerequisites
 
-需要 Rust 1.89：
+Rust 1.89 is required:
 
 ```sh
 cargo build --release
 ./target/release/mineru --help
 ```
 
-可执行文件为 `target/release/mineru`。渲染不依赖 PDFium 或其他本地/native PDF 运行时。
+The executable is `target/release/mineru`. Rendering does not depend on PDFium or another local/native PDF runtime.
 
-## 快速开始
+## Quickstart
 
-用三个环境变量配置 VLM 服务：
+Configure the VLM service with three environment variables:
 
-| 变量 | 含义 | 示例 |
+| Variable | Meaning | Example |
 | --- | --- | --- |
-| `MINERU_VL_SERVER` | VLM 服务基础 URL | `https://host/v1` |
-| `MINERU_VL_MODEL_NAME` | 模型 ID | `model-id` |
-| `MINERU_VL_API_KEY` | Bearer 令牌 | `your-key` |
+| `MINERU_VL_SERVER` | VLM service base URL | `https://host/v1` |
+| `MINERU_VL_MODEL_NAME` | Model ID | `model-id` |
+| `MINERU_VL_API_KEY` | Bearer token | `your-key` |
 
-然后解析 PDF：
+Then parse a PDF:
 
 ```sh
 mineru -p input.pdf -o out/
 ```
 
-你的 markdown 会出现在 `out/` 中。也可用 `--api-key` 传入 Bearer 令牌，但应优先使用环境变量：命令行中的密钥会出现在进程列表中。这些变量同样列于下文的[环境变量表](#环境变量)。
+Your markdown appears in `out/`. `--api-key` can also pass the Bearer token,
+but prefer the environment variable: a key on the command line is visible in
+the process list. These variables also appear in the [environment table](#environment-variables)
+below.
 
-## 服务与模型
+## Service and model
 
-先向服务查询模型；从返回 JSON 的 `data[].id` 选择一个值，设为 `MINERU_VL_MODEL_NAME`：
+Query the service for models first; choose a value from `data[].id` in the returned JSON and set it as `MINERU_VL_MODEL_NAME`:
 
 ```sh
 curl -H "Authorization: Bearer $MINERU_VL_API_KEY" \
   "https://<server>/v1/models"
 ```
 
-直接模式下 `mineru` 的服务地址与模型 ID 由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME` 环境变量提供，`--url` 可覆盖服务地址；程序会访问对应的 `/v1/models` 和 `/v1/chat/completions`。
+In direct mode, `mineru`'s service address and model ID are supplied by the `MINERU_VL_SERVER` and `MINERU_VL_MODEL_NAME` environment variables; `--url` overrides the service address. The program accesses the corresponding `/v1/models` and `/v1/chat/completions`.
 
-认证优先使用环境变量 `MINERU_VL_API_KEY`，也可用 `--api-key` 覆盖它。避免把密钥直接写进命令行：它可能进入 shell 历史或日志。
+Authentication preferentially uses the `MINERU_VL_API_KEY` environment variable; `--api-key` can override it. Avoid putting keys directly on the command line: they may enter shell history or logs.
 
 ```sh
 export MINERU_VL_SERVER="https://<server>"
@@ -54,7 +56,7 @@ export MINERU_VL_API_KEY='<your-key>'
 ./target/release/mineru -p "input.pdf" -o output
 ```
 
-若必须临时传入密钥：
+If a key must be passed temporarily:
 
 ```sh
 export MINERU_VL_MODEL_NAME="<model-id>"
@@ -64,83 +66,115 @@ export MINERU_VL_MODEL_NAME="<model-id>"
 
 ---
 
-## `mineru` 规范命令（PDF / 图像 / Office）
+## Canonical `mineru` command (PDF / images / Office)
 
-`mineru` 是规范产品二进制，支持 PDF、图像和 Office 输入，可选 `--api-url` 远程 API 服务器模式。`--backend=local` 仅在直接模式下通过隔离的内置 Rust `mineru-office-convert` 辅助程序，对 AnyDoc 支持的旧格式和保守判定的干净文本 PDF 执行原生 Markdown 抽取；这是项目私有 native lane，不是本地 ML 模型、`llama-server` 或官方 `hybrid-engine`。该辅助程序不启动 Python、Microsoft Office/LibreOffice，不加载模型，也不发网络请求。直接 `hybrid-http-client` 使用独立的官方 MinerU 4.0.0a6 Python worker，绝不进入旧版 3.4.5 VLM 或 Office 路径。
+`mineru` is the canonical product binary, supporting PDF, image, and Office input and an optional `--api-url` remote API server mode. `--backend=local` is a project-private AnyDoc native-Markdown lane for supported legacy formats and conservative clean text PDFs, isolated in the bundled Rust `mineru-office-convert` helper; it is not a local ML model, `llama-server`, or the official `hybrid-engine`. The helper invokes no Python, Microsoft Office/LibreOffice, model, or network. Direct `hybrid-http-client` now uses a separate Python worker boundary for official MinerU 4.0.4; it never enters the 3.4.5 VLM or Office routes.
 
-OOXML 格式转换需要 `mineru-office-convert` 辅助程序；`backend=local` 的旧格式和 native PDF 抽取也使用这个内置 Rust 辅助程序，且不启动 Python、Office、模型或网络。能力依赖两个可选 feature：
+OOXML conversion requires the `mineru-office-convert` helper. Local legacy and native-PDF extraction also uses this bundled Rust helper; those routes invoke no Python, Microsoft Office/LibreOffice, model, or network. Capabilities depend on two optional features:
 
 ```sh
-# docx/pptx/xlsx → PDF（经 office2pdf，再走 VLM 版面解析）
+# docx/pptx/xlsx → PDF (via office2pdf, then VLM layout parsing)
 cargo build --release --features office
-# 旧格式 → 非 local VLM 路径的尽力文本 PDF；local 通过内置 helper 使用 AnyDoc Markdown
+# legacy formats → best-effort text PDF for the non-local VLM lane; local uses the bundled helper for AnyDoc Markdown
 cargo build --release --features legacy-office
-# 两者都启用
+# both
 cargo build --release --features office,legacy-office
 ```
 
-`mineru` 按扩展名自动路由：`.docx`/`.pptx`/`.xlsx` 保持现有 helper 转 PDF 再走 VLM 版面解析。对 `.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv`，非 local 直接 VLM 路径先通过隔离 helper 将 AnyDoc Markdown 尽力转换为合法文本 PDF，再把该 PDF 送入现有 PDF/VLM 路径。该结果是仅文本的 fallback，不承诺保持 Office 版式：原版式、图片、表格、公式和宏可能丢失，非 ASCII 字符可能被替换为 `?`；每个文档都会发对应 warning，一个批次的 Office/LibreOffice 建议只发一次。若无法生成合法 PDF，错误会建议先用 Microsoft Office 或 LibreOffice 转成 DOCX/XLSX/PPTX。显式 `--backend local` 时，同一组旧格式和干净 native PDF 都通过隔离的内置 Rust helper 运行 AnyDoc；该路径不启动 Python、Office，不加载模型，也不发网络请求。旧格式输出为 `{输出}/{stem}/office/{stem}.md`，native PDF 输出为 `{输出}/{stem}/native/{stem}.md`，只包含 Markdown，不生成 official JSON 或 assets。扫描、混合、乱码、低质量或不确定 PDF 会明确失败，不回退到 VLM。非 local 旧格式输出位于 `{输出}/{stem}/vlm/`，并保留原始旧格式 origin。直接 Hybrid 在启动 worker 前拒绝 Office 和旧格式；API 路径仍 fail-closed，不使用该 worker。`mineru-api` 的 backend 语义不变，不接受 `local`。
+`mineru` routes by extension: `.docx`/`.pptx`/`.xlsx` keep their existing helper PDF conversion and VLM route. For `.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv`, the non-local direct VLM lane first uses the isolated helper to obtain a best-effort, valid text PDF from AnyDoc Markdown, then sends that PDF through the existing PDF/VLM route. This is a text-only fallback and does not preserve Office layout: the original layout, images, tables, formulas, and macros may be lost, and non-ASCII characters may be replaced with `?`. Every successful conversion emits a warning; a batch emits the Office/LibreOffice recommendation once. If conversion cannot produce a valid PDF, the error recommends converting the file with Microsoft Office or LibreOffice to DOCX/XLSX/PPTX first. Explicit `--backend local` runs both legacy AnyDoc Markdown and clean native-PDF extraction in the isolated bundled Rust helper, with no Python, Office application, model, or network. Non-local legacy output is written under `{out}/{stem}/vlm/` with the original legacy input preserved as an origin; local legacy output is `{out}/{stem}/office/{stem}.md`, and local native PDF output is `{out}/{stem}/native/{stem}.md`. The native profile contains only Markdown, not official JSON or assets. Direct Hybrid rejects Office and legacy inputs before spawning; the API path remains fail-closed and does not accept this worker boundary. The `mineru-api` backend semantics otherwise remain unchanged and do not accept `local`.
 
 ### Office helper containment
 
-辅助程序在转换前对 OOXML 和旧格式签名执行强制预检，并限制输入 32 MiB、输出 64 MiB。旧格式 PDF 是有界的文本 fallback，不承诺保持 Office 版式。
+Before conversion, the helper performs mandatory complete preflight validation of OOXML and legacy signatures, and limits input to 32 MiB and output to 64 MiB. Legacy PDF output is a bounded text fallback and does not preserve Office layout.
 
-| 平台 | 内存硬限制 | 其他辅助程序限制 |
+| Platform | Hard memory limit | Other helper limits |
 | --- | --- | --- |
-| Linux | `RLIMIT_AS` 1 GiB | CPU 120 秒、`NOFILE` 256、托管 180 秒 wall deadline、进程组清理 |
-| Windows | Job Object 1 GiB | CPU 120 秒、托管 180 秒 wall deadline、Job tree 清理 |
-| macOS | 无原生硬 RSS 上限 | 强制预检、CPU 120 秒、`NOFILE` 256、托管 180 秒 wall deadline、进程组清理 |
+| Linux | `RLIMIT_AS` 1 GiB | CPU 120 seconds, `NOFILE` 256, managed 180-second wall deadline, process-group cleanup |
+| Windows | Job Object 1 GiB | CPU 120 seconds, managed 180-second wall deadline, Job tree cleanup |
+| macOS | No native hard RSS limit | Mandatory preflight validation, CPU 120 seconds, `NOFILE` 256, managed 180-second wall deadline, process-group cleanup |
 
-macOS 原生 API 没有可靠且无需 entitlement 的进程 RSS/地址空间硬限制。面向互联网、在原生 macOS 接收不可信 Office 文档的部署，必须使用外部 VM 或容器内存边界提供硬内存隔离。
+Native macOS APIs have no reliable process RSS/address-space hard limit that does not require an entitlement. Deployments accepting untrusted Office documents from the Internet on native macOS must use an external VM or container memory boundary to provide hard memory isolation.
 
-### 直接 VLM 模式（默认）
+### Direct VLM mode (default)
 
-不传 `--api-url` 时，`mineru` 直接调用外部 VLM 服务。服务地址和模型由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME`、`MINERU_VL_API_KEY` 环境变量或 `--url` 覆盖。
+Without `--api-url`, `mineru` calls the external VLM service directly. The service address and model are supplied by the `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and `MINERU_VL_API_KEY` environment variables or overridden by `--url`.
 
-### 直接官方 Hybrid 4.0.0a6
+### Direct official Hybrid 4.0.4
 
-直接 `-b hybrid-http-client` 要求 Python 环境中精确安装
-`mineru==4.0.0a6`。Rust 二进制内嵌窄 adapter shim，但不打包 Python、MinerU
-或模型文件；未指定 worker 模式时，会在输入预检后自动选择：一个可运行文档使用
-`per-document`，多个可运行文档使用 `persistent`。`per-document` 模式每个文档
-启动一个新子进程，父进程负责 deadline、取消、管道上限和后代清理。只接受 PDF
-和官方图像格式，OOXML/旧 Office 会在启动 worker 前拒绝。
+Direct `-b hybrid-http-client` requires an installed Python environment containing
+exactly `mineru==4.0.4` (release tag `v4.0.4`; upstream requires Python >=3.10,<3.15,
+with dependencies including `mineru-vl-utils>=2.0.5,<3` and `docvortex`). The Rust
+binary embeds its narrow adapter shim; it does
+not bundle Python, MinerU, or model assets. When no worker mode is specified, selection
+is automatic after input preflight: one runnable document uses `per-document`, while
+multiple runnable documents use `persistent`. The `per-document` mode launches one fresh
+subprocess per document, with parent-owned timeout, cancellation, pipe limits, and
+descendant cleanup. Accepted inputs are PDF and official image kinds only; OOXML and
+legacy Office are rejected before the worker starts.
 
-可显式选择 `--official-worker-mode per-document` 或 `persistent`，或将
-`MINERU_OFFICIAL_WORKER_MODE` 设置为任一值。`persistent` 设置会在同一次直接 CLI
-运行中复用一个 worker 和已加载模型。该性能模式始终只有一个 active request：文档仍按顺序、各自使用私有
-快照和 bundle；worker 启动/握手一次，取消或崩溃后下一文档建立新 session。已提交的
-请求不自动重试，不提供硬 RSS/GPU 隔离。CLI 显式值覆盖环境值；两者都未指定时，
-按可运行文档数自动选择。环境值只影响直接 `hybrid-http-client`。
+You may explicitly select `--official-worker-mode per-document` or
+`--official-worker-mode persistent`.
+The persistent setting reuses one worker and its loaded model within one direct CLI run.
+This performance mode still admits one active request only: documents
+remain sequential and use independent private snapshots and bundles. Startup and
+handshake happen once; cancellation or a crash makes the next document create a new
+session. A committed request is never automatically retried, and this mode provides no
+hard RSS/GPU isolation. An explicit CLI value wins over the environment; with neither
+override, the automatic document-count selection applies. The environment setting
+applies only to direct `hybrid-http-client`.
 
-在 Windows 上，worker 分配到 `KILL_ON_JOB_CLOSE` Job Object 是 fail-closed 的，
-但 Tokio 会先 spawn，之后才执行 `WindowsJob::attach`。因此，分配前已启动的极快
-后代可能逃出该 Job Object；这段竞态只能尽力清理。官方 worker 不提供硬 RSS 或 GPU
-配额。
+On Windows, worker assignment to a `KILL_ON_JOB_CLOSE` Job Object is fail-closed,
+but Tokio spawns first and `WindowsJob::attach` runs afterward. A very fast
+descendant created before assignment can therefore escape the job; cleanup is
+best effort for that narrow race. The official worker has no hard RSS or GPU
+quota.
 
-`medium` 也保持官方 `hybrid-http-client` backend，但只走本地路径，不需要
-VLM URL；`high`/`xhigh` 使用同一个官方 `hybrid-http-client`，必须提供显式 HTTP(S) `--url` 或
-`MINERU_VL_SERVER`。`model_stack` 可为 `auto`、`light`、`full`；模型目录和
-配置由用户通过绝对路径提供。公式/表格关闭开关不是固定 parser 的参数。
-结果独立写入 `{输出}/{stem}/hybrid-v4/`，包含 `markdown.md`、
-`middle_json.json`、`content_list.json`、`structured_content.json`、可选的
-`model_output.json` 和 `images/`，不会进入 3.4.5 builders。
+`medium` keeps the official `hybrid-http-client` backend and is local-only: it
+rejects a configured `--url` or `MINERU_VL_SERVER`. `high` and `xhigh` use the same official
+`hybrid-http-client` backend and require an
+explicit HTTP(S) `--url` or `MINERU_VL_SERVER`. The CLI `--effort` mapping is:
+`medium` → tier `standard`, `high`/`xhigh` → tier `advanced`; `--url` /
+`MINERU_VL_SERVER` feed `VlmConfig.server_url`, and `--api-key` / model name
+feed `VlmConfig`. The worker calls the official
+`mineru.parser.parse_async(path, *, tier, ocr_mode, image_analysis, page_range,
+vlm_config)`; the old upstream backend/effort/server_url/method/lang parameters
+no longer exist. Model-root and config paths are user-supplied: upstream 4.0.4
+removed `model.stack`/`MINERU_MODEL_STACK` in favor of `model.small_backend` +
+`model.vlm.engine` configured via `MINERU_CONFIG`, so non-default
+`--model-stack` is rejected; upstream also removed the language parameter, so
+non-default `--lang` is rejected. The legacy env vars `MINERU_VL_API_KEY` /
+`MINERU_VL_MODEL_NAME` are no longer injected into the worker environment —
+pass credentials through the existing mineru-rs flags; `MINERU_HOME` /
+`MINERU_CONFIG` remain supported.
+Formula/table disable switches are unsupported by the pinned parser.
+Results are published separately under `{out}/{stem}/hybrid-v4/` with
+`markdown.md`, `middle_json.json`, `structured_content.json`,
+optional `model_output.json`, and `images/` (`content_list.json` is no longer
+produced); `middle_json.json` follows the shared DocVortex protocol (schema
+`docvortex.middle`, schema_version `2.0`; the old `_backend=hybrid` marker is
+gone) and they are never passed through the
+3.4.5 builders. Direct Hybrid rejects the v3-only VLM transport controls
+(`--http-*`, `--max-remote-image-*`, `--max-decoded-pixels`,
+`--max-images-per-request`, `--max-redirects`, `--vlm-debug`,
+`--temperature-retry`, and their environment spellings), as well as
+`--client-side-output-generation`, instead of silently ignoring them. The
+official parser fields and project-owned input/output caps remain available.
 
-直接 Hybrid 会拒绝旧版 v3 专用的 VLM transport 控制项（`--http-*`、
-`--max-remote-image-*`、`--max-decoded-pixels`、`--max-images-per-request`、
-`--max-redirects`、`--vlm-debug`、`--temperature-retry` 及对应环境变量），
-也会拒绝 `--client-side-output-generation`，不会静默忽略这些选项。官方解析
-字段和项目自己的输入/输出上限仍然可用。
+The project-owned adapter envelope is `mineru-rs-official-worker/1` in `per-document`
+mode, or internal persistent `mineru-rs-official-worker/2`; neither is an official
+MinerU stdin/stdout protocol.
+Configure the interpreter and official paths only with the fields below. Supplied
+executable, model, and config paths must be absolute.
 
-项目自有 adapter envelope 版本为 `mineru-rs-official-worker/1`（`per-document` 模式）或
-内部 persistent `mineru-rs-official-worker/2`，都不是官方 MinerU stdin/stdout 协议。
-API 模式仍明确拒绝 Hybrid：
+Selecting `-b hybrid-http-client` with `--api-url` remains fail-closed:
 
 ```text
 failed: backend=hybrid-http-client is direct-only; API mode does not support Hybrid
 ```
 
-默认 `vlm-http-client` 始终走现有 3.4.5 VLM 路径；`backend=local` 和官方 Hybrid 也保持独立。
+The default `vlm-http-client` always uses the existing 3.4.5 VLM route. No
+custom AnyDoc/native shortcut, 4.0 tier setting, or fake worker configuration
+is attached to `hybrid-http-client`.
 
 ```sh
 export MINERU_VL_SERVER="https://<server>"
@@ -150,75 +184,89 @@ export MINERU_VL_API_KEY="<your-key>"
 ./target/release/mineru -p input.pdf -o output
 ```
 
-### 本地 AnyDoc 模式（`backend=local`）
+### Local AnyDoc mode (`backend=local`)
 
-`local` 表示在隔离的内置 Rust `mineru-office-convert` 辅助程序中执行 AnyDoc 文本抽取，不在 CLI 核心进程中运行，也不表示本地模型。它支持 `.doc`、`.ppt`、`.xls`、`.odt`、`.rtf`、`.epub`、`.ods`、`.odp`、`.csv` 和 PDF native Markdown；构建时必须启用 `legacy-office`：
+`local` runs AnyDoc text extraction in the isolated bundled Rust `mineru-office-convert` helper, not in the CLI process and not as a local model. It supports `.doc`, `.ppt`, `.xls`, `.odt`, `.rtf`, `.epub`, `.ods`, `.odp`, `.csv`, and the PDF native Markdown API; build with `legacy-office`:
 
 ```sh
 cargo build --release --features legacy-office
 ./target/release/mineru -p old.doc -o output --backend local
 ```
 
-旧格式输出仍为 `output/old/office/old.md`，干净 native PDF 输出为 `output/old/native/old.md`。native profile 只有 Markdown，不生成 `document.json`、`middle.json`、`content-list` 或 assets。扫描、混合、乱码、空、低质量、复杂或不确定 PDF 会明确报错；不会调用 VLM 或静默回退。该内置 Rust helper 不启动 Python、Microsoft Office/LibreOffice，不加载模型，也不发网络请求。`--url`、`--api-key` 或 VLM 连接环境变量不会用于 AnyDoc 或被校验，也不会访问 `--api-url`。VLM transport flags（如 `--http-*`、`--max-remote-image-*`、`--vlm-debug`）同样不参与 local 解析。local 使用 helper 的有界默认策略，目前仅执行实际可实现的输入/输出字节限制（包括 `--office-input-bytes` 与 `--office-output-bytes`）；helper 专属的 stderr、wall、CPU、NOFILE、内存和进程隔离参数若通过 flag 或环境变量设置，在未明确支持时会在读取输入前明确拒绝。native local PDF 不支持页选择。
+The legacy output remains `output/old/office/old.md`; a clean native PDF is
+written as `output/old/native/old.md`. Native output is Markdown-only and does
+not create `document.json`, `middle.json`, `content-list`, or assets. The
+assessment rejects scanned, mixed, garbled, empty, low-quality, complex, or
+uncertain PDFs with a clear error; it never calls the VLM or silently falls
+back. The bundled local helper invokes no Python, Microsoft Office/LibreOffice,
+model, or network. Local mode does not use or validate `--url`, `--api-key`, or VLM
+connection environment values for AnyDoc. VLM transport flags such as
+`--http-*`, `--max-remote-image-*`, and `--vlm-debug` are likewise ignored. It
+uses the helper's bounded default policy and currently supports only the input
+and output byte limits, including `--office-input-bytes` and
+`--office-output-bytes`; helper-only stderr, wall, CPU, NOFILE, memory, and
+process-isolation controls are rejected before input work when supplied by flag
+or environment unless explicitly supported. Page selection is not supported by
+the native local PDF API.
 
-### 远程 API 服务器模式
+### Remote API server mode
 
-传入 `--api-url` 时，`mineru` 将文档提交到已运行的 `mineru-api` 服务器，由服务器调用 VLM 并返回结果归档。`--url` 可覆盖单个任务的服务器端模型地址。
+With `--api-url`, `mineru` submits documents to a running `mineru-api` server; the server calls the VLM and returns a result archive. `--url` overrides the server-side model address for an individual task.
 
 ```sh
 ./target/release/mineru -p input.pdf -o output --api-url "http://127.0.0.1:8000"
 ```
 
-### 命令行参数
+### Command-line options
 
-| 参数 | 默认值 | 说明 |
+| Option | Default | Description |
 | --- | --- | --- |
-| `-p, --path <路径>` | 必填 | 输入文件或目录（递归处理）。 |
-| `-o, --output <目录>` | 必填 | 输出目录。 |
-| `--api-url <URL>` | 无 | 远程 API 服务器地址；不传则直接 VLM 模式。 |
-| `-m, --method <auto\|txt\|ocr>` | `auto` | 解析方法；直接 `vlm-http-client` 忽略，官方直接 Hybrid 转发。 |
-| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | 后端。`local` 通过内置 Rust helper 调用项目私有 AnyDoc lane；直接 `hybrid-http-client` 使用官方 4.0.0a6 worker，API Hybrid 仍明确拒绝。 |
-| `--effort <medium\|high\|xhigh>` | `medium` | 官方直接 Hybrid 力度。`medium` 仅本地；`high`/`xhigh` 要求显式 HTTP(S) VLM URL；其它直接后端仍只接受 `medium`/`high`。 |
-| `--model-stack <auto\|light\|full>` | `auto` | 官方直接 Hybrid 模型栈。显式提供的值（包括 `auto`）覆盖 `MINERU_MODEL_STACK`；省略时使用环境值。模型文件不随 Rust 二进制提供。 |
-| `--official-worker-mode <per-document\|persistent>` | 按可运行文档数自动选择 | 官方 Hybrid worker 生命周期。一个可运行文档使用 `per-document`；多个可运行文档使用 `persistent`。显式值覆盖 `MINERU_OFFICIAL_WORKER_MODE`。 |
-| `--official-python <绝对路径>` | Python `python3`/`python` | 官方 Hybrid Python 解释器，覆盖 `MINERU_OFFICIAL_PYTHON`；不随 Rust 二进制提供。 |
-| `--official-model-dir <绝对路径>` | 无 | 官方 Hybrid 模型根目录，覆盖 `MINERU_MODEL_BASE_DIR`。 |
-| `--official-config <绝对路径>` | 无 | 官方 Hybrid 配置路径，覆盖 `MINERU_CONFIG`。 |
-| `-l, --lang <语言>` | `ch` | 语言代码。 |
-| `-u, --url <URL>` | 无 | 直接模式下的 VLM 服务地址覆盖；API 模式下的任务级模型服务器覆盖。 |
-| `-s, --start <n>` | `0` | 起始页，**从 0 开始**。 |
-| `-e, --end <n>` | 无（到末页） | 结束页，**包含该页**。 |
-| `-f, --formula <true\|false>` | `true` | 公式识别。显式布尔值，优先级 `CLI > MINERU_FORMULA_ENABLE > 默认值`。 |
-| `-t, --table <true\|false>` | `true` | 表格识别。显式布尔值，优先级 `CLI > MINERU_TABLE_ENABLE > 默认值`。 |
-| `--image-analysis <true\|false>` | `true` | 图像分析。显式布尔值，优先级 `CLI > MINERU_IMAGE_ANALYSIS_ENABLE > 默认值`。 |
-| `--log-level <级别>` | `info` | 日志级别：`trace`、`debug`、`info`、`success`、`warning`、`error`、`critical`。覆盖 `MINERU_LOG_LEVEL`。 |
-| `--processing-window-size <n>` | `64` | 页处理窗口。覆盖 `MINERU_PROCESSING_WINDOW_SIZE`。 |
-| `--page-concurrency <n>` | `64` | 页管线并发上限（任意正整数），仅约束同时运行的页管线数；实际请求级并发由 `--http-max-concurrency`/`MINERU_VLM_HTTP_CONCURRENCY` 决定。覆盖 `MINERU_OFFICIAL_PAGE_CONCURRENCY`。 |
-| `--concurrency-model <classic\|two-phase>` | `classic` | 并发模型：`classic` 经典单编码器流水（默认）；`two-phase` 将页内语义处理拆为 encode-all → request-all 两阶段（可选）。覆盖 `MINERU_OFFICIAL_CONCURRENCY_MODEL`。 |
-| `--render-workers <n>` | `min(cpu, 8)` | 渲染 worker 数；实际值还受所选页数约束。覆盖 `MINERU_PDF_RENDER_THREADS`。 |
-| `--render-timeout-seconds <n>` | `300` | 单次渲染超时。覆盖 `MINERU_PDF_RENDER_TIMEOUT`。 |
-| `--batch-size <n>` | `64` | 每页语义推理请求准入（推理批大小），区别于页并发与处理窗口；two-phase 模型下为每页请求阶段并发上限（受全局请求级信号量二次约束）。覆盖 `MINERU_BATCH_SIZE`。 |
-| `--total-deadline-seconds <n>` | `86400` | 单文档总 deadline。覆盖 `MINERU_TOTAL_DEADLINE_SECONDS`。 |
-| `--max-pdf-bytes <n>` | `1073741824` | 常驻源 PDF 上限。覆盖 `MINERU_MAX_PDF_BYTES`。 |
-| `--max-pages <n>` | `10000` | 每文档最大选中页数。覆盖 `MINERU_MAX_PAGES`。 |
-| `--max-page-pixels <n>` | `100000000` | 单页像素上限。覆盖 `MINERU_MAX_PAGE_PIXELS`。 |
-| `--max-rendered-image-bytes <n>` | `67108864` | 单次渲染 RGB 上限。覆盖 `MINERU_MAX_RENDERED_IMAGE_BYTES`。 |
-| `--max-in-flight-image-bytes <n>` | `536870912` | 在途 RGB 预算。覆盖 `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`。 |
-| `--max-raw-output-bytes <n>` | `134217728` | 单文档原始输出预算。覆盖 `MINERU_MAX_RAW_OUTPUT_BYTES`。 |
-| `--max-layout-blocks-per-page <n>` | `256` | 单页版面块上限。覆盖 `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE`。 |
-| `--max-semantic-requests-per-page <n>` | `128` | 单页语义请求上限。覆盖 `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE`。 |
-| `--max-encoded-request-bytes <n>` | `16777216` | 编码请求上限。覆盖 `MINERU_MAX_ENCODED_REQUEST_BYTES`。 |
-| `--max-encoded-batch-bytes <n>` | `67108864` | 编码批上限。覆盖 `MINERU_MAX_ENCODED_BATCH_BYTES`。 |
-| `--max-total-asset-bytes <n>` | `1073741824` | 全部资产上限。覆盖 `MINERU_MAX_TOTAL_ASSET_BYTES`。 |
-| `--max-staged-text-bytes <n>` | `268435456` | 暂存文本上限。覆盖 `MINERU_MAX_STAGED_TEXT_BYTES`。 |
+| `-p, --path <path>` | Required | Input file or directory (processed recursively). |
+| `-o, --output <directory>` | Required | Output directory. |
+| `--api-url <URL>` | None | Remote API server address; without it, direct VLM mode is used. |
+| `-m, --method <auto\|txt\|ocr>` | `auto` | Parsing method; ignored by direct `vlm-http-client`, rejected when non-default by official direct Hybrid (upstream 4.0.4 has no such parameter). |
+| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.0.4 worker; API Hybrid remains unsupported. |
+| `--effort <medium\|high\|xhigh>` | `medium` | Official direct Hybrid effort, mapped to upstream tiers: `medium`→`standard` (local-only); `high`/`xhigh`→`advanced` (require an explicit HTTP(S) VLM URL). Other direct backends accept only `medium`/`high`. |
+| `--model-stack <auto\|light\|full>` | `auto` | Official direct Hybrid model stack. Upstream 4.0.4 removed `model.stack`/`MINERU_MODEL_STACK` (replaced by `model.small_backend` + `model.vlm.engine` via `MINERU_CONFIG`), so non-default values, including `auto`, are rejected. |
+| `--official-worker-mode <per-document\|persistent>` | automatic (by runnable document count) | Official Hybrid worker lifecycle. One runnable document uses `per-document`; multiple runnable documents use `persistent`. |
+| `--official-python <absolute-path>` | Python `python3`/`python` | Official direct Hybrid interpreter. Overrides `MINERU_OFFICIAL_PYTHON`; the executable is not bundled. |
+| `--official-model-dir <absolute-path>` | None | Official direct Hybrid model root; overrides `MINERU_MODEL_BASE_DIR`. |
+| `--official-config <absolute-path>` | None | Official direct Hybrid config; overrides `MINERU_CONFIG`. |
+| `-l, --lang <language>` | `ch` | Language code. Official direct Hybrid rejects non-default values (upstream 4.0.4 removed the language parameter). |
+| `-u, --url <URL>` | None | VLM service-address override in direct mode; per-task model-server override in API mode. |
+| `-s, --start <n>` | `0` | Start page, **zero-based**. |
+| `-e, --end <n>` | None (through the last page) | End page, **inclusive**. |
+| `-f, --formula <true\|false>` | `true` | Formula recognition. Explicit boolean; precedence `CLI > MINERU_FORMULA_ENABLE > default`. |
+| `-t, --table <true\|false>` | `true` | Table recognition. Explicit boolean; precedence `CLI > MINERU_TABLE_ENABLE > default`. |
+| `--image-analysis <true\|false>` | `true` | Image analysis. Explicit boolean; precedence `CLI > MINERU_IMAGE_ANALYSIS_ENABLE > default`. |
+| `--log-level <level>` | `info` | Log verbosity: `trace`, `debug`, `info`, `success`, `warning`, `error`, `critical`. Overrides `MINERU_LOG_LEVEL`. |
+| `--processing-window-size <n>` | `64` | Page processing window. Overrides `MINERU_PROCESSING_WINDOW_SIZE`. |
+| `--page-concurrency <n>` | `64` | Page-pipeline concurrency cap (any positive value); bounds only the number of simultaneously running page pipelines. Actual request-level concurrency is governed by `--http-max-concurrency`/`MINERU_VLM_HTTP_CONCURRENCY`. Overrides `MINERU_OFFICIAL_PAGE_CONCURRENCY`. |
+| `--concurrency-model <classic\|two-phase>` | `classic` | Concurrency model: `classic` (long-standing single-encoder pipeline; default) or `two-phase` (per-page semantic work split into encode-all → request-all stages). Overrides `MINERU_OFFICIAL_CONCURRENCY_MODEL`. |
+| `--render-workers <n>` | `min(cpu, 8)` | Rendering workers; the effective count is also capped by selected pages. Overrides `MINERU_PDF_RENDER_THREADS`. |
+| `--render-timeout-seconds <n>` | `300` | Per-render timeout. Overrides `MINERU_PDF_RENDER_TIMEOUT`. |
+| `--batch-size <n>` | `64` | Per-page semantic inference request admission (inference batching), distinct from page concurrency and the processing window; under two-phase it caps per-page request-stage concurrency (additionally bounded by the global request-level semaphore). Overrides `MINERU_BATCH_SIZE`. |
+| `--total-deadline-seconds <n>` | `86400` | Per-document total deadline. Overrides `MINERU_TOTAL_DEADLINE_SECONDS`. |
+| `--max-pdf-bytes <n>` | `1073741824` | Resident source-PDF cap. Overrides `MINERU_MAX_PDF_BYTES`. |
+| `--max-pages <n>` | `10000` | Maximum selected pages per document. Overrides `MINERU_MAX_PAGES`. |
+| `--max-page-pixels <n>` | `100000000` | Per-page pixel cap. Overrides `MINERU_MAX_PAGE_PIXELS`. |
+| `--max-rendered-image-bytes <n>` | `67108864` | Per-render RGB cap. Overrides `MINERU_MAX_RENDERED_IMAGE_BYTES`. |
+| `--max-in-flight-image-bytes <n>` | `536870912` | In-flight RGB budget. Overrides `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES`. |
+| `--max-raw-output-bytes <n>` | `134217728` | Per-document raw output budget. Overrides `MINERU_MAX_RAW_OUTPUT_BYTES`. |
+| `--max-layout-blocks-per-page <n>` | `256` | Layout block cap per page. Overrides `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE`. |
+| `--max-semantic-requests-per-page <n>` | `128` | Semantic request cap per page. Overrides `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE`. |
+| `--max-encoded-request-bytes <n>` | `16777216` | Encoded request cap. Overrides `MINERU_MAX_ENCODED_REQUEST_BYTES`. |
+| `--max-encoded-batch-bytes <n>` | `67108864` | Encoded batch cap. Overrides `MINERU_MAX_ENCODED_BATCH_BYTES`. |
+| `--max-total-asset-bytes <n>` | `1073741824` | Total asset cap. Overrides `MINERU_MAX_TOTAL_ASSET_BYTES`. |
+| `--max-staged-text-bytes <n>` | `268435456` | Staged text cap. Overrides `MINERU_MAX_STAGED_TEXT_BYTES`. |
 
-所有数值 flag 均为严格解析：非法、非有限、不应为零却为零、溢出或平台不可表示的值会在任何网络/输出工作前失败。每个旋钮的优先级均为 `CLI > 环境变量 > 编译默认值`。
+All numeric flags are strict: malformed, non-finite, zero-where-invalid, overflowing, or platform-unrepresentable values fail before any network or output work. Precedence is `CLI > environment > compiled default` for every knob.
 
-VLM 传输旋钮（每个都有对应的环境拼写）：
+VLM transport knobs (each also has an environment spelling):
 
-| Flag | 默认值 | 覆盖 |
+| Flag | Default | Overrides |
 | --- | ---: | --- |
-| `--http-max-concurrency <n>` | `100` | 全局请求级准入信号量（layout 与语义请求共用），决定服务端在途请求深度；建议 ≤ 服务端 vLLM `max_num_seqs`。覆盖 `MINERU_VLM_HTTP_CONCURRENCY`。 |
+| `--http-max-concurrency <n>` | `100` | Global request-level admission semaphore (shared by layout and semantic requests), governing the depth of in-flight requests at the server; consider ≤ the server's vLLM `max_num_seqs`. Overrides `MINERU_VLM_HTTP_CONCURRENCY`. |
 | `--http-timeout-seconds <n>` | `600` | `MINERU_VLM_HTTP_TIMEOUT` |
 | `--connect-timeout-seconds <n>` | `10` | `MINERU_VLM_CONNECT_TIMEOUT` |
 | `--http-max-keepalive-connections <n>` | `20` | `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` |
@@ -230,38 +278,39 @@ VLM 传输旋钮（每个都有对应的环境拼写）：
 | `--max-images-per-request <n>` | `64` | `MINERU_VLM_MAX_IMAGES_PER_REQUEST` |
 | `--max-redirects <n>` | `3` | `MINERU_VLM_MAX_REDIRECTS` |
 | `--http-max-response-bytes <n>` | `10485760` | `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` |
-| `--temperature-retry[=<true\|false>]` | 关闭 | 仅对可完整缓冲的 official PDF layout/semantic 请求启用质量重试：先使用基础温度，之后每次 `+0.2`，上限 `1.0`。升温重试 body 仅将已存在的正数 `top_k` 放宽到至少 `40`、`top_p` 放宽到至少 `0.9`；不添加缺失字段或改写 `top_k<=0` 的不限值。`--temperature-retry` 等同于 `true`，显式 `=false` 覆盖 `MINERU_VLM_TEMPERATURE_RETRY`；未提供 CLI 值时沿用环境变量。不影响普通 `predict`、批量、流式、`backend=local` 或 API 表单请求。 |
-| `--vlm-debug <true\|false>` | `false` | 在 VLM 请求体中发送 `vllm_xargs.debug`。覆盖 `MINERU_VL_DEBUG_ENABLE`。 |
+| `--temperature-retry[=<true\|false>]` | Off | Opt-in quality retry for buffered official PDF layout/semantic requests: keeps the base temperature first, then adds `0.2` per retry up to `1.0`. Retry bodies only widen existing positive `top_k` to at least `40` and `top_p` to at least `0.9`; omitted fields and `top_k<=0` unlimited values are left untouched. Bare `--temperature-retry` means `true`, explicit `=false` overrides `MINERU_VLM_TEMPERATURE_RETRY`, and an omitted CLI flag preserves the environment value. It does not affect ordinary `predict`, batch, streaming, `backend=local`, or API-form requests. |
+| `--vlm-debug <true\|false>` | `false` | Sends `vllm_xargs.debug` in the VLM request body. Overrides `MINERU_VL_DEBUG_ENABLE`. |
 
-诊断/人类输出截断上限保持编译固定、不可配置。现有 `--max-input-bytes`、`--max-encoded-document-bytes`、`--max-output-bytes` 三组不变。
+Diagnostic/human-output truncation caps remain compiled and are not configurable. The existing `--max-input-bytes`, `--max-encoded-document-bytes`, and `--max-output-bytes` pairs are unchanged.
 
-现有直接 `vlm-http-client` 下 `--method`、`--effort`、`--lang` 的非默认值会产生警告并被忽略；官方直接 Hybrid 会把这些字段传给 4.0.0a6。`--client-side-output-generation` 在直接 Hybrid 和 API 模式下都会被拒绝。
+For the existing direct `vlm-http-client` lane, non-default values for `--method`, `--effort`, and `--lang` produce a warning and are ignored. Official direct Hybrid rejects non-default `--method`/`--lang` (upstream 4.0.4 has no such parameters) and maps `--effort` to upstream tiers as described above. `--client-side-output-generation` is rejected in both direct Hybrid and API mode.
 
-API 模式下本地 VLM 传输旋钮（`--page-concurrency`、`--concurrency-model`、`--processing-window-size`、`--render-*`、`--batch-size`、全部 `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--temperature-retry`/`--vlm-debug` 及其环境拼写）会显式报错，因为远程服务器执行解析、这些配置不会有任何消费者；`MINERU_VL_SERVER` 在未传 `--url` 时作为任务级 `server_url` 提交。
+In API mode, the local VLM transport knobs (`--page-concurrency`, `--concurrency-model`, `--processing-window-size`, `--render-*`, `--batch-size`, all `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--temperature-retry`/`--vlm-debug` and their environment spellings) fail explicitly, because the remote server performs parsing and those controls would have no consumer; `MINERU_VL_SERVER` is submitted as the per-task `server_url` when `--url` is absent.
 
 ---
 
-## API 服务端
+## API server
 
-`mineru-api` 是 HTTP API 服务。服务本身不做本地推理，它接收文档、调用外部 VLM 服务，再把结果归档返回。
+`mineru-api` is the HTTP API server. The service itself performs no local inference: it accepts documents, calls an external VLM service, then returns archived results.
 
-### 容器
+### Published GHCR image
 
-已发布的 Rust API 镜像为 `ghcr.io/agentsyaml/mineru-cli`。它监听容器端口
-`8000`，提供 `GET /health`，将任务输出写入 `/app/output`，并以默认的非
-root 用户运行。发布二进制包含 `office,legacy-office` feature，但镜像只打包
-Rust 二进制：不包含 Python、`mineru==4.0.0a6` 或模型文件。
-请在命令中使用明确的版本化 tag，例如当前的 `:0.3.0`；发布流程不会发布或
-更新可变的 `latest` tag。
+The published Rust API image is `ghcr.io/agentsyaml/mineru-cli`. It listens on
+container port `8000`, serves `GET /health`, writes task output below
+`/app/output`, and runs its default command as a non-root user. The release
+binaries include the `office,legacy-office` feature set, but the image bundles
+Rust binaries only: it contains no Python, `mineru==4.0.4`, or model assets.
+Use an explicit version tag in commands, such as the current `:0.3.0`; releases
+do not publish or update the mutable `latest` tag.
 
-该镜像默认以 `--host 0.0.0.0` 启动 `mineru-api`，并设置
-`MINERU_API_PUBLIC_BIND_EXPOSED=true`，使 Docker 可以访问容器端口。该监听权限
-与请求策略相互独立：除非显式提供 `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true`，
-公开 HTTP client 访问仍保持关闭。
+The image starts `mineru-api` with `--host 0.0.0.0` and sets
+`MINERU_API_PUBLIC_BIND_EXPOSED=true` so Docker can reach the container port.
+This bind permission is separate from request policy: public HTTP-client access
+remains disabled unless `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` is supplied.
 
 ```sh
 mkdir -p output
-chmod a+rwx output  # 让镜像的非 root 用户可以写入
+chmod a+rwx output  # grant the image's non-root user write access
 docker run --rm \
   --publish 127.0.0.1:8000:8000 \
   --volume "$PWD/output:/app/output" \
@@ -274,18 +323,22 @@ docker run --rm \
 curl http://127.0.0.1:8000/health
 ```
 
-宿主机绑定的输出目录必须允许镜像默认的非 root 用户写入。该镜像不能直接
-运行官方 Hybrid；只有显式提供另行准备好的环境才可满足其外部依赖，API Hybrid
-仍 fail-closed。`--publish` 地址控制宿主机暴露范围（此处为 `127.0.0.1`；改为
-`0.0.0.0` 会在所有宿主机网卡上暴露），这与容器内的监听权限相互独立。命令中的
-`MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` 是显式的、针对单个容器的未认证任务 API
-opt-in；省略它即可保持解析请求关闭，不要将它放入 Dockerfile 或镜像的全局 ENV。
-优先按上例发布到 loopback；若要扩大暴露范围，必须使用私有网络或带认证的反向代理，
-因为 API 没有内置认证或任务所有权隔离。
+The bind-mounted output directory must be writable by the image's default
+non-root user. The stock image cannot run official Hybrid without a separately
+prepared environment explicitly supplied to it; API Hybrid remains fail-closed.
+The `--publish` address controls host exposure (`127.0.0.1` here;
+`0.0.0.0` would expose the port on all host interfaces), independently of the
+container's bind permission. The command's
+`MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` is an explicit, per-container opt-in
+to the unauthenticated task API; omit it to keep parsing requests disabled, and
+keep it out of the Dockerfile and global image environment. Publish to loopback
+first as shown. Broader exposure requires a private network or an authenticated
+reverse proxy because the API has no built-in authentication or task-ownership
+isolation.
 
-### 启动
+### Startup
 
-服务需要一个可用的 VLM 服务地址与模型，由 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME`、`MINERU_VL_API_KEY` 提供：
+The service requires a usable VLM service address and model, supplied by `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and `MINERU_VL_API_KEY`:
 
 ```sh
 export MINERU_VL_SERVER="https://<server>"
@@ -295,133 +348,134 @@ export MINERU_VL_API_KEY='<your-key>'
 ./target/release/mineru-api --port 8000
 ```
 
-启动成功后 stderr 会输出可直接复制的服务地址与健康检查地址：
+After successful startup, stderr prints copyable service and health-check addresses:
 
 ```text
 server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 ```
 
-### 命令行参数
+### Command-line options
 
-| 参数 | 默认值 | 说明 |
+| Option | Default | Description |
 | --- | --- | --- |
-| `--host <IP>` | `127.0.0.1` | 监听地址。非 loopback 地址需同时设置 `MINERU_API_PUBLIC_BIND_EXPOSED`，否则启动失败。 |
-| `--port <端口>` | `8000` | 监听端口。 |
-| `--output-root <目录>` | `./output` | 任务输出与临时文件根目录。 |
-| `--concurrency <n>` | `3` | 同时处理的任务数。 |
-| `--shutdown-on-stdin-eof` | 关闭 | stdin 关闭时优雅退出，适合由父进程托管。 |
+| `--host <IP>` | `127.0.0.1` | Bind address. A non-loopback address also requires `MINERU_API_PUBLIC_BIND_EXPOSED`, otherwise startup fails. |
+| `--port <port>` | `8000` | Listening port. |
+| `--output-root <directory>` | `./output` | Root directory for task output and temporary files. |
+| `--concurrency <n>` | `3` | Number of tasks processed concurrently. |
+| `--shutdown-on-stdin-eof` | Off | Gracefully exit when stdin closes; suitable for parent-process management. |
 
-`--output-root`、`--concurrency`、`--shutdown-on-stdin-eof` 覆盖对应环境变量；省略时保留环境变量值或上表默认值。所有平台均接受显式值，不再有 macOS 并发下限。
+`--output-root`, `--concurrency`, and `--shutdown-on-stdin-eof` override their corresponding environment variables; when omitted, the environment-variable value or the table default remains in effect. Explicit values are honored on every platform; there is no macOS concurrency floor.
 
-### 环境变量
+### Environment variables
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `MINERU_API_OUTPUT_ROOT` | `./output` | 输出根目录。 |
-| `MINERU_API_MAX_CONCURRENT_REQUESTS` | `3` | 并发任务数；非正值或非法值直接启动失败。 |
-| `MINERU_API_TASK_RETENTION_SECONDS` | `86400` | 终态任务记录保留时长。 |
-| `MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS` | `300` | 清理扫描间隔。 |
-| `MINERU_API_PUBLIC_BIND_EXPOSED` | 关闭 | 允许监听非 loopback 地址。 |
-| `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` | 关闭 | 公开监听时允许处理 POST 解析请求。 |
-| `MINERU_API_SHUTDOWN_ON_STDIN_EOF` | 关闭 | 等价于 `--shutdown-on-stdin-eof`。 |
-| `MINERU_API_RECORD_CAP` | `32` | 并发任务记录上限。 |
-| `MINERU_API_FILE_CAP` | `1073741824` | 单文件上传字节上限。 |
-| `MINERU_API_BODY_CAP` | `1074790400` | multipart 请求体字节上限。 |
-| `MINERU_API_TEXT_CAP` | `65536` | 单个表单文本字段字节上限。 |
-| `MINERU_API_TEXT_TOTAL_CAP` | `262144` | 表单文本合计字节上限。 |
-| `MINERU_API_FORM_FIELDS_CAP` | `32` | multipart 表单字段数量上限。 |
-| `MINERU_TASK_RESULT_TIMEOUT_SECONDS` | `3600` | `mineru --api-url` 客户端：任务结果超时秒数。 |
-| `MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS` | `600` | 客户端：结果下载超时秒数。 |
-| `MINERU_API_CONNECT_TIMEOUT_SECONDS` | `10` | 客户端：API 连接超时秒数。 |
-| `MINERU_API_ACQUISITION_TIMEOUT_SECONDS` | `60` | 客户端：任务提交/状态获取超时秒数。 |
-| `MINERU_API_SEND_TIMEOUT_SECONDS` | `300` | 客户端：上传超时秒数。 |
-| `MINERU_API_POLL_INTERVAL_SECONDS` | `1` | 客户端：轮询间隔秒数。 |
-| `MINERU_OFFICE_INPUT_BYTES` | `33554432` | Office 辅助进程输入字节上限（子进程环境）。 |
-| `MINERU_OFFICE_OUTPUT_BYTES` | `67108864` | Office 辅助进程输出 PDF 字节上限。 |
-| `MINERU_OFFICE_STDERR_BYTES` | `4096` | Office 辅助进程 stderr 诊断上限。 |
-| `MINERU_OFFICE_WALL_SECONDS` | `180` | Office 辅助进程托管 wall 时间上限。 |
-| `MINERU_OFFICE_CPU_SECONDS` | `120` | Office 辅助进程 CPU 秒数 rlimit。 |
-| `MINERU_OFFICE_NOFILE` | `256` | Office 辅助进程 NOFILE rlimit。 |
-| `MINERU_OFFICE_ADDRESS_SPACE_BYTES` | `1073741824` | Office 辅助进程地址空间 rlimit（Linux）。 |
-| `MINERU_OFFICE_ACTIVE_PROCESS_LIMIT` | `8` | Office 辅助进程 Windows 作业活动进程上限。 |
-| `MINERU_OFFICE_PROCESS_MEMORY_BYTES` | `1073741824` | Office 辅助进程 Windows 单进程内存上限。 |
-| `MINERU_OFFICE_JOB_MEMORY_BYTES` | `1073741824` | Office 辅助进程 Windows 作业内存上限。 |
-| `MINERU_OFFICE_PROCESS_TIME_SECONDS` | `120` | Office 辅助进程 Windows 单进程用户时间。 |
-| `MINERU_OFFICE_JOB_TIME_SECONDS` | `120` | Office 辅助进程 Windows 作业用户时间。 |
-| `MINERU_OOXML_ARCHIVE_BYTES` | `1073741824` | OOXML 预检归档字节上限。 |
-| `MINERU_OOXML_EXPANDED_BYTES` | `268435456` | OOXML 预检解压字节上限。 |
-| `MINERU_OOXML_XML_ENTRY_BYTES` | `8388608` | OOXML 单个 XML 条目字节上限。 |
-| `MINERU_OOXML_XML_TOTAL_BYTES` | `33554432` | OOXML XML 合计字节上限。 |
-| `MINERU_OOXML_RATIO` | `500` | OOXML 条目压缩比上限。 |
-| `MINERU_OOXML_XML_DEPTH` | `128` | OOXML XML 深度上限。 |
-| `MINERU_OOXML_XML_EVENTS` | `100000` | OOXML XML 事件数上限。 |
-| `MINERU_OOXML_XML_ATTRIBUTES` | `256` | OOXML 单元素属性数上限。 |
-| `MINERU_OOXML_XML_NAMESPACES` | `256` | OOXML 单元素命名空间数上限。 |
-| `MINERU_ARCHIVE_MAX_ENTRIES` | `100000` | 归档最大条目数（ZIP 扫描）。 |
-| `MINERU_ARCHIVE_MAX_RATIO` | `1000` | 归档条目压缩比上限。 |
-| `MINERU_ZIP_SCAN_CENTRAL_CAP` | `67108864` | ZIP 中央目录扫描字节上限（64 MiB）。 |
-| `MINERU_ZIP_SCAN_NAME_CAP` | `4096` | ZIP 单条目名长度上限（字节）。 |
-| `MINERU_ZIP_SCAN_DEPTH_CAP` | `64` | ZIP 条目路径深度上限。 |
-| `MINERU_ZIP_SCAN_TOTAL_NAME_CAP` | `33554432` | ZIP 条目名合计字节上限（32 MiB）。 |
-| `MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP` | `1000000` | ZIP 路径组件合计上限。 |
-| `MINERU_PROCESSING_WINDOW_SIZE` | `64` | 页处理窗口。 |
-| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | 页管线并发上限（任意正整数），仅约束同时运行的页管线数；请求级并发由 `MINERU_VLM_HTTP_CONCURRENCY` 决定。 |
-| `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | 并发模型，取值 `classic\|two-phase`。`classic`：经典单编码器流水（默认）；`two-phase`：将页内语义处理拆为 encode-all → request-all 两阶段，解除 CPU 编码对请求派发的串行瓶颈（可选启用）。 |
-| `MINERU_MODEL_STACK` | `auto` | 官方直接 Hybrid 模型栈：`auto\|light\|full`。 |
-| `MINERU_OFFICIAL_WORKER_MODE` | 按可运行文档数自动选择 | 官方 Hybrid worker 模式：`per-document\|persistent`。仅直接 Hybrid 生效；CLI 显式值优先。 |
-| `MINERU_OFFICIAL_PYTHON` | Python `python3`/`python` | 官方 Hybrid Python 解释器绝对路径。 |
-| `MINERU_MODEL_BASE_DIR` | 无 | 官方 Hybrid 模型根目录绝对路径。 |
-| `MINERU_CONFIG` | 无 | 官方 Hybrid 配置绝对路径。 |
-| `MINERU_PDF_RENDER_THREADS` | `min(cpu, 8)` | 渲染 worker 数。 |
-| `MINERU_PDF_RENDER_TIMEOUT` | `300` | 单次渲染超时秒数。 |
-| `MINERU_FORMULA_ENABLE` | 开启 | 公式识别默认值（严格 `true`/`false`，不区分大小写）。 |
-| `MINERU_TABLE_ENABLE` | 开启 | 表格识别默认值（严格 `true`/`false`）。 |
-| `MINERU_IMAGE_ANALYSIS_ENABLE` | 开启 | 图像分析默认值（严格 `true`/`false`）。 |
-| `MINERU_LOG_LEVEL` | `info` | 日志级别；`critical` 静默进度输出。 |
-| `MINERU_BATCH_SIZE` | `64` | 每页语义推理请求准入（two-phase 下为每页请求阶段并发上限）。 |
-| `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | 单文档总 deadline。 |
-| `MINERU_MAX_PDF_BYTES` | `1073741824` | 常驻源 PDF 上限。 |
-| `MINERU_MAX_PAGES` | `10000` | 每文档最大选中页数。 |
-| `MINERU_MAX_PAGE_PIXELS` | `100000000` | 单页像素上限。 |
-| `MINERU_MAX_RENDERED_IMAGE_BYTES` | `67108864` | 单次渲染 RGB 上限。 |
-| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `536870912` | 在途 RGB 预算。 |
-| `MINERU_MAX_RAW_OUTPUT_BYTES` | `134217728` | 单文档原始输出预算。 |
-| `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE` | `256` | 单页版面块上限。 |
-| `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE` | `128` | 单页语义请求上限。 |
-| `MINERU_MAX_ENCODED_REQUEST_BYTES` | `16777216` | 编码请求上限。 |
-| `MINERU_MAX_ENCODED_BATCH_BYTES` | `67108864` | 编码批上限。 |
-| `MINERU_MAX_TOTAL_ASSET_BYTES` | `1073741824` | 全部资产上限。 |
-| `MINERU_MAX_STAGED_TEXT_BYTES` | `268435456` | 暂存文本上限。 |
-| `MINERU_VLM_HTTP_CONCURRENCY` | `100` | 全局请求级准入信号量（layout 与语义请求共用）；建议 ≤ 服务端 vLLM `max_num_seqs`。 |
-| `MINERU_VLM_HTTP_TIMEOUT` | `600` | VLM HTTP 请求超时秒数。 |
-| `MINERU_VLM_CONNECT_TIMEOUT` | `10` | 连接超时秒数。 |
-| `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` | `20` | keepalive 连接池大小。 |
-| `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` | `30` | keepalive 过期秒数。 |
-| `MINERU_VLM_HTTP_MAX_RETRIES` | `3` | HTTP 重试次数。 |
-| `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` | `0.5` | 重试退避因子。 |
-| `MINERU_VLM_MAX_IMAGE_BYTES` | `33554432` | 远程图像字节上限。 |
-| `MINERU_VLM_MAX_DECODED_PIXELS` | `100000000` | 解码像素上限。 |
-| `MINERU_VLM_MAX_IMAGES_PER_REQUEST` | `64` | 每请求图像数上限。 |
-| `MINERU_VLM_MAX_REDIRECTS` | `3` | 重定向上限。 |
-| `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP 响应上限。 |
-| `MINERU_VLM_TEMPERATURE_RETRY` | 关闭 | 取值 `1`/`true` 开启（`0`/`false` 关闭）可完整缓冲的 official PDF layout/semantic 质量重试。先发基础温度，之后每次 `+0.2`，上限 `1.0`；使用独立重试预算，并共享 official deadline 与响应字节预算。 |
-| `MINERU_VLM_TEXT_BEFORE_IMAGE` | 关闭 | 请求中文本置于图像之前。 |
-| `MINERU_VLM_ALLOW_TRUNCATED_CONTENT` | 关闭 | 允许截断的 VLM 响应内容。 |
-| `MINERU_VLM_ALLOW_REMOTE_IMAGES` | 关闭 | 允许按 URL 拉取远程图像。 |
-| `MINERU_VLM_ALLOW_PRIVATE_REMOTE_IMAGES` | 关闭 | 允许私有/回环地址的远程图像。 |
-| `MINERU_VLM_END_TOKEN` | `<|im_end|>` | VLM 响应的结束 token。 |
-| `MINERU_VL_DEBUG_ENABLE` | 关闭 | VLM 请求调试标记（严格 `true`/`false`）。 |
-| `MINERU_VL_SERVER` | 无 | VLM 服务基础 URL（如 `https://host/v1`）；`mineru` 直接模式与 `mineru-api` 必填。 |
-| `MINERU_VL_MODEL_NAME` | 无 | 模型 ID；`mineru` 直接模式与 `mineru-api` 必填。 |
-| `MINERU_VL_API_KEY` | 无 | VLM 服务的 Bearer 令牌。 |
+| `MINERU_API_OUTPUT_ROOT` | `./output` | Output root directory. |
+| `MINERU_API_MAX_CONCURRENT_REQUESTS` | `3` | Number of concurrent tasks; non-positive or invalid values cause startup to fail. |
+| `MINERU_API_TASK_RETENTION_SECONDS` | `86400` | Retention period for terminal task records. |
+| `MINERU_API_TASK_CLEANUP_INTERVAL_SECONDS` | `300` | Cleanup scan interval. |
+| `MINERU_API_PUBLIC_BIND_EXPOSED` | Off | Allow binding a non-loopback address. |
+| `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` | Off | Allow POST parsing requests when publicly bound. |
+| `MINERU_API_SHUTDOWN_ON_STDIN_EOF` | Off | Equivalent to `--shutdown-on-stdin-eof`. |
+| `MINERU_API_RECORD_CAP` | `32` | Max concurrent task records. |
+| `MINERU_API_FILE_CAP` | `1073741824` | Per-upload file byte cap. |
+| `MINERU_API_BODY_CAP` | `1074790400` | Multipart request body byte cap. |
+| `MINERU_API_TEXT_CAP` | `65536` | Per-form text field byte cap. |
+| `MINERU_API_TEXT_TOTAL_CAP` | `262144` | Aggregate form text byte cap. |
+| `MINERU_API_FORM_FIELDS_CAP` | `32` | Max multipart form fields. |
+| `MINERU_TASK_RESULT_TIMEOUT_SECONDS` | `3600` | `mineru --api-url` client: task-result timeout in seconds. |
+| `MINERU_TASK_RESULT_DOWNLOAD_TIMEOUT_SECONDS` | `600` | Client: result-download timeout in seconds. |
+| `MINERU_API_CONNECT_TIMEOUT_SECONDS` | `10` | Client: API connect timeout in seconds. |
+| `MINERU_API_ACQUISITION_TIMEOUT_SECONDS` | `60` | Client: task submission/status-acquisition timeout in seconds. |
+| `MINERU_API_SEND_TIMEOUT_SECONDS` | `300` | Client: upload timeout in seconds. |
+| `MINERU_API_POLL_INTERVAL_SECONDS` | `1` | Client: polling interval in seconds. |
+| `MINERU_OFFICE_INPUT_BYTES` | `33554432` | Office helper input byte cap (child-environment). |
+| `MINERU_OFFICE_OUTPUT_BYTES` | `67108864` | Office helper output PDF byte cap. |
+| `MINERU_OFFICE_STDERR_BYTES` | `4096` | Office helper stderr diagnostic cap. |
+| `MINERU_OFFICE_WALL_SECONDS` | `180` | Office helper managed wall-time cap. |
+| `MINERU_OFFICE_CPU_SECONDS` | `120` | Office helper CPU-seconds rlimit. |
+| `MINERU_OFFICE_NOFILE` | `256` | Office helper NOFILE rlimit. |
+| `MINERU_OFFICE_ADDRESS_SPACE_BYTES` | `1073741824` | Office helper address-space rlimit (Linux). |
+| `MINERU_OFFICE_ACTIVE_PROCESS_LIMIT` | `8` | Office helper Windows job active-process limit. |
+| `MINERU_OFFICE_PROCESS_MEMORY_BYTES` | `1073741824` | Office helper Windows per-process memory limit. |
+| `MINERU_OFFICE_JOB_MEMORY_BYTES` | `1073741824` | Office helper Windows job memory limit. |
+| `MINERU_OFFICE_PROCESS_TIME_SECONDS` | `120` | Office helper Windows per-process user time. |
+| `MINERU_OFFICE_JOB_TIME_SECONDS` | `120` | Office helper Windows per-job user time. |
+| `MINERU_OOXML_ARCHIVE_BYTES` | `1073741824` | OOXML preflight archive byte cap. |
+| `MINERU_OOXML_EXPANDED_BYTES` | `268435456` | OOXML preflight expanded byte cap. |
+| `MINERU_OOXML_XML_ENTRY_BYTES` | `8388608` | OOXML per-XML-entry byte cap. |
+| `MINERU_OOXML_XML_TOTAL_BYTES` | `33554432` | OOXML aggregate XML byte cap. |
+| `MINERU_OOXML_RATIO` | `500` | OOXML entry compression ratio cap. |
+| `MINERU_OOXML_XML_DEPTH` | `128` | OOXML XML depth cap. |
+| `MINERU_OOXML_XML_EVENTS` | `100000` | OOXML XML event cap. |
+| `MINERU_OOXML_XML_ATTRIBUTES` | `256` | OOXML per-element attribute cap. |
+| `MINERU_OOXML_XML_NAMESPACES` | `256` | OOXML per-element namespace cap. |
+| `MINERU_ARCHIVE_MAX_ENTRIES` | `100000` | Maximum archive entries (ZIP scan). |
+| `MINERU_ARCHIVE_MAX_RATIO` | `1000` | Archive entry compression-ratio cap. |
+| `MINERU_ZIP_SCAN_CENTRAL_CAP` | `67108864` | ZIP central-directory scan byte cap (64 MiB). |
+| `MINERU_ZIP_SCAN_NAME_CAP` | `4096` | ZIP per-entry name length cap (bytes). |
+| `MINERU_ZIP_SCAN_DEPTH_CAP` | `64` | ZIP entry path depth cap. |
+| `MINERU_ZIP_SCAN_TOTAL_NAME_CAP` | `33554432` | ZIP aggregate entry-name byte cap (32 MiB). |
+| `MINERU_ZIP_SCAN_TOTAL_COMPONENT_CAP` | `1000000` | ZIP aggregate path-component cap. |
+| `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
+| `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | Page-pipeline concurrency cap (any positive value), bounding only the number of simultaneously running page pipelines; request-level concurrency is governed by `MINERU_VLM_HTTP_CONCURRENCY`. |
+| `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | Concurrency model, one of `classic\|two-phase`. `classic`: the long-standing single-encoder pipeline (default); `two-phase`: splits each page's semantic work into an encode-all → request-all two-stage flow, removing the CPU-encode serialization bottleneck in front of request dispatch (opt-in). |
+| `MINERU_MODEL_STACK` | `auto` | Official direct Hybrid stack: `auto\|light\|full`. Upstream 4.0.4 removed `model.stack`/`MINERU_MODEL_STACK`; non-default `--model-stack` is rejected (configure via `MINERU_CONFIG`). |
+| `MINERU_OFFICIAL_PYTHON` | Python `python3`/`python` | Absolute official Hybrid interpreter path. |
+| `MINERU_MODEL_BASE_DIR` | None | Absolute official Hybrid model root. |
+| `MINERU_CONFIG` | None | Absolute official Hybrid config path. |
+| `MINERU_PDF_RENDER_THREADS` | `min(cpu, 8)` | Number of rendering workers. |
+| `MINERU_PDF_RENDER_TIMEOUT` | `300` | Timeout in seconds for a single render. |
+| `MINERU_FORMULA_ENABLE` | On | Default for formula recognition (strict `true`/`false`, case-insensitive). |
+| `MINERU_TABLE_ENABLE` | On | Default for table recognition (strict `true`/`false`). |
+| `MINERU_IMAGE_ANALYSIS_ENABLE` | On | Default for image analysis (strict `true`/`false`). |
+| `MINERU_LOG_LEVEL` | `info` | Log verbosity; `critical` silences progress. |
+| `MINERU_BATCH_SIZE` | `64` | Per-page semantic inference request admission (per-page request-stage cap under two-phase). |
+| `MINERU_TOTAL_DEADLINE_SECONDS` | `86400` | Per-document total deadline. |
+| `MINERU_MAX_PDF_BYTES` | `1073741824` | Resident source-PDF cap. |
+| `MINERU_MAX_PAGES` | `10000` | Maximum selected pages per document. |
+| `MINERU_MAX_PAGE_PIXELS` | `100000000` | Per-page pixel cap. |
+| `MINERU_MAX_RENDERED_IMAGE_BYTES` | `67108864` | Per-render RGB cap. |
+| `MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` | `536870912` | In-flight RGB budget. |
+| `MINERU_MAX_RAW_OUTPUT_BYTES` | `134217728` | Per-document raw output budget. |
+| `MINERU_MAX_LAYOUT_BLOCKS_PER_PAGE` | `256` | Layout block cap per page. |
+| `MINERU_MAX_SEMANTIC_REQUESTS_PER_PAGE` | `128` | Semantic request cap per page. |
+| `MINERU_MAX_ENCODED_REQUEST_BYTES` | `16777216` | Encoded request cap. |
+| `MINERU_MAX_ENCODED_BATCH_BYTES` | `67108864` | Encoded batch cap. |
+| `MINERU_MAX_TOTAL_ASSET_BYTES` | `1073741824` | Total asset cap. |
+| `MINERU_MAX_STAGED_TEXT_BYTES` | `268435456` | Staged text cap. |
+| `MINERU_VLM_HTTP_CONCURRENCY` | `100` | Global request-level admission semaphore (shared by layout and semantic requests); consider ≤ the server's vLLM `max_num_seqs`. |
+| `MINERU_VLM_HTTP_TIMEOUT` | `600` | VLM HTTP request timeout in seconds. |
+| `MINERU_VLM_CONNECT_TIMEOUT` | `10` | Connect timeout in seconds. |
+| `MINERU_VLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` | `20` | Keepalive pool size. |
+| `MINERU_VLM_HTTP_KEEPALIVE_EXPIRY` | `30` | Keepalive expiry in seconds. |
+| `MINERU_VLM_HTTP_MAX_RETRIES` | `3` | HTTP retry count. |
+| `MINERU_VLM_HTTP_RETRY_BACKOFF_FACTOR` | `0.5` | Retry backoff factor. |
+| `MINERU_VLM_MAX_IMAGE_BYTES` | `33554432` | Remote image byte cap. |
+| `MINERU_VLM_MAX_DECODED_PIXELS` | `100000000` | Decoded-pixel cap. |
+| `MINERU_VLM_MAX_IMAGES_PER_REQUEST` | `64` | Images per request cap. |
+| `MINERU_VLM_MAX_REDIRECTS` | `3` | Redirect cap. |
+| `MINERU_VLM_HTTP_MAX_RESPONSE_BYTES` | `10485760` | VLM HTTP response cap. |
+| `MINERU_VLM_TEMPERATURE_RETRY` | Off | Accepts `1`/`true` to enable (or `0`/`false` to disable) buffered official PDF layout/semantic quality retries. The base temperature is sent first, then retries use `+0.2` up to `1.0`; the setting has its own retry budget and shares the official deadline and response-byte budget. |
+| `MINERU_VLM_TEXT_BEFORE_IMAGE` | Off | Place text before the image in the request. |
+| `MINERU_VLM_ALLOW_TRUNCATED_CONTENT` | Off | Accept truncated VLM response content. |
+| `MINERU_VLM_ALLOW_REMOTE_IMAGES` | Off | Allow fetching images by remote URL. |
+| `MINERU_VLM_ALLOW_PRIVATE_REMOTE_IMAGES` | Off | Allow remote images from private/loopback URLs. |
+| `MINERU_VLM_END_TOKEN` | `<|im_end|>` | End token for VLM responses. |
+| `MINERU_VL_DEBUG_ENABLE` | Off | VLM request debug flag (strict `true`/`false`). |
+| `MINERU_VL_SERVER` | None | VLM service base URL (for example, `https://host/v1`); required by `mineru` direct mode and `mineru-api`. |
+| `MINERU_VL_MODEL_NAME` | None | Model ID; required by `mineru` direct mode and `mineru-api`. |
+| `MINERU_VL_API_KEY` | None | Bearer token for the VLM service. |
 
-前缀说明：`MINERU_VL_*` 为遗留前缀（VLM 服务连接核心配置：服务地址、模型 ID、API 密钥），新的传输旋钮统一使用 `MINERU_VLM_*` 前缀。
+Prefix note: `MINERU_VL_*` is the legacy prefix (core VLM service-connection
+settings such as the server URL, model ID, and API key); new transport knobs
+uniformly use the `MINERU_VLM_*` prefix.
 
-对规范 CLI，每个数值与布尔变量均为严格解析：布尔只接受不区分大小写的 `true`/`false`（`1`、`yes`、`on` 会报错，不再静默视为关闭）；`MINERU_VLM_TEMPERATURE_RETRY` 这个 opt-in 开关额外接受 `0`/`1`。数值的非法、非有限、不应为零却为零、溢出或平台不可表示的值会在任何网络/输出工作前失败，不再回落到默认值。（例外：三个服务端布尔 `MINERU_API_PUBLIC_BIND_EXPOSED` / `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` / `MINERU_API_SHUTDOWN_ON_STDIN_EOF` 仍接受 `1`/`true`/`yes`/`on`。）
+For the canonical CLI, every numeric and boolean variable is strict: booleans accept only case-insensitive `true`/`false` (`1`, `yes`, `on` now fail instead of silently meaning off); `MINERU_VLM_TEMPERATURE_RETRY` additionally accepts `0`/`1` for this opt-in switch. Malformed, non-finite, zero-where-invalid, overflowing, or unrepresentable numeric values fail before any network or output work rather than falling back. (Exception: the three server booleans `MINERU_API_PUBLIC_BIND_EXPOSED` / `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` / `MINERU_API_SHUTDOWN_ON_STDIN_EOF` still accept `1`/`true`/`yes`/`on`.)
 
-### HTTP 接口
+### HTTP interface
 
-`GET /health` 返回服务容量与在册任务数：
+`GET /health` returns service capacity and the number of registered tasks:
 
 ```sh
 curl "http://127.0.0.1:8000/health"
@@ -431,7 +485,7 @@ curl "http://127.0.0.1:8000/health"
 {"status":"healthy","protocol_version":2,"max_concurrent_requests":3,"processing_window_size":64,"task_count":0}
 ```
 
-异步模式：`POST /tasks` 提交后立即返回 `202` 与任务快照，再轮询状态、取回结果归档。
+Asynchronous mode: `POST /tasks` returns `202` and a task snapshot immediately after submission; then poll its status and retrieve the result archive.
 
 ```sh
 curl -X POST "http://127.0.0.1:8000/tasks" \
@@ -449,9 +503,9 @@ curl "http://127.0.0.1:8000/tasks/local-0"
 curl -o result.zip "http://127.0.0.1:8000/tasks/local-0/result"
 ```
 
-状态为 `pending`、`processing`、`completed` 或 `failed`。结果未就绪时 `GET /tasks/{id}/result` 返回 `202`，任务失败返回 `409`，未知任务返回 `404`。
+Statuses are `pending`, `processing`, `completed`, or `failed`. If the result is not ready, `GET /tasks/{id}/result` returns `202`; a failed task returns `409`; an unknown task returns `404`.
 
-同步模式：`POST /file_parse` 在同一请求内完成解析并直接流式返回结果归档，不产生可查询的任务记录。
+Synchronous mode: `POST /file_parse` completes parsing within the same request and streams the result archive directly, without creating a queryable task record.
 
 ```sh
 curl -X POST "http://127.0.0.1:8000/file_parse" \
@@ -461,60 +515,61 @@ curl -X POST "http://127.0.0.1:8000/file_parse" \
   -o result.zip
 ```
 
-选择建议：批量、长文档或需要进度可见性时用 `/tasks`；单个小文档、脚本内一次性调用用 `/file_parse`。
+Selection guidance: use `/tasks` for batches, long documents, or when progress visibility is needed; use `/file_parse` for a single small document or a one-off call in a script.
 
-表单接受 `files` 文件部分，以及 `lang_list`、`backend`、`effort`、`parse_method`、`formula_enable`、`table_enable`、`image_analysis`、`start_page_id`、`end_page_id`、`server_url`、`response_format_zip`、`return_md`、`return_middle_json`、`return_model_output`、`return_content_list`、`return_images`、`return_original_file`、`client_side_output_generation` 文本字段。字段重复、字段过多或取值非法都会被拒绝。
+The form accepts `files` file parts and the text fields `lang_list`, `backend`, `effort`, `parse_method`, `formula_enable`, `table_enable`, `image_analysis`, `start_page_id`, `end_page_id`, `server_url`, `response_format_zip`, `return_md`, `return_middle_json`, `return_model_output`, `return_content_list`, `return_images`, `return_original_file`, and `client_side_output_generation`. Duplicate fields, too many fields, or invalid values are rejected.
 
-常见状态码：
+Common status codes:
 
-| 状态码 | 含义 |
+| Status code | Meaning |
 | --- | --- |
-| `400` | multipart 非法、字段重复或过多、取值不受支持、请求 Host 非法，或公开监听下未启用解析。 |
-| `408` | 请求超出 deadline。 |
-| `413` | 请求体、文件或文本字段超过限制。 |
-| `422` | 文件类型不受支持或文件名非法。 |
-| `503` | 任务容量已满，或服务正在关闭。 |
-| `409` | 任务失败或 worker 异常终止。 |
+| `400` | Invalid multipart data, duplicate or excessive fields, unsupported values, invalid request Host, or parsing not enabled for a public bind. |
+| `408` | The request exceeded its deadline. |
+| `413` | Request body, file, or text field exceeds its limit. |
+| `422` | Unsupported file type or invalid filename. |
+| `503` | Task capacity is full or the service is shutting down. |
+| `409` | The task failed or its worker terminated abnormally. |
 
-上传、排队与处理共用同一个请求 deadline，取自总解析超时（默认 24 小时），与 `MINERU_PDF_RENDER_TIMEOUT` 的单次渲染超时是两回事，服务端没有单独的环境变量可调。超时统一返回 `408` 并释放并发额度与临时目录，慢速上传不会长期占用 slot。
+Uploads, queuing, and processing share one request deadline, taken from the total parsing timeout (24 hours by default). This differs from the `MINERU_PDF_RENDER_TIMEOUT` timeout for a single render; the server has no separate environment variable to adjust it. Timeouts consistently return `408` and release the concurrency slot and temporary directory, so slow uploads do not occupy a slot indefinitely.
 
-### 安全
+### Security
 
-- 默认只监听 loopback。绑定非 loopback 地址必须显式设置 `MINERU_API_PUBLIC_BIND_EXPOSED`；公开监听后还需 `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` 才会处理解析请求。
-- 服务**不提供认证，也不做任务所有权隔离**：任务 ID 为顺序的 `local-N`，任何能访问服务的一方都可读取任意任务状态与结果。公网部署必须置于带认证的反向代理之后。
-- 对内置的 `mineru --api-url https://...` 客户端，反向代理必须保留客户端实际发送的规范 `Host` authority：即使 `--api-url` 写有 `:443`、`:0443` 或空端口，URL/reqwest 也会省略 HTTPS 默认端口；非默认端口则规范为十进制，代理不得自行增删或改写该规范端口。后端因不存在可信代理边界而刻意忽略 `Forwarded` 和 `X-Forwarded-*`。仅在提交响应边界，若后端返回匹配该规范 authority 的 HTTP 任务链接，客户端才会在本地升级为 HTTPS 并重新执行严格同源校验；直接轮询/下载和重定向不使用此兼容规则，跨主机/端口、userinfo 和降级仍会 fail closed。若代理改写 `Host`/端口或公网路径前缀，此窄兼容规则不适用；这类部署需要外部 canonical base 配置，但目前不提供。
-- 请求级 `server_url` 覆盖不会携带服务端的 API key，也不会转发任何 `Authorization` 头。
-- 异步任务返回的 `status_url` / `result_url` 必须与所配置的 API 同源；重定向逐跳校验同源，异源目标不会发出请求。
+- By default, the service listens only on loopback. Binding a non-loopback address requires explicitly setting `MINERU_API_PUBLIC_BIND_EXPOSED`; once publicly bound, `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT` is also required before parsing requests are handled.
+- The service **provides neither authentication nor task-ownership isolation**: task IDs are sequential `local-N`, and any party that can reach the service can read every task's status and result. Public Internet deployments must be placed behind an authenticated reverse proxy.
+- For the built-in `mineru --api-url https://...` client, the reverse proxy must preserve the canonical `Host` authority actually sent by the client: even when `--api-url` contains `:443`, `:0443`, or an empty port, the URL/reqwest omits the HTTPS default port; a non-default port is canonicalized as decimal, and the proxy must not add, remove, or rewrite that canonical port. The backend deliberately ignores `Forwarded` and `X-Forwarded-*` because no trusted-proxy boundary exists. Only at the submission-response boundary, if the backend returns HTTP task links matching that canonical authority, the client locally upgrades them to HTTPS and reruns strict same-origin checks; direct polling/downloads and redirects do not use this compatibility rule, and cross-host/port targets, userinfo, and downgrades still fail closed. If the proxy rewrites `Host`/port or a public path prefix, this narrow compatibility rule does not apply; such deployments require external canonical-base configuration, which is not currently provided.
+- A request-level `server_url` override does not carry the server's API key or forward any `Authorization` header.
+- `status_url` / `result_url` returned by asynchronous tasks must be same-origin with the configured API; redirects are checked for same origin hop by hop, and no request is sent to a cross-origin target.
 
-## 输出
+## Output
 
-成功时，指定目录包含：
+On success, the specified directory contains:
 
 ```text
 output/
-├── document.json          # 完整文档结果（不内嵌资产二进制数据）
+├── document.json          # Complete document result (does not embed asset binary data)
 ├── document.md            # Markdown
-├── middle.json            # 中间结构
-├── content_list.json      # 内容列表
-├── assets/                # 识别出的图、表、公式、图表等裁剪资产（按实际结果出现）
-└── {stem}_layout.pdf      # 原 PDF 加版面块标注的预览
+├── middle.json            # Intermediate structure
+├── content_list.json      # Content list
+├── assets/                # Cropped assets such as recognized figures, tables, formulas, and charts (present according to actual results)
+└── {stem}_layout.pdf      # Preview of the original PDF with layout-block annotations
 ```
 
-`{stem}` 是路径输入文件名去掉扩展名后的安全 stem；无安全 stem 时为 `document`。库 API 以字节传入 `PdfInput::Bytes` 且未提供安全 stem 时，预览同为 `document_layout.pdf`。输出先写入同级临时 staging 目录；完成后以重命名替换目标目录，已有目录会先作为备份，替换成功后删除备份，避免留下半写入结果。
+`{stem}` is the safe stem of the path input filename after removing its extension; it is `document` when there is no safe stem. When bytes are passed as `PdfInput::Bytes` without a safe stem, the library API also uses `document_layout.pdf`. Output is first written to a sibling temporary staging directory; on completion, a rename replaces the target directory. An existing directory is first retained as a backup and the backup is removed after successful replacement, avoiding partially written results.
 
-直接 CLI 的 native profile 与 official 输出树明确分离：
+The direct CLI native profile is intentionally separate from the official output
+tree:
 
 ```text
 output/{stem}/native/{stem}.md
 ```
 
-其中只有 native Markdown，不提供 `document.json`、`middle.json`、
-`content-list`、layout preview 或裁剪 assets；不要将其当作 official
-MinerU 结果归档。
+It contains only native Markdown. It does not provide `document.json`,
+`middle.json`, `content-list`, layout previews, or cropped assets; consumers
+must not treat it as an official MinerU result archive.
 
-## 库 API（最小示例）
+## Library API (minimal example)
 
-以下示例只使用公开 API，可放入自己的 Tokio 异步程序：
+The following example uses only the public API and can be placed in your own Tokio async program:
 
 ```rust
 use mineru::{RunOptions, run};
@@ -526,18 +581,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-认证来自 `MINERU_VL_API_KEY`（服务端点与模型分别用 `MINERU_VL_SERVER`、`MINERU_VL_MODEL_NAME`）。若要在代码中覆盖服务端点、模型或认证，请在调用 `run` 前设置 `RunOptions` 的公开字段（`api_url`、`api_key`）。
+Authentication comes from `MINERU_VL_API_KEY` (or `MINERU_VL_SERVER` /
+`MINERU_VL_MODEL_NAME` for the service endpoint and model). To override the
+service endpoint, model, or authentication in code, set the corresponding
+public fields on `RunOptions` (`api_url`, `api_key`) before calling `run`.
 
-## Python 和 Node.js 绑定
+## Python and Node.js bindings
 
-`mineru-rs` Python 软件包和 `@alexsun-top/mineru` Node.js 软件包封装同一个解析器。两者都提供 `parse()`（在内存中返回 markdown）和 `run()`（写入完整输出树）。
+The `mineru-rs` Python package and the `@alexsun-top/mineru` Node.js package
+wrap the same parser. Both expose a `parse()` that returns markdown in memory,
+and a `run()` that writes the full output tree.
 
-> 绑定包不打包 `mineru-office-convert` 辅助程序，暂不支持 Office 格式（`.docx`/`.pptx`/`.xlsx`）输入转换；传入 Office 文档会报 "office conversion is unavailable"。PDF 与图像输入不受影响。需要 Office 转换时请使用 `cargo install mineru --features office` 的 CLI 或 `mineru-api` 服务端。
+> The binding packages do not bundle the `mineru-office-convert` helper and do
+> not yet support Office-format (`.docx`/`.pptx`/`.xlsx`) input conversion;
+> passing an Office document fails with "office conversion is unavailable".
+> PDF and image input are unaffected. For Office conversion, use the
+> `cargo install mineru --features office` CLI or the `mineru-api` server.
 
 ### Python
 
 ```sh
-uv add mineru-rs   # 或：pip install mineru-rs
+uv add mineru-rs   # or: pip install mineru-rs
 ```
 
 ```python
@@ -557,7 +621,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`parse()` 在内存中返回 markdown 字符串，由调用方决定如何持久化。`run()` 把完整输出树（markdown、JSON、资产）写入输出目录：
+`parse()` returns the markdown string in memory, so the caller decides how to
+persist it. `run()` writes the full output tree (markdown, JSON, assets) to an
+output directory:
 
 ```python
 import asyncio
@@ -572,12 +638,14 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-两者接受与绑定版本相同的 VLM 关键字选项；`backend=local` 当前仅属于规范 `mineru` CLI，不改变绑定或 API backend 语义。
+Both accept the same VLM keyword options as their binding API; `backend=local`
+currently belongs only to the canonical `mineru` CLI and does not change binding
+or API backend semantics.
 
 ### Node.js
 
 ```sh
-pnpm add @alexsun-top/mineru   # 或：npm install @alexsun-top/mineru
+pnpm add @alexsun-top/mineru   # or: npm install @alexsun-top/mineru
 ```
 
 ```ts
@@ -588,7 +656,9 @@ const { markdown } = await mineru.parse({ path: 'input.pdf' })
 await writeFile('out.md', markdown)
 ```
 
-`parse()` 解析为 `{ markdown, warnings }`；markdown 字符串在内存中返回，由调用方决定如何持久化。`run()` 写入完整输出树并解析为 `{ warnings }`：
+`parse()` resolves to `{ markdown, warnings }`; the markdown string is returned
+in memory, so the caller decides how to persist it. `run()` writes the full
+output tree and resolves to `{ warnings }`:
 
 ```ts
 import mineru from '@alexsun-top/mineru'
@@ -597,55 +667,57 @@ const { warnings } = await mineru.run({ path: 'input.pdf', output: 'out/' })
 if (warnings.length) console.warn(warnings)
 ```
 
-选项以 camelCase 命名镜像 CLI：`apiUrl`、`method`、`backend`、`effort`、`lang`、`url`、`start`、`end`、`formula`、`table`、`imageAnalysis` 和 `clientSideOutputGeneration`。
+Options mirror the CLI using camelCase names: `apiUrl`, `method`, `backend`,
+`effort`, `lang`, `url`, `start`, `end`, `formula`, `table`, `imageAnalysis`,
+and `clientSideOutputGeneration`.
 
-## 默认资源限制
+## Default resource limits
 
-### 文档大小控制
+### Document-limit controls
 
-`--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`、`--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES` 和 `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` 接受无符号十进制字节数（允许空白和 `_`）。优先级为 CLI、环境变量、编译默认值：输入 4_293_918_719 字节、编码文档 8 GiB、输出 8 GiB。显式的非法、零、溢出或平台不可表示值会失败；不再存在任意硬上限——配置值本身作为策略使用，而不会被夹紧到另一个常数。
+`--max-input-bytes` / `MINERU_MAX_INPUT_BYTES`, `--max-encoded-document-bytes` / `MINERU_MAX_ENCODED_DOCUMENT_BYTES`, and `--max-output-bytes` / `MINERU_MAX_OUTPUT_BYTES` accept unsigned decimal bytes (whitespace and `_` are allowed). CLI overrides environment, then the compiled default: 4_293_918_719 input bytes, 8 GiB encoded document bytes, and 8 GiB output bytes. Explicit invalid, zero, overflowing, or platform-unrepresentable values fail; there are no arbitrary hard ceilings — a configured value is used as policy rather than clamped to another constant.
 
-这些是磁盘/文档总量而非常驻内存分配：解析后的 PDF 和当前 PDF 压缩器会在 `lopdf` 加载前拒绝超过常驻上限（`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`，默认 1 GiB）的源 PDF，单个 VLM 响应仍限制为 10 MiB（`--http-max-response-bytes`）。编码策略应在 `mineru-api` 配置；规范远程模式会拒绝编码覆盖项。
+These are disk/document totals, not resident allocations: parsed PDFs and the current PDF compactor reject source PDFs above the resident cap (`--max-pdf-bytes` / `MINERU_MAX_PDF_BYTES`, default 1 GiB) before `lopdf` loads them, and one VLM response remains capped at 10 MiB (`--http-max-response-bytes`). Configure encoded policy on `mineru-api`; canonical remote mode rejects its encoded override.
 
-| 项目 | 默认值 |
+| Item | Default |
 | --- | ---: |
-| PDF 大小 / 页数 | 1 GiB / 10,000 页 |
-| 单页像素 / 渲染 RGB 图像 | 100,000,000 / 64 MiB |
-| 响应体 / 全部资产 | 10 MiB / 1 GiB |
-| 单页版面块数 / 页窗口 | 256 / 64 页 |
-| 单页语义请求数 / 推理批 | 128 / 64 |
-| 同时在途渲染图像 | 512 MiB |
-| 请求并发 / 渲染 worker | 100 / min(cpu, 8)（覆盖值仍受 CPU 与所选页数约束） |
-| 官方页准入并发 | 64（无固定上限） |
-| 连接 / 单请求 / 总解析超时 | 10 秒 / 600 秒 / 24 小时 |
+| PDF size / page count | 1 GiB / 10,000 pages |
+| Per-page pixels / rendered RGB image | 100,000,000 / 64 MiB |
+| Response body / all assets | 10 MiB / 1 GiB |
+| Layout blocks per page / page window | 256 / 64 pages |
+| Semantic requests per page / inference batch | 128 / 64 |
+| Concurrent in-flight rendered images | 512 MiB |
+| Request concurrency / rendering workers | 100 / min(cpu, 8) (overrides are still bounded by CPU and selected pages) |
+| Official page admission concurrency | 64 (no fixed ceiling) |
+| Connection / per-request / total parsing timeout | 10 seconds / 600 seconds / 24 hours |
 
-内存占用随在途图像预算缩放：A4 文档在默认 512 MiB 预算下实测约 2.4-2.5 GB RSS，主要由常驻解析后的 PDF 与每窗口渲染 RGB 构成（文档越大越接近上限）。提高预算以内存换速度：1 GiB 约需 4-5 GB RSS，仅换来大文档约 10% 的墙钟时间收益。API 服务模式下每个并发任务都携带该预算，`MINERU_API_MAX_CONCURRENT_REQUESTS`（默认 3）会成倍放大内存占用；内存受限主机请调低在途预算（`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`）。
+Memory usage scales with the in-flight image budget: an A4 document at the default 512 MiB budget measures roughly 2.4-2.5 GB RSS, dominated by the resident parsed PDF and per-window rendered RGB (larger documents lean higher). Raising the budget trades memory for speed: 1 GiB costs roughly 4-5 GB RSS for about 10% faster wall time on large documents. In API-server mode, each concurrent task carries this budget, so `MINERU_API_MAX_CONCURRENT_REQUESTS` (default 3) multiplies the footprint; reduce the in-flight budget (`MINERU_MAX_IN_FLIGHT_IMAGE_BYTES` / `--max-in-flight-image-bytes`) on memory-constrained hosts.
 
-### 默认值来源与容量
+### Sources of defaults and capacity
 
-- **上游锁定**：200 DPI、64 页窗口、VLM HTTP 最大并发 100、HTTP 请求超时 600 秒。渲染 worker 不再上游锁定，默认值为 min(cpu, 8)。
-- **Rust 防护**：10 秒连接超时、24 小时总超时，以及页数、PDF、资产、响应、渲染图像、像素、在途图像和版面块限制。
+- **Upstream-locked**: 200 DPI, 64-page window, VLM HTTP maximum concurrency 100, HTTP request timeout 600 seconds. Rendering workers are no longer upstream-locked: the default is min(CPU, 8).
+- **Rust safeguards**: 10-second connection timeout, 24-hour total timeout, and limits for page count, PDF, assets, responses, rendered images, pixels, in-flight images, and layout blocks.
 
-10,000 页支持仅是高内存下的尽力而为：输入字节、最终页面结果和资产都会保留在内存中，并非无上限保证。通过环境变量（`MINERU_MAX_*`、`MINERU_VLM_*` 等）与 CLI 参数（`--page-concurrency`、`--render-workers`、`--total-deadline-seconds` 等）按可用 RAM 和服务端点容量配置。所有限制、并发和 worker 必须大于零；所有超时必须非零，且单请求超时不得超过总超时。
+Support for 10,000 pages is only best effort with high memory: input bytes, final page results, and assets are all retained in memory; it is not an unbounded guarantee. Configure the CLI for available RAM and service-endpoint capacity via environment variables (`MINERU_MAX_*`, `MINERU_VLM_*`, and so on) and command-line options such as `--page-concurrency`, `--render-workers`, and `--total-deadline-seconds`. All limits, concurrency values, and worker counts must be greater than zero; all timeouts must be nonzero, and the per-request timeout must not exceed the total timeout.
 
-## 输入上限与放大配置
+## Input limits and how to raise them
 
-流水线在多个独立阶段执行大小上限。触发上限时，报错消息会给出具体文件名、大小、限制值与放大旋钮（flag 或环境变量）；单个文档失败不会中断整批处理，其余文档继续。本地解析大文件会按文件大小占用内存（上面的磁盘/文档总量与下面的常驻上限相互独立）。
+The pipeline enforces size limits at several independent stages. When a limit is hit, the error message names the file, its size, the limit value, and the knob (flag or environment variable) that raises it; a single failing document does not abort the batch — remaining documents continue. Local parsing of a large file consumes memory roughly proportional to the file size (the disk/document totals above are separate from the resident cap below).
 
-| 上限 | 默认值 | Flag | 环境变量 | 触发阶段 |
+| Limit | Default | Flag | Environment | Enforced at |
 | --- | ---: | --- | --- | --- |
-| 本地驻留/解析上限 `max_pdf_bytes` | 1 GiB | `--max-pdf-bytes` | `MINERU_MAX_PDF_BYTES` | 文件读取与 PDF 本地解析（含办公室文档转换后 PDF） |
-| 输入传输上限 `max_input_bytes` | 4_293_918_719（≈4 GiB） | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | 输入摄取/传输 |
-| 输出上限 `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | 输出生成 |
-| OOXML 归档上限 | 1 GiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office 文档预检 |
-| Office 转换输入上限 | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | Office 转换 |
-| 服务器端文件上限（`--api-url` 模式） | 1 GiB | `--file-cap`（服务端 `mineru-api`） | `MINERU_API_FILE_CAP`（服务端） | 服务器上传 |
+| Resident source-PDF cap `max_pdf_bytes` | 1 GiB | `--max-pdf-bytes` | `MINERU_MAX_PDF_BYTES` | File read and local PDF parsing (including PDFs produced by Office conversion) |
+| Input transfer cap `max_input_bytes` | 4_293_918_719 (≈4 GiB) | `--max-input-bytes` | `MINERU_MAX_INPUT_BYTES` | Input ingestion / transfer |
+| Output cap `max_output_bytes` | 8 GiB | `--max-output-bytes` | `MINERU_MAX_OUTPUT_BYTES` | Output generation |
+| OOXML archive cap | 1 GiB | `--ooxml-archive-bytes` | `MINERU_OOXML_ARCHIVE_BYTES` | Office document preflight |
+| Office conversion input cap | 32 MiB | `--office-input-bytes` | `MINERU_OFFICE_INPUT_BYTES` | Office conversion |
+| Server-side file cap (with `--api-url`) | 1 GiB | `--file-cap` (server: `mineru-api`) | `MINERU_API_FILE_CAP` (server) | Upload at the server |
 
-## 限制与排错
+## Limitations and troubleshooting
 
-- Hayro 不支持加密 PDF；复杂/高级 PDF 效果的渲染可能与其他渲染器不同。遇到无效 PDF、页映射不一致、尺寸限制或渲染异常会明确失败，不会静默跳过。
-- 预览支持页面旋转 `0/90/180/270`。其目标是可用的视觉与语义对齐；由于写入了标注且 PDF 序列化会变化，预览文件字节不等于原 PDF。其他旋转会失败。
-- `401` 通常是缺失或无效的 API key；`404` 通常是 `--url` / `MINERU_VL_SERVER` 路径不对。确认服务实际暴露 `/v1/models` 与 `/v1/chat/completions`。
-- 模型校验失败时（`GET /v1/models` 未返回所配置的模型，或未配置模型但端点返回多个模型），确认 `GET /v1/models` 返回的 `data` 中含所选 ID，并检查认证和 base URL。
-- `no valid layout tokens` 表示服务返回内容不含 MinerU 所需的版面 token；请选择兼容的 MinerU VLM 模型/服务，而不是普通聊天模型。
-- `limit exceeded` 表示超过上表资源上限；缩小输入或在库调用中调整并验证配置。Hayro 不支持的 PDF 则需用支持该 PDF 特性的文件/渲染流程处理后再试。
+- Hayro does not support encrypted PDFs; rendering of complex/advanced PDF effects may differ from other renderers. Invalid PDFs, inconsistent page mappings, size limits, or rendering errors fail explicitly and are not silently skipped.
+- The preview supports page rotations `0/90/180/270`. Its goal is usable visual and semantic alignment; because annotations are written and PDF serialization changes, the preview file's bytes are not identical to the original PDF. Other rotations fail.
+- `401` usually means a missing or invalid API key; `404` usually means an incorrect `--url` / `MINERU_VL_SERVER` path. Confirm the service actually exposes `/v1/models` and `/v1/chat/completions`.
+- If model checking fails (the configured model was not returned by `GET /v1/models`, or no model is configured and the endpoint returns more than one), confirm that `data` returned by `GET /v1/models` contains the selected ID, and check authentication and the base URL.
+- `no valid layout tokens` means the service response does not contain the layout tokens required by MinerU; choose a compatible MinerU VLM model/service rather than a general chat model.
+- `limit exceeded` means a resource limit from the table above was exceeded; reduce the input or adjust and validate the configuration in a library caller. PDFs unsupported by Hayro must be processed first using a file/rendering workflow that supports the relevant PDF features, then retried.

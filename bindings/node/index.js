@@ -703,6 +703,7 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports._compileTargetSuffix = nativeBinding._compileTargetSuffix
 module.exports._run = nativeBinding._run
+module.exports._locateMarkdown = nativeBinding._locateMarkdown
 module.exports._runCli = nativeBinding._runCli
 module.exports.canonicalStem = nativeBinding.canonicalStem
 module.exports.validatePdfOptions = nativeBinding.validatePdfOptions

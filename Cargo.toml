@@ -21,7 +21,6 @@ include = [
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "docs/usage.md",
-    "docs/usage.en.md",
     "docs/compatibility.md",
     "tests/fixtures/pdf/minimal.pdf",
     "tests/fixtures/vlm/layout.txt",

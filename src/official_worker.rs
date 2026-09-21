@@ -1,4 +1,4 @@
-//! Per-document subprocess boundary for the pinned MinerU 4.0.0a6 parser.
+//! Per-document subprocess boundary for the pinned MinerU 4.0.4 parser.
 
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
@@ -25,12 +25,9 @@ mod process;
 pub(crate) use persistent::{OfficialPersistentWorker, OfficialSessionConfig};
 
 const PROTOCOL: &str = "mineru-rs-official-worker/1";
-const PACKAGE_VERSION: &str = "4.0.0a6";
-const SCHEMA_VERSION: &str = "1.0";
-#[allow(dead_code)]
+const PACKAGE_VERSION: &str = "4.0.4";
+const SCHEMA_VERSION: &str = "2.0";
 const PERSISTENT_PROTOCOL: &str = "mineru-rs-official-worker/2";
-#[allow(dead_code)]
-const PERSISTENT_BACKEND: &str = "hybrid-http-client";
 const STDOUT_CAP: usize = 64 * 1024;
 const STDERR_CAP: usize = 64 * 1024;
 const REQUEST_CAP: usize = 64 * 1024;
@@ -72,11 +69,8 @@ impl PythonShim {
     }
 }
 
-#[allow(dead_code)]
-const PERSISTENT_EFFORTS: &[&str] = &["medium", "high", "xhigh"];
-#[allow(dead_code)]
-const PERSISTENT_MODEL_STACKS: &[&str] = &["auto", "light", "full"];
-#[allow(dead_code)]
+const PERSISTENT_TIERS: &[&str] = &["standard", "advanced"];
+const PERSISTENT_OCR_MODES: &[&str] = &["auto"];
 const PERSISTENT_INPUT_FORMATS: &[&str] = &[
     "pdf", "png", "jpeg", "jpg", "jp2", "webp", "gif", "bmp", "tiff",
 ];
@@ -95,19 +89,21 @@ use process::{
 pub(crate) struct OfficialRequest {
     pub(crate) protocol: &'static str,
     pub(crate) request_id: String,
-    pub(crate) backend: String,
-    pub(crate) effort: String,
-    pub(crate) server_url: Option<String>,
-    pub(crate) method: String,
-    pub(crate) lang: String,
+    pub(crate) tier: String,
+    pub(crate) ocr_mode: String,
     pub(crate) image_analysis: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) page_range: Option<String>,
-    pub(crate) model_stack: String,
-    pub(crate) model_base_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vlm_server_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vlm_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vlm_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_home: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) config: Option<PathBuf>,
-    pub(crate) vl_api_key: Option<String>,
-    pub(crate) vl_model_name: Option<String>,
     pub(crate) max_bundle_bytes: u64,
     pub(crate) bundle_name: &'static str,
     pub(crate) input_path: PathBuf,
@@ -117,39 +113,35 @@ pub(crate) struct OfficialRequest {
 impl OfficialRequest {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        backend: String,
-        effort: String,
-        server_url: Option<String>,
-        method: String,
-        lang: String,
+        tier: String,
+        ocr_mode: String,
         image_analysis: bool,
         page_range: Option<String>,
-        model_stack: String,
-        model_base_dir: Option<PathBuf>,
+        vlm_server_url: Option<String>,
+        vlm_api_key: Option<String>,
+        vlm_model: Option<String>,
+        model_home: Option<PathBuf>,
         config: Option<PathBuf>,
-        vl_api_key: Option<String>,
-        vl_model_name: Option<String>,
         max_bundle_bytes: u64,
+        input_path: PathBuf,
+        bundle_path: PathBuf,
     ) -> Self {
         Self {
             protocol: PROTOCOL,
             request_id: next_request_id(),
-            backend,
-            effort,
-            server_url,
-            method,
-            lang,
+            tier,
+            ocr_mode,
             image_analysis,
             page_range,
-            model_stack,
-            model_base_dir,
+            vlm_server_url,
+            vlm_api_key,
+            vlm_model,
+            model_home,
             config,
-            vl_api_key,
-            vl_model_name,
             max_bundle_bytes,
             bundle_name: crate::hybrid_v4_output::BUNDLE_NAME,
-            input_path: PathBuf::new(),
-            bundle_path: PathBuf::new(),
+            input_path,
+            bundle_path,
         }
     }
 }
@@ -323,13 +315,10 @@ impl OfficialWorker {
             return Err("official worker request id mismatch".into());
         }
         if response.package_version != PACKAGE_VERSION {
-            return Err("official worker MinerU package version is not 4.0.0a6".into());
+            return Err("official worker MinerU package version is not 4.0.4".into());
         }
         if response.schema_version != SCHEMA_VERSION {
             return Err("official worker result schema version mismatch".into());
-        }
-        if response.backend != request.backend {
-            return Err("official worker backend mismatch".into());
         }
         if response.bundle_name != crate::hybrid_v4_output::BUNDLE_NAME {
             return Err("official worker bundle name mismatch".into());
@@ -359,7 +348,6 @@ struct Response {
     status: String,
     package_version: String,
     schema_version: String,
-    backend: String,
     bundle_name: String,
     error: Option<String>,
 }
@@ -380,24 +368,19 @@ struct Diagnostic {
     truncated: bool,
 }
 
-async fn read_capped(mut reader: impl AsyncRead + Unpin, cap: usize) -> Result<Vec<u8>, ReadError> {
-    let mut result = Vec::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = reader.read(&mut buffer).await.map_err(|_| ReadError::Io)?;
-        if read == 0 {
-            return Ok(result);
-        }
-        if result.len().checked_add(read).is_none_or(|size| size > cap) {
-            return Err(ReadError::TooLarge);
-        }
-        result.extend_from_slice(&buffer[..read]);
-    }
+/// Shared bounded-read core for per-document pipe readers.
+///
+/// `Prefix` retains the first `cap` bytes and flags any overflow (diagnostics);
+/// `HardCap` fails fast once `cap` would be exceeded (protocol stdout).
+enum ReadMode {
+    Prefix,
+    HardCap,
 }
 
-async fn read_diagnostic(
+async fn read_bounded(
     mut reader: impl AsyncRead + Unpin,
     cap: usize,
+    mode: ReadMode,
 ) -> Result<Diagnostic, ReadError> {
     let mut bytes = Vec::with_capacity(cap);
     let mut truncated = false;
@@ -407,11 +390,31 @@ async fn read_diagnostic(
         if read == 0 {
             return Ok(Diagnostic { bytes, truncated });
         }
-        let remaining = cap.saturating_sub(bytes.len());
-        let retained = read.min(remaining);
-        bytes.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < read;
+        match mode {
+            ReadMode::Prefix => {
+                let retained = read.min(cap.saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&buffer[..retained]);
+                truncated |= retained < read;
+            }
+            ReadMode::HardCap => {
+                if bytes.len().checked_add(read).is_none_or(|size| size > cap) {
+                    return Err(ReadError::TooLarge);
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+        }
     }
+}
+
+async fn read_capped(reader: impl AsyncRead + Unpin, cap: usize) -> Result<Vec<u8>, ReadError> {
+    Ok(read_bounded(reader, cap, ReadMode::HardCap).await?.bytes)
+}
+
+async fn read_diagnostic(
+    reader: impl AsyncRead + Unpin,
+    cap: usize,
+) -> Result<Diagnostic, ReadError> {
+    read_bounded(reader, cap, ReadMode::Prefix).await
 }
 
 fn with_stderr_diagnostic(message: String, diagnostic: Option<&Diagnostic>) -> String {

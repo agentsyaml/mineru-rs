@@ -1,6 +1,6 @@
 # MinerU Rust
 
-[简体中文](README.zh-CN.md) | [English](README.md)
+[中文](README.zh-CN.md) | English
 
 Parse PDF, image, and Office documents into clean Markdown with MinerU: a
 Rust client library, command-line tools, and a local API server. PDF
@@ -11,8 +11,8 @@ The MinerU VLM model can run in two ways:
 - **Remote** — point the tools at an OpenAI-compatible MinerU VLM service and
   parse documents without running a model on your own machine.
 - **External provider (optional)** — point the tools at a separately prepared
-  OpenAI-compatible provider, such as a `llama-server` instance; see [Docker](#docker).
-  This is an unvalidated provider example, not a claim about MinerU 4.0.0a6
+  OpenAI-compatible provider endpoint; see [Docker](#docker).
+  This is an unvalidated provider example, not a claim about MinerU 4.0.4
   multimodal or model compatibility.
   This is separate from CLI `backend=local`, which uses the bundled Rust
   `mineru-office-convert` helper for isolated AnyDoc native Markdown extraction
@@ -22,17 +22,17 @@ The MinerU VLM model can run in two ways:
 Within the MinerU 3.4.5 VLM scope, MinerU Rust is a drop-in replacement for the
 MinerU Python SDK's `vlm-http-client` path and can replace that VLM workflow
 completely for the PDF/VLM workflow. Direct `backend=hybrid-http-client` is a
-separate official MinerU 4.0.0a6 boundary: it requires a user-installed pinned
-Python package and, when unspecified, uses one embedded-shim subprocess for one
-runnable document or a persistent worker for multiple runnable documents. Explicit
-`--official-worker-mode` or `MINERU_OFFICIAL_WORKER_MODE` values override that choice.
+separate official MinerU 4.0.4 boundary: it requires a user-installed pinned
+Python package (`mineru==4.0.4`, release tag `v4.0.4`) and, when unspecified,
+uses one embedded-shim subprocess for one runnable document or a persistent
+worker for multiple runnable documents. Explicit
+`--official-worker-mode` values override that choice.
 Its `hybrid-v4` artifacts are separate from the 3.4.5 output path. The CLI also
 provides the separate `backend=local` AnyDoc native-Markdown lane through the
 bundled Rust helper; it is not the official Hybrid backend. API Hybrid remains
 fail-closed and never aliases the 3.4.5 VLM route.
-See [the compatibility contract](docs/compatibility.md), the
-[Chinese usage guide](docs/usage.md), and the [English usage guide](docs/usage.en.md).
-Document-limit controls and their CLI/API applicability are summarized in the usage guides.
+See [the compatibility contract](docs/compatibility.md) and the [usage guide](docs/usage.md).
+Document-limit controls and their CLI/API applicability are summarized in the usage guide.
 
 **No GPU?** The PDF/image pipeline drives a VLM endpoint, so the CPU-only
 alternative for full layout parsing is the official MinerU Python pipeline
@@ -51,9 +51,13 @@ helper (Markdown only, no layout JSON).
 Native PDF output is accepted only for conservative clean text PDFs; uncertain
 PDFs fail clearly in local mode rather than pretending to provide official
 layout output.
-Official MinerU 4.0.0a6 direct Hybrid supports the official `medium`, `high`, and
-`xhigh` efforts and `auto|light|full` model stacks through that Python boundary.
-Python, MinerU, and model assets are not bundled; Docker/llama.cpp orchestration
+Official MinerU 4.0.4 direct Hybrid supports the official `medium`, `high`, and
+`xhigh` efforts (`medium` maps to tier `standard`; `high`/`xhigh` map to tier
+`advanced`) through that Python boundary. Note two upstream 4.0.4 breaking
+changes on this lane: the language parameter is gone, so non-default `--lang`
+is rejected, and model stacks are configured via `MINERU_CONFIG` (upstream
+removed `model.stack`/`MINERU_MODEL_STACK`), so non-default `--model-stack` is
+rejected. Python, MinerU, and model assets are not bundled; Docker/llama.cpp orchestration
 is outside this C1 boundary (see [compatibility](docs/compatibility.md)).
 
 The remote protocol is pinned to the MinerU `vlm-http-client` transport
@@ -110,11 +114,10 @@ key does not end up in shell history.
 
 ### Optional external OpenAI-compatible provider
 
-Run the compose `llama-server` profile (or start `llama-server` yourself) only
-after explicitly preparing and mounting the model and configuration outside this
-repository. Then point `MINERU_VL_SERVER` at `http://localhost:30000/v1`.
-The provider and model compatibility are not validated here; no automatic
-Hugging Face model download is implied. See [Docker](#docker).
+Point `MINERU_VL_SERVER` at any separately prepared OpenAI-compatible provider
+endpoint, for example `http://localhost:30000/v1`. Provider and model
+compatibility are not validated here; no automatic Hugging Face model download
+is implied.
 
 ## Rust library
 
@@ -161,7 +164,7 @@ asyncio.run(main())
 ```
 
 `run()` writes the full output tree to an output directory instead (see the
-[English usage guide](docs/usage.en.md)). The wheel installs two equivalent
+[usage guide](docs/usage.md)). The wheel installs two equivalent
 console commands, `mineru` and `mineru-rs`; prefer `mineru-rs` when the
 upstream Python `mineru` package is also installed, since both provide a
 `mineru` entry point and the one earlier on `PATH` wins. Releases are wheels
@@ -191,7 +194,7 @@ await writeFile('out.md', markdown)
 ```
 
 `run({ path, output })` writes the full output tree to `output` instead (see
-the [English usage guide](docs/usage.en.md)). The root package installs two
+the [usage guide](docs/usage.md)). The root package installs two
 equivalent binaries, `mineru` and `mineru-rs`, both pointing at
 `bin/mineru.js`; prefer `mineru-rs` if another `mineru` command is already on
 `PATH`.
@@ -232,7 +235,7 @@ NOFILE/process-isolation controls are rejected rather than silently ignored when
 not explicitly supported. Only the input/output byte limits are currently
 supported for local configuration.
 
-Direct `--backend hybrid-http-client` uses the official MinerU 4.0.0a6 Python
+Direct `--backend hybrid-http-client` uses the official MinerU 4.0.4 Python
 boundary for PDF/image inputs and writes separate `hybrid-v4` artifacts. It
 requires the user-installed pinned Python package and model assets; none are
 bundled. API Hybrid remains fail-closed and never silently enters the 3.4.5
@@ -271,7 +274,7 @@ mineru -p input.pdf -o output --api-url http://127.0.0.1:8000
 `--api-key` can pass a Bearer token, but prefer `MINERU_VL_API_KEY`: a key on
 the command line is visible in the process list.
 
-See the [Chinese usage guide](docs/usage.md) or [English usage guide](docs/usage.en.md)
+See the [usage guide](docs/usage.md)
 for service configuration and complete options.
 
 ## Install
@@ -314,7 +317,7 @@ command as a non-root user. The published release binaries include the
 inference.
 
 The stock image bundles Rust binaries only: it does not contain Python,
-`mineru==4.0.0a6`, or model assets. Direct official Hybrid therefore requires a
+`mineru==4.0.4`, or model assets. Direct official Hybrid therefore requires a
 separately prepared environment explicitly supplied to the container, while
 API Hybrid remains fail-closed and never aliases the 3.4.5 VLM route.
 Use an explicit version tag for published images, such as `:0.3.0`; releases do
@@ -353,15 +356,13 @@ isolation.
 
 ### Docker Compose profiles
 
-The bundled [`docker-compose.yaml`](docker-compose.yaml) exposes two MinerU
-OpenAI-compatible provider profiles on an NVIDIA GPU. Without an explicit profile,
-Compose activates both services; both bind host port `30000`, so choose exactly one
-profile before starting:
+The bundled [`docker-compose.yaml`](docker-compose.yaml) exposes one MinerU
+OpenAI-compatible provider profile on an NVIDIA GPU. Without an explicit profile,
+Compose activates the service; it binds host port `30000`:
 
 | Profile | Image | Purpose |
 | --- | --- | --- |
 | `openai-server` | `alexsuntop/mineru:3.4.2` | vLLM-backed MinerU provider image, port `30000`. |
-| `llama-server` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | Generic OpenAI-compatible provider example, port `30000`; model compatibility is not validated. |
 
 Start the vLLM server:
 
@@ -369,30 +370,20 @@ Start the vLLM server:
 docker compose --profile openai-server up -d
 ```
 
-Start the generic llama.cpp provider only after explicitly preparing a model and
-mounting it at the container path. Put the prepared GGUF file in
-`./models` (or set `LLAMA_MODELS_DIR`), then point `LLAMA_MODEL` at it:
-
-```sh
-LLAMA_MODEL=/models/model.gguf \
-docker compose --profile llama-server up -d
-```
-
-Both server profiles bind the published host port to `127.0.0.1` by default and
-expose `http://localhost:30000` (override the port with
-`MINERU_PORT_OVERRIDE_VLLM` / `MINERU_PORT_OVERRIDE_LLAMA`). Set
-`MINERU_PROVIDER_BIND_HOST=<bind-host>` explicitly to use another bind address;
-broader exposure requires a private network or an authenticated reverse proxy.
-They map the same host port, so start exactly one at a time. The `3.4.2` provider
-image is a separate provider-image baseline; the compatibility document's MinerU
+The server profile binds the published host port to `127.0.0.1` by default and
+exposes `http://localhost:30000` (override the port with
+`MINERU_PORT_OVERRIDE_VLLM`). Set `MINERU_PROVIDER_BIND_HOST=<bind-host>`
+explicitly to use another bind address; broader exposure requires a private
+network or an authenticated reverse proxy. The `3.4.2` provider image is a
+separate provider-image baseline; the compatibility document's MinerU
 `3.4.5` is the VLM protocol baseline, not this image tag.
 
-Use `--profile openai-server` or `--profile llama-server` explicitly; do not run
-`docker compose up -d` without choosing one.
+Use `--profile openai-server` explicitly; do not run `docker compose up -d`
+without choosing a profile.
 
 The GHCR image above is the published Rust API image; it is not a bundled
-Python/model runtime. The Compose profiles are separate provider examples and
-do not prepare or validate a MinerU 4.0.0a6 model.
+Python/model runtime. The Compose profile is a separate provider example and
+does not prepare or validate a MinerU 4.0.4 model.
 
 ## Examples
 

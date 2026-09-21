@@ -56,6 +56,13 @@ pub struct NativeRunReport {
     pub warnings: Vec<String>,
 }
 
+#[napi(js_name = "_locateMarkdown")]
+pub fn locate_markdown_native(output: String, stem: String) -> napi::Result<Option<String>> {
+    mineru::markdown_output_path(std::path::Path::new(&output), &stem)
+        .map(|path| path.map(|path| path.to_string_lossy().into_owned()))
+        .map_err(napi_error)
+}
+
 #[napi(js_name = "_run")]
 pub async fn run_native(input: NativeRunOptions, helper: String) -> napi::Result<NativeRunReport> {
     let mut options = mineru::RunOptions::new(input.path, input.output);

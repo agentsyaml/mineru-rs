@@ -40,6 +40,11 @@ fn validate_pdf_options(
     Ok(true)
 }
 
+#[pyfunction]
+fn locate_markdown(output: PathBuf, stem: &str) -> PyResult<Option<PathBuf>> {
+    mineru::markdown_output_path(&output, stem).map_err(|error| runtime_error(error.to_string()))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[pyfunction(name = "_run")]
 fn run_native<'py>(
@@ -148,6 +153,7 @@ fn run_cli_native<'py>(
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(canonical_stem, module)?)?;
     module.add_function(wrap_pyfunction!(validate_pdf_options, module)?)?;
+    module.add_function(wrap_pyfunction!(locate_markdown, module)?)?;
     module.add_function(wrap_pyfunction!(run_native, module)?)?;
     module.add_function(wrap_pyfunction!(run_cli_native, module)?)?;
     Ok(())

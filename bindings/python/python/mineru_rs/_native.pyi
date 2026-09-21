@@ -18,6 +18,12 @@ def validate_pdf_options(
 ) -> bool: ...
 
 
+def locate_markdown(
+    output: Union[str, PathLike[str]],
+    stem: str,
+) -> Optional[str]: ...
+
+
 async def _run(
     path: Union[str, PathLike[str]],
     output: Union[str, PathLike[str]],

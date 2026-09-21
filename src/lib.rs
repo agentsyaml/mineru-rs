@@ -55,7 +55,7 @@ pub use mineru_api::{
 #[doc(hidden)]
 pub use office_workers::{OfficeConvertError, OfficeWorkers};
 pub use official_output::canonical_stem;
-pub use output::write_outputs;
+pub use output::{markdown_output_path, write_outputs};
 #[doc(hidden)]
 pub use progress_events::{ProgressCallback, ProgressEvent, sanitize_event_text};
 pub use types::{

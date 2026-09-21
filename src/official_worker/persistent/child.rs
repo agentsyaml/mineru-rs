@@ -313,7 +313,6 @@ impl PersistentChild {
                     || frame.status != "ready"
                     || frame.package_version != config.package_version
                     || frame.schema_version != config.schema_version
-                    || frame.backend != config.backend
                     || frame.max_in_flight != 1
                     || frame.capabilities != super::protocol::persistent_capabilities()
                 {
@@ -406,7 +405,6 @@ impl PersistentChild {
             || frame.sequence != sequence
             || frame.package_version != config.package_version
             || frame.schema_version != config.schema_version
-            || frame.backend != config.backend
             || frame.bundle_name != crate::hybrid_v4_output::BUNDLE_NAME
             || !matches!(frame.status.as_str(), "ok" | "error")
         {

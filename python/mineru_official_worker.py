@@ -1,4 +1,4 @@
-"""Project-owned adapter for the pinned MinerU 4.0.0a6 parser.
+"""Project-owned adapter for the pinned MinerU 4.0.4 parser.
 
 This is not an official MinerU worker protocol.  Rust supplies one JSON request
 on stdin and owns the process lifetime; this shim only imports MinerU, invokes
@@ -20,18 +20,10 @@ from typing import Iterable, Union
 # normal file invocation, import the same exports from the sibling module.
 if "WORKER_SOURCE_CONTRACT" not in globals():
     from mineru_official_worker_protocol import (
-        BUNDLE_NAME,
-        DIAGNOSTIC_CAP,
-        PACKAGE_VERSION,
-        PROTOCOL,
-        PROTOCOL_CAP,
-        BoundedCapture,
-        LimitError,
-        WORKER_SOURCE_CONTRACT,
-        _bounded_text,
-        _emit,
-        _persistent_main,
-        _response,
+        BUNDLE_NAME, DIAGNOSTIC_CAP, PACKAGE_VERSION, PROTOCOL, PROTOCOL_CAP,
+        BoundedCapture, LimitError, WORKER_SOURCE_CONTRACT, _bounded_text,
+        _document_env, _document_parse_kwargs, _emit, _persistent_main,
+        _response, _validate_document_request,
     )
 
 
@@ -61,14 +53,11 @@ def _read_bounded(path: Path, limit: int) -> bytes:
 
 class BundleWriter:
     _FIXED_FILES = frozenset(
-        {
-            "markdown.md",
-            "middle_json.json",
-            "content_list.json",
-            "structured_content.json",
-            "model_output.json",
-        }
+        {"markdown.md", "middle_json.json", "structured_content.json", "model_output.json"}
     )
+    # Only these files carry image references worth rewriting; content_list
+    # is no longer produced upstream and model_output is left untouched.
+    _REWRITE_FILES = frozenset({"markdown.md", "middle_json.json", "structured_content.json"})
 
     def __init__(self, root: Path, limit: int) -> None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
@@ -281,7 +270,7 @@ class BundleWriter:
         except Exception:
             self._release_path(reservation, relative)
             raise
-        if relative in self._FIXED_FILES:
+        if relative in self._REWRITE_FILES:
             self._text_paths.add(relative)
             self._rewrite_text((relative,))
         else:
@@ -320,6 +309,8 @@ class BundleWriter:
         if relative == "markdown.md":
             rewritten = _rewrite_reference_tokens(text, self._image_aliases)
         else:
+            # middle_json.json and structured_content.json use identical
+            # bounded JSON string-value rewriting.
             rewritten = _rewrite_json_references(text, self._image_aliases, self._text_json_limit)
         encoded = rewritten.encode("utf-8")
         if len(encoded) > self._text_json_limit:
@@ -477,43 +468,19 @@ def main() -> None:
     capture = BoundedCapture(DIAGNOSTIC_CAP)
     try:
         request = json.loads(raw.decode("utf-8"))
-        if not isinstance(request, dict) or request.get("protocol") != PROTOCOL:
-            raise ValueError("unsupported adapter protocol")
-        if request.get("bundle_name") != BUNDLE_NAME:
-            raise ValueError("unsupported bundle name")
+        if not isinstance(request, dict):
+            raise ValueError("request must be a JSON object")
+        _validate_document_request(request)
         package = importlib.metadata.version("mineru")
         if package != PACKAGE_VERSION:
-            _emit(_response(request, "error", package, "MinerU package version is not 4.0.0a6"))
+            _emit(_response(request, "error", package, "MinerU package version is not 4.0.4"))
             return
         with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
-            for key, request_key in (
-                ("MINERU_MODEL_STACK", "model_stack"),
-                ("MINERU_MODEL_BASE_DIR", "model_base_dir"),
-                ("MINERU_CONFIG", "config"),
-                ("MINERU_VL_API_KEY", "vl_api_key"),
-                ("MINERU_VL_MODEL_NAME", "vl_model_name"),
-            ):
-                value = request.get(request_key)
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = str(value)
+            _document_env(request)
             importlib.import_module("mineru")
             parser = importlib.import_module("mineru.parser")
 
-            page_range = request.get("page_range")
-            if page_range is not None and not isinstance(page_range, str):
-                raise ValueError("invalid page range")
-            kwargs = {
-                "backend": request["backend"],
-                "effort": request["effort"],
-                "server_url": request.get("server_url"),
-                "method": request["method"],
-                "lang": request["lang"],
-                "image_analysis": bool(request["image_analysis"]),
-            }
-            if page_range:
-                kwargs["page_range"] = page_range
+            kwargs = _document_parse_kwargs(request)
             result = asyncio.run(parser.parse_async(request["input_path"], **kwargs))
             result.save(BundleWriter(Path(request["bundle_path"]), int(request["max_bundle_bytes"])))
         _emit(_response(request, "ok", package), capture.getvalue())

@@ -107,7 +107,6 @@ pub type VlmPriority = Option<i32>;
 #[derive(Debug, Clone)]
 pub enum VlmBatchPriority {
     All(VlmPriority),
-    PerItem(Vec<VlmPriority>),
 }
 pub type VlmSemaphore = Option<Arc<tokio::sync::Semaphore>>;
 #[derive(Clone, Default)]

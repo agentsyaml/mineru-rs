@@ -97,6 +97,14 @@ async def run(
 
 
 def _read_markdown(root: Path, stem: str) -> str:
+    located = getattr(_native, "locate_markdown", None)
+    if located is not None:
+        path = located(root, stem)
+        if path is None:
+            raise RuntimeError("parse: no markdown output produced")
+        return Path(path).read_text(encoding="utf-8")
+    # Fallback for prebuilt native binaries without the locator: reproduce the
+    # retired depth-2 walk so `parse` keeps working with old wheels.
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         if len(Path(dirpath).relative_to(root).parts) >= 2:

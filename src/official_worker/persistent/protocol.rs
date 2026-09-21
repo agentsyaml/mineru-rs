@@ -6,14 +6,14 @@ use tokio::{
 };
 
 use super::super::{
-    OfficialRequest, OfficialSessionConfig, PERSISTENT_INPUT_FORMATS, PERSISTENT_MODEL_STACKS,
-    PERSISTENT_PROTOCOL, REQUEST_CAP,
+    OfficialRequest, OfficialSessionConfig, PERSISTENT_INPUT_FORMATS, PERSISTENT_OCR_MODES,
+    PERSISTENT_PROTOCOL, PERSISTENT_TIERS, REQUEST_CAP,
 };
 
 pub(super) fn persistent_capabilities() -> Value {
     json!({
-        "efforts": super::super::PERSISTENT_EFFORTS,
-        "model_stacks": PERSISTENT_MODEL_STACKS,
+        "tiers": PERSISTENT_TIERS,
+        "ocr_modes": PERSISTENT_OCR_MODES,
         "input_formats": PERSISTENT_INPUT_FORMATS,
         "bundle_name": crate::hybrid_v4_output::BUNDLE_NAME,
         "cancellation": "process-terminate",
@@ -24,19 +24,23 @@ pub(super) fn validate_persistent_request(request: &OfficialRequest) -> Result<(
     if request.request_id.is_empty() {
         return Err("official persistent request id is empty".into());
     }
-    if !super::super::PERSISTENT_EFFORTS.contains(&request.effort.as_str()) {
-        return Err("official persistent effort is unsupported".into());
+    if !PERSISTENT_TIERS.contains(&request.tier.as_str()) {
+        return Err("official persistent tier is unsupported".into());
     }
-    if request.effort != "medium"
-        && !request
-            .server_url
-            .as_deref()
-            .is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"))
-    {
-        return Err("official persistent high/xhigh requests require an HTTP(S) server_url".into());
+    // Mirror the CLI preflight: tier "advanced" requires an explicit HTTP(S)
+    // VLM endpoint; tier "standard" is local-only and forbids one.
+    if request.tier == "advanced" {
+        let url = request.vlm_server_url.as_deref().unwrap_or_default();
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(
+                "official persistent tier advanced requires an HTTP(S) vlm_server_url".into(),
+            );
+        }
+    } else if request.vlm_server_url.is_some() {
+        return Err("official persistent tier standard forbids a vlm_server_url".into());
     }
-    if request.method.is_empty() || request.lang.is_empty() {
-        return Err("official persistent method and lang are required".into());
+    if !PERSISTENT_OCR_MODES.contains(&request.ocr_mode.as_str()) {
+        return Err("official persistent ocr_mode is unsupported".into());
     }
     if request.page_range.as_deref().is_some_and(str::is_empty) {
         return Err("official persistent page_range must be nonempty".into());
@@ -56,12 +60,10 @@ pub(super) fn persistent_start_frame(config: &OfficialSessionConfig) -> Value {
         "protocol": PERSISTENT_PROTOCOL,
         "package_version": config.package_version,
         "schema_version": config.schema_version,
-        "backend": config.backend,
-        "model_stack": config.model_stack,
-        "model_base_dir": config.model_base_dir,
+        "model_home": config.model_home,
         "config": config.config,
-        "vl_api_key": config.vl_api_key,
-        "vl_model_name": config.vl_model_name,
+        "vlm_api_key": config.vlm_api_key,
+        "vlm_model": config.vlm_model,
         "capabilities": persistent_capabilities(),
     })
 }
@@ -78,17 +80,21 @@ pub(super) fn persistent_request_frame(
         "sequence": sequence,
         "package_version": config.package_version,
         "schema_version": config.schema_version,
-        "backend": config.backend,
-        "effort": request.effort,
-        "server_url": request.server_url,
-        "method": request.method,
-        "lang": request.lang,
+        "tier": request.tier,
+        "ocr_mode": request.ocr_mode,
         "image_analysis": request.image_analysis,
+        "vlm_server_url": request.vlm_server_url,
+        "vlm_api_key": config.vlm_api_key,
+        "vlm_model": config.vlm_model,
+        "model_home": config.model_home,
+        "config": config.config,
         "bundle_name": crate::hybrid_v4_output::BUNDLE_NAME,
         "input_path": request.input_path,
         "bundle_path": request.bundle_path,
         "max_bundle_bytes": request.max_bundle_bytes,
     });
+    // Omit rather than null so the shim's strict field-set validation sees an
+    // absent key for page-range-less documents.
     if let Some(page_range) = &request.page_range {
         frame["page_range"] = Value::String(page_range.clone());
     }
@@ -104,7 +110,6 @@ pub(super) struct PersistentHandshakeFrame {
     pub(super) status: String,
     pub(super) package_version: String,
     pub(super) schema_version: String,
-    pub(super) backend: String,
     pub(super) max_in_flight: u32,
     pub(super) capabilities: Value,
     pub(super) diagnostic: Option<String>,
@@ -121,7 +126,6 @@ pub(super) struct PersistentResultFrame {
     pub(super) status: String,
     pub(super) package_version: String,
     pub(super) schema_version: String,
-    pub(super) backend: String,
     pub(super) bundle_name: String,
     pub(super) error: Option<String>,
     pub(super) diagnostic: Option<String>,
@@ -136,7 +140,6 @@ pub(super) struct PersistentErrorFrame {
     pub(super) status: String,
     pub(super) package_version: String,
     pub(super) schema_version: String,
-    pub(super) backend: String,
     pub(super) bundle_name: String,
     pub(super) error: String,
     pub(super) diagnostic: Option<String>,
@@ -254,7 +257,6 @@ pub(super) fn validate_persistent_error(
         || frame.status != "error"
         || frame.package_version != config.package_version
         || frame.schema_version != config.schema_version
-        || frame.backend != config.backend
         || frame.bundle_name != crate::hybrid_v4_output::BUNDLE_NAME
     {
         return Err("official persistent error frame mismatch".into());
@@ -325,9 +327,8 @@ mod tests {
             "type": "handshake",
             "protocol": "mineru-rs-official-worker/2",
             "status": "ready",
-            "package_version": "4.0.0a6",
-            "schema_version": "1.0",
-            "backend": "hybrid-http-client",
+            "package_version": "4.0.4",
+            "schema_version": "2.0",
             "max_in_flight": 1,
             "capabilities": {"bundle_name": "hybrid-v4"},
         })
@@ -340,9 +341,8 @@ mod tests {
             "request_id": "request-1",
             "sequence": 1,
             "status": "ok",
-            "package_version": "4.0.0a6",
-            "schema_version": "1.0",
-            "backend": "hybrid-http-client",
+            "package_version": "4.0.4",
+            "schema_version": "2.0",
             "bundle_name": "hybrid-v4",
         })
     }
@@ -352,9 +352,8 @@ mod tests {
             "type": "error",
             "protocol": "mineru-rs-official-worker/2",
             "status": "error",
-            "package_version": "4.0.0a6",
-            "schema_version": "1.0",
-            "backend": "hybrid-http-client",
+            "package_version": "4.0.4",
+            "schema_version": "2.0",
             "bundle_name": "hybrid-v4",
             "error": "startup failed",
         })

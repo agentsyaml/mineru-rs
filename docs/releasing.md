@@ -47,7 +47,7 @@ docker pull ghcr.io/agentsyaml/mineru-cli:0.3.0
 ```
 
 The image bundles Rust binaries only. It does not contain Python,
-`mineru==4.0.0a6`, or model assets, so direct official Hybrid needs a separately
+`mineru==4.0.4`, or model assets, so direct official Hybrid needs a separately
 prepared environment explicitly supplied to the image and API Hybrid remains
 fail-closed. Supply `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and
 `MINERU_VL_API_KEY` for an external VLM provider. Documented local publication

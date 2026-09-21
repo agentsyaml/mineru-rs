@@ -293,24 +293,23 @@ async fn windows_job_drop_reaps_an_idle_worker_tree() {
 
 fn test_request() -> OfficialRequest {
     OfficialRequest::new(
-        "hybrid-http-client".into(),
-        "medium".into(),
-        None,
+        "standard".into(),
         "auto".into(),
-        "ch".into(),
         true,
         None,
-        "auto".into(),
+        None,
         None,
         None,
         None,
         None,
         1024,
+        PathBuf::new(),
+        PathBuf::new(),
     )
 }
 
 fn persistent_config() -> OfficialSessionConfig {
-    OfficialSessionConfig::new("auto".into(), None, None, None, None).unwrap()
+    OfficialSessionConfig::new(None, None, None, None).unwrap()
 }
 
 #[tokio::test]
@@ -352,7 +351,7 @@ async fn windows_attach_failure_cleans_live_persistent_worker() {
         Ok(_) => panic!("persistent worker unexpectedly attached"),
         Err(error) => error,
     };
-    worker.drain().await.unwrap();
+    worker.shutdown().await.unwrap();
     assert!(
         error.contains("test attach failure"),
         "unexpected error: {error}"

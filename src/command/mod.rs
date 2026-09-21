@@ -34,7 +34,7 @@ pub(crate) const HYBRID_HTTP_CLIENT_UNSUPPORTED: &str =
     "backend=hybrid-http-client is direct-only; API mode does not support Hybrid";
 const OFFICIAL_WORKER_MODE_DIRECT_ONLY: &str =
     "--official-worker-mode applies only to direct backend=hybrid-http-client";
-const ENV_NAMES: [&str; 99] = [
+const ENV_NAMES: [&str; 98] = [
     "MINERU_LOG_LEVEL",
     "MINERU_PROCESSING_WINDOW_SIZE",
     "MINERU_OFFICIAL_PAGE_CONCURRENCY",
@@ -92,7 +92,6 @@ const ENV_NAMES: [&str; 99] = [
     "MINERU_VL_API_KEY",
     "MINERU_MODEL_STACK",
     "MINERU_OFFICIAL_PYTHON",
-    "MINERU_OFFICIAL_WORKER_MODE",
     "MINERU_MODEL_BASE_DIR",
     "MINERU_CONFIG",
     "MINERU_VL_DEBUG_ENABLE",
@@ -189,8 +188,8 @@ pub struct RunOptions {
     pub backend: String,
     pub effort: String,
     pub model_stack: String,
-    /// Whether `model_stack` was explicitly supplied by the caller. This lets explicit `auto`
-    /// override `MINERU_MODEL_STACK` without changing the public string value.
+    /// Whether `model_stack` was explicitly supplied by the caller. The official MinerU 4.0.4
+    /// lane rejects any non-default value; the legacy 3.4.5 builders still honor it.
     pub model_stack_explicit: bool,
     pub official_worker_mode: Option<OfficialWorkerMode>,
     pub official_python: Option<PathBuf>,
@@ -219,7 +218,7 @@ impl OfficialWorkerMode {
             "per-document" => Ok(Self::PerDocument),
             "persistent" => Ok(Self::Persistent),
             _ => Err(format!(
-                "MINERU_OFFICIAL_WORKER_MODE must be per-document or persistent, got {value}"
+                "--official-worker-mode must be per-document or persistent, got {value}"
             )),
         }
     }
@@ -477,8 +476,7 @@ async fn run_core(
     }
     let direct_hybrid = options.api_url.is_none() && options.backend == "hybrid-http-client";
     let official_worker_mode =
-        resolve_official_worker_mode(&options, &context.environment, direct_hybrid)
-            .map_err(RunError::new)?;
+        resolve_official_worker_mode(&options, direct_hybrid).map_err(RunError::new)?;
     if options.api_url.is_none() && options.backend == "hybrid-http-client" {
         if options.client_side_output_generation_explicit || options.client_side_output_generation {
             return Err(RunError::new(
@@ -596,6 +594,7 @@ async fn run_core(
             "backend=local is only supported in direct CLI mode; the API backend choices are unchanged",
         ));
     }
+    // Hybrid tiers: medium -> standard, high/xhigh -> advanced (MinerU 4.0.4 parse tiers).
     let supported_effort = if options.backend == "hybrid-http-client" {
         matches!(options.effort.as_str(), "medium" | "high" | "xhigh")
     } else {
@@ -609,6 +608,18 @@ async fn run_core(
     }
     let language = normalize_remote_language(&options.lang).map_err(RunError::new)?;
     if options.backend == "hybrid-http-client" && options.api_url.is_none() {
+        // MinerU 4.0.4 removed the parse language parameter; only the default is accepted.
+        if language != "ch" {
+            return Err(RunError::new(
+                "official MinerU 4.0.4 no longer supports a language parameter",
+            ));
+        }
+        // MinerU 4.0.4 has no parse method parameter; only the default is accepted.
+        if options.method != "auto" {
+            return Err(RunError::new(
+                "official MinerU 4.0.4 no longer supports a method parameter",
+            ));
+        }
         if !resolved.route.formula_enable || !resolved.route.table_enable {
             return Err(RunError::new(
                 "direct Hybrid does not support formula=false or table=false",
@@ -654,8 +665,6 @@ async fn run_core(
                 input: options.path,
                 output: options.output,
                 local_backend: options.backend == "local",
-                method: options.method.clone(),
-                lang: options.lang.clone(),
                 base_url: options.url,
                 server_option_label: "--url",
                 model: None,
@@ -1292,7 +1301,6 @@ fn behaviorless_warning(options: &RunOptions) -> Option<String> {
 
 fn resolve_official_worker_mode(
     options: &RunOptions,
-    environment: &Environment,
     direct_hybrid: bool,
 ) -> Result<Option<OfficialWorkerMode>, String> {
     if let Some(mode) = options.official_worker_mode {
@@ -1300,16 +1308,7 @@ fn resolve_official_worker_mode(
             .then_some(Some(mode))
             .ok_or_else(|| OFFICIAL_WORKER_MODE_DIRECT_ONLY.to_owned());
     }
-    if !direct_hybrid {
-        return Ok(None);
-    }
-    let Some(value) = environment.os("MINERU_OFFICIAL_WORKER_MODE") else {
-        return Ok(None);
-    };
-    let value = value
-        .into_string()
-        .map_err(|_| "MINERU_OFFICIAL_WORKER_MODE must be valid UTF-8".to_owned())?;
-    OfficialWorkerMode::parse(&value).map(Some)
+    Ok(None)
 }
 
 fn validate_hybrid_server_url(value: Option<&str>) -> Result<(), String> {
@@ -1349,10 +1348,10 @@ fn has_pdf_input(path: &Path) -> bool {
 
 #[derive(Parser, Debug)]
 #[command(
-    about = "Parse PDF, image, and Office documents with VLM-HTTP backends, use the official MinerU 4.0.0a6 Hybrid worker directly, or parse AnyDoc-supported inputs through the bundled Rust helper with backend=local.",
+    about = "Parse PDF, image, and Office documents with VLM-HTTP backends, use the official MinerU 4.0.4 Hybrid worker directly, or parse AnyDoc-supported inputs through the bundled Rust helper with backend=local.",
     version,
     disable_version_flag = true,
-    after_help = "Environment:\n  MINERU_VL_SERVER              MinerU VLM service base URL, e.g. https://host/v1\n  MINERU_VL_MODEL_NAME          model id served by that endpoint\n  MINERU_VL_API_KEY             Bearer token; preferred over --api-key\n  MINERU_OFFICIAL_WORKER_MODE   per-document or persistent for direct Hybrid\n\nFull reference: docs/usage.en.md"
+    after_help = "Environment:\n  MINERU_VL_SERVER              MinerU VLM service base URL, e.g. https://host/v1\n  MINERU_VL_MODEL_NAME          model id served by that endpoint\n  MINERU_VL_API_KEY             Bearer token; preferred over --api-key\n\nFull reference: docs/usage.md"
 )]
 pub struct Cli {
     #[arg(short = 'v', long, action = ArgAction::Version)]
@@ -1371,7 +1370,11 @@ pub struct Cli {
     backend: String,
     #[arg(long, value_parser = ["medium", "high", "xhigh"], default_value = "medium")]
     effort: String,
-    #[arg(long, value_parser = ["auto", "light", "full"])]
+    #[arg(
+        long,
+        value_parser = ["auto", "light", "full"],
+        help = "Legacy 3.4.5 model stack; rejected by the official MinerU 4.0.4 hybrid lane"
+    )]
     model_stack: Option<String>,
     #[arg(long, value_parser = ["per-document", "persistent"])]
     official_worker_mode: Option<String>,
@@ -2070,19 +2073,23 @@ mod tests {
         assert_eq!(context.office_workers().executable(), &path);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn official_worker_mode_rejects_non_utf8_environment_value() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let environment = Environment::from_values(HashMap::from([(
-            "MINERU_OFFICIAL_WORKER_MODE",
-            OsString::from_vec(vec![0xff]),
-        )]));
-        let error =
-            resolve_official_worker_mode(&RunOptions::new("input", "output"), &environment, true)
-                .unwrap_err();
-        assert_eq!(error, "MINERU_OFFICIAL_WORKER_MODE must be valid UTF-8");
+    fn official_worker_mode_requires_direct_hybrid() {
+        let options = RunOptions {
+            official_worker_mode: Some(OfficialWorkerMode::Persistent),
+            ..RunOptions::new("input", "output")
+        };
+        let error = resolve_official_worker_mode(&options, false)
+            .expect_err("API mode must reject the flag");
+        assert_eq!(error, OFFICIAL_WORKER_MODE_DIRECT_ONLY);
+        assert_eq!(
+            resolve_official_worker_mode(&options, true).unwrap(),
+            Some(OfficialWorkerMode::Persistent)
+        );
+        assert_eq!(
+            resolve_official_worker_mode(&RunOptions::new("input", "output"), true).unwrap(),
+            None
+        );
     }
 
     #[test]

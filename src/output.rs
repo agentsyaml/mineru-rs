@@ -133,6 +133,62 @@ fn write_staged(document: &Document, directory: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Locates the markdown output published under `directory` for `stem`.
+///
+/// Mirrors every layout the runner produces (`{stem}/{profile}/{stem}.md`) plus
+/// legacy flat `{stem}.md` outputs: the exact `{stem}.md` name wins, otherwise
+/// the largest `.md` file within two directory levels is returned. Returns
+/// `None` when no markdown was produced. Bindings call this instead of walking
+/// the output tree themselves.
+pub fn markdown_output_path(
+    directory: impl AsRef<Path>,
+    stem: &str,
+) -> std::io::Result<Option<PathBuf>> {
+    let mut found = Vec::new();
+    collect_markdown(directory.as_ref(), 0, &mut found)?;
+    let expected = format!("{stem}.md");
+    if let Some(exact) = found.iter().find(|path| {
+        path.file_name()
+            .is_some_and(|name| name == expected.as_str())
+    }) {
+        return Ok(Some(exact.clone()));
+    }
+    // ponytail: first-largest wins (semantics of the retired facade walks);
+    // add a deterministic tie-break only if a caller ever needs one.
+    let mut best: Option<(PathBuf, u64)> = None;
+    for path in found {
+        let size = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        if best.as_ref().is_none_or(|(_, top)| size > *top) {
+            best = Some((path, size));
+        }
+    }
+    Ok(best.map(|(path, _)| path))
+}
+
+/// Depth-bounded `.md` collection; symlinked directories are never descended,
+/// matching the facade walks this replaces.
+fn collect_markdown(directory: &Path, depth: u32, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let Ok(entry) = entry else { continue };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            if depth < 2 {
+                collect_markdown(&path, depth + 1, found)?;
+            }
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".md"))
+        {
+            found.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn validate_assets(document: &Document) -> Result<()> {
     let mut paths = [
         "document.json",
@@ -184,7 +240,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{remove_path, write_outputs, write_outputs_with};
+    use super::{markdown_output_path, remove_path, write_outputs, write_outputs_with};
     use crate::{Asset, AssetKind, Document};
     use bytes::Bytes;
     use std::{cell::RefCell, fs, io, path::Path, path::PathBuf};
@@ -243,6 +299,33 @@ mod tests {
             fs::read(directory.path().join("assets/image.png")).unwrap(),
             b"image"
         );
+    }
+
+    #[test]
+    fn markdown_output_path_prefers_exact_name_then_largest() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("out");
+        let nested = root.join("doc/vlm");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("other.md"), b"tiny").unwrap();
+        fs::write(nested.join("doc.md"), b"# exact").unwrap();
+
+        let located = markdown_output_path(&root, "doc").unwrap().unwrap();
+        assert_eq!(located, nested.join("doc.md"));
+
+        // Exact name always wins over a larger markdown elsewhere.
+        fs::write(root.join("big.md"), b"# much longer body").unwrap();
+        let located = markdown_output_path(&root, "doc").unwrap().unwrap();
+        assert_eq!(located, nested.join("doc.md"));
+
+        // No exact match anywhere: the largest markdown wins.
+        fs::remove_file(nested.join("doc.md")).unwrap();
+        let located = markdown_output_path(&root, "doc").unwrap().unwrap();
+        assert_eq!(located, root.join("big.md"));
+
+        // Nothing at all: None instead of an error.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(markdown_output_path(empty.path(), "doc").unwrap().is_none());
     }
 
     #[test]

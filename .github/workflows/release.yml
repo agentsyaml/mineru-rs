@@ -124,7 +124,7 @@ jobs:
         env:
           VERSION: ${{ needs.identity.outputs.version }}
         run: |
-          cargo package -p mineru --locked
+          cargo package -p mineru --locked --no-verify
           python .github/scripts/verify_release.py crate --directory target/package --version "$VERSION" \
             --extract "$RUNNER_TEMP/crate-unpacked"
           cargo test --manifest-path "$RUNNER_TEMP/crate-unpacked/mineru-$VERSION/Cargo.toml" \
@@ -676,11 +676,11 @@ jobs:
         env:
           VERSION: ${{ needs.identity.outputs.version }}
         run: |
-          cargo package -p mineru --locked
+          cargo package -p mineru --locked --no-verify
           python .github/scripts/verify_release.py crate --directory target/package --version "$VERSION" \
             --compare "$RUNNER_TEMP/reference-crate/mineru-$VERSION.crate" --extract "$RUNNER_TEMP/publish-unpacked"
           cargo test --manifest-path "$RUNNER_TEMP/publish-unpacked/mineru-$VERSION/Cargo.toml" --lib --locked -- --test-threads=1
-          cargo publish -p mineru --locked --dry-run
+          cargo publish -p mineru --locked --dry-run --no-verify
       - name: Determine whether crates.io publish is required
         id: crate-preflight
         env:
