@@ -2,9 +2,9 @@
 /* eslint-disable */
 export declare function _compileTargetSuffix(): string
 
-export declare function _run(input: NativeRunOptions, helper: string): Promise<NativeRunReport>
+export declare function _locateMarkdown(output: string, stem: string): string | null
 
-export declare function _locateMarkdown(output: string, stem: string): string | null | undefined
+export declare function _run(input: NativeRunOptions, helper: string): Promise<NativeRunReport>
 
 export declare function _runCli(argv: Array<string>, helper: string): Promise<number>
 

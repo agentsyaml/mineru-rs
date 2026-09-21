@@ -1,6 +1,5 @@
 #[cfg(unix)]
 use std::path::Path;
-#[cfg(unix)]
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
