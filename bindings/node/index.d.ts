@@ -17,6 +17,7 @@ export interface NativeRunOptions {
   method?: string
   backend?: string
   effort?: string
+  tier?: string
   lang?: string
   url?: string
   start?: number

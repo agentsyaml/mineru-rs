@@ -51,13 +51,18 @@ helper (Markdown only, no layout JSON).
 Native PDF output is accepted only for conservative clean text PDFs; uncertain
 PDFs fail clearly in local mode rather than pretending to provide official
 layout output.
-Official MinerU 4.0.4 direct Hybrid supports the official `medium`, `high`, and
-`xhigh` efforts (`medium` maps to tier `standard`; `high`/`xhigh` map to tier
-`advanced`) through that Python boundary. Note two upstream 4.0.4 breaking
-changes on this lane: the language parameter is gone, so non-default `--lang`
-is rejected, and model stacks are configured via `MINERU_CONFIG` (upstream
-removed `model.stack`/`MINERU_MODEL_STACK`), so non-default `--model-stack` is
-rejected. Python, MinerU, and model assets are not bundled; Docker/llama.cpp orchestration
+Official MinerU 4.0.4 direct Hybrid runs through that Python boundary with
+`--tier flash|basic|standard|advanced` mapped 1:1 to the upstream tier
+(`--effort medium|high|xhigh` remains a compatibility alias: `medium` maps to
+tier `standard`, `high`/`xhigh` map to tier `advanced`; `--tier` wins when both
+are given, and is rejected outside this backend), and `--method auto|txt|ocr` mapping directly to the upstream
+`ocr_mode`. `--url` / `MINERU_VL_SERVER` are accepted at every tier; without a
+URL, upstream uses its local VLM engine. Note the remaining upstream 4.0.4
+constraints on this lane: the `--lang` guard compares the normalized language
+(`en`, `japan`, `chinese_cht`, and `latin` are accepted, they normalize to
+`ch`; other non-default values are rejected), and model stacks are configured
+via `MINERU_CONFIG` (upstream removed `model.stack`/`MINERU_MODEL_STACK`), so
+non-default `--model-stack` is rejected. Python, MinerU, and model assets are not bundled; Docker/llama.cpp orchestration
 is outside this C1 boundary (see [compatibility](docs/compatibility.md)).
 
 The remote protocol is pinned to the MinerU `vlm-http-client` transport

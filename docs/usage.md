@@ -119,9 +119,9 @@ This performance mode still admits one active request only: documents
 remain sequential and use independent private snapshots and bundles. Startup and
 handshake happen once; cancellation or a crash makes the next document create a new
 session. A committed request is never automatically retried, and this mode provides no
-hard RSS/GPU isolation. An explicit CLI value wins over the environment; with neither
-override, the automatic document-count selection applies. The environment setting
-applies only to direct `hybrid-http-client`.
+hard RSS/GPU isolation. With no explicit CLI value, the automatic document-count
+selection applies. The former `MINERU_OFFICIAL_WORKER_MODE` environment variable was
+removed and now fails the run; use `--official-worker-mode`.
 
 On Windows, worker assignment to a `KILL_ON_JOB_CLOSE` Job Object is fail-closed,
 but Tokio spawns first and `WindowsJob::attach` runs afterward. A very fast
@@ -129,23 +129,32 @@ descendant created before assignment can therefore escape the job; cleanup is
 best effort for that narrow race. The official worker has no hard RSS or GPU
 quota.
 
-`medium` keeps the official `hybrid-http-client` backend and is local-only: it
-rejects a configured `--url` or `MINERU_VL_SERVER`. `high` and `xhigh` use the same official
-`hybrid-http-client` backend and require an
-explicit HTTP(S) `--url` or `MINERU_VL_SERVER`. The CLI `--effort` mapping is:
-`medium` → tier `standard`, `high`/`xhigh` → tier `advanced`; `--url` /
-`MINERU_VL_SERVER` feed `VlmConfig.server_url`, and `--api-key` / model name
-feed `VlmConfig`. The worker calls the official
-`mineru.parser.parse_async(path, *, tier, ocr_mode, image_analysis, page_range,
-vlm_config)`; the old upstream backend/effort/server_url/method/lang parameters
-no longer exist. Model-root and config paths are user-supplied: upstream 4.0.4
+`--tier flash|basic|standard|advanced` maps 1:1 to the official upstream tier.
+`--effort medium|high|xhigh` remains a compatibility alias: `medium` maps to
+tier `standard`, and `high`/`xhigh` map to tier `advanced`; `--tier` wins when
+both are given. `--url` / `MINERU_VL_SERVER` are accepted at every
+tier/effort and feed `VlmConfig.server_url`; `--api-key` / model name feed
+`VlmConfig`. Without a URL, upstream uses its local VLM engine. The worker
+calls the official `mineru.parser.parse_async(path, *, tier, ocr_mode,
+image_analysis, page_range, vlm_config)`. `--method auto|txt|ocr` maps
+directly to the upstream `ocr_mode` parameter. Page ranges apply to PDF input
+only and are sent in upstream grammar (`3-r1` for an open-ended range, where
+`r1` is the last page, and `3-5` style bounds); supplying `--start`/`--end`
+for an image fails fast. A malformed VLM URL (embedded credentials, query,
+fragment, whitespace, or bad port) is rejected up front.
+Model-root and config paths are user-supplied: upstream 4.0.4
 removed `model.stack`/`MINERU_MODEL_STACK` in favor of `model.small_backend` +
 `model.vlm.engine` configured via `MINERU_CONFIG`, so non-default
-`--model-stack` is rejected; upstream also removed the language parameter, so
-non-default `--lang` is rejected. The legacy env vars `MINERU_VL_API_KEY` /
+`--model-stack` is rejected; `--official-model-dir` /
+`MINERU_MODEL_BASE_DIR` supply the model root injected into the worker as
+`MINERU_MODEL_BASE_DIR`, while `MINERU_HOME` is a MinerU home directory, not
+the model root. The `--lang` guard compares the normalized language: `en`,
+`japan`, `chinese_cht`, and `latin` are accepted (they normalize to `ch`),
+while other non-default values are rejected. The legacy env vars
+`MINERU_VL_API_KEY` /
 `MINERU_VL_MODEL_NAME` are no longer injected into the worker environment —
-pass credentials through the existing mineru-rs flags; `MINERU_HOME` /
-`MINERU_CONFIG` remain supported.
+pass credentials through the existing mineru-rs flags; `MINERU_CONFIG`
+remains supported.
 Formula/table disable switches are unsupported by the pinned parser.
 Results are published separately under `{out}/{stem}/hybrid-v4/` with
 `markdown.md`, `middle_json.json`, `structured_content.json`,
@@ -224,15 +233,16 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `-p, --path <path>` | Required | Input file or directory (processed recursively). |
 | `-o, --output <directory>` | Required | Output directory. |
 | `--api-url <URL>` | None | Remote API server address; without it, direct VLM mode is used. |
-| `-m, --method <auto\|txt\|ocr>` | `auto` | Parsing method; ignored by direct `vlm-http-client`, rejected when non-default by official direct Hybrid (upstream 4.0.4 has no such parameter). |
+| `-m, --method <auto\|txt\|ocr>` | `auto` | Parsing method; ignored by direct `vlm-http-client`. In official direct Hybrid it maps directly to the upstream `ocr_mode` parameter. |
 | `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.0.4 worker; API Hybrid remains unsupported. |
-| `--effort <medium\|high\|xhigh>` | `medium` | Official direct Hybrid effort, mapped to upstream tiers: `medium`→`standard` (local-only); `high`/`xhigh`→`advanced` (require an explicit HTTP(S) VLM URL). Other direct backends accept only `medium`/`high`. |
+| `--tier <flash\|basic\|standard\|advanced>` | None | Official direct Hybrid tier, mapped 1:1 to the upstream tier. Rejected on other backends and in API mode. `--effort` is a compatibility alias (`medium`→`standard`, `high`/`xhigh`→`advanced`); `--tier` wins when both are given. Other direct backends accept only `medium`/`high` effort. |
+| `--effort <medium\|high\|xhigh>` | `medium` | Compatibility alias for `--tier`: `medium`→`standard`, `high`/`xhigh`→`advanced`. Ignored when `--tier` is set. Other direct backends accept only `medium`/`high`. |
 | `--model-stack <auto\|light\|full>` | `auto` | Official direct Hybrid model stack. Upstream 4.0.4 removed `model.stack`/`MINERU_MODEL_STACK` (replaced by `model.small_backend` + `model.vlm.engine` via `MINERU_CONFIG`), so non-default values, including `auto`, are rejected. |
 | `--official-worker-mode <per-document\|persistent>` | automatic (by runnable document count) | Official Hybrid worker lifecycle. One runnable document uses `per-document`; multiple runnable documents use `persistent`. |
 | `--official-python <absolute-path>` | Python `python3`/`python` | Official direct Hybrid interpreter. Overrides `MINERU_OFFICIAL_PYTHON`; the executable is not bundled. |
 | `--official-model-dir <absolute-path>` | None | Official direct Hybrid model root; overrides `MINERU_MODEL_BASE_DIR`. |
 | `--official-config <absolute-path>` | None | Official direct Hybrid config; overrides `MINERU_CONFIG`. |
-| `-l, --lang <language>` | `ch` | Language code. Official direct Hybrid rejects non-default values (upstream 4.0.4 removed the language parameter). |
+| `-l, --lang <language>` | `ch` | Language code. Official direct Hybrid compares the normalized language: `en`, `japan`, `chinese_cht`, and `latin` are accepted (they normalize to `ch`); other non-default values are rejected. |
 | `-u, --url <URL>` | None | VLM service-address override in direct mode; per-task model-server override in API mode. |
 | `-s, --start <n>` | `0` | Start page, **zero-based**. |
 | `-e, --end <n>` | None (through the last page) | End page, **inclusive**. |
@@ -283,7 +293,7 @@ VLM transport knobs (each also has an environment spelling):
 
 Diagnostic/human-output truncation caps remain compiled and are not configurable. The existing `--max-input-bytes`, `--max-encoded-document-bytes`, and `--max-output-bytes` pairs are unchanged.
 
-For the existing direct `vlm-http-client` lane, non-default values for `--method`, `--effort`, and `--lang` produce a warning and are ignored. Official direct Hybrid rejects non-default `--method`/`--lang` (upstream 4.0.4 has no such parameters) and maps `--effort` to upstream tiers as described above. `--client-side-output-generation` is rejected in both direct Hybrid and API mode.
+For the existing direct `vlm-http-client` lane, non-default values for `--method`, `--effort`, and `--lang` produce a warning and are ignored. Official direct Hybrid maps `--method` to the upstream `ocr_mode`, maps `--tier`/`--effort` to upstream tiers as described above, and rejects `--lang` values whose normalized language is not `ch` (the accepted aliases normalize to it). `--tier` is rejected outside direct Hybrid (other backends and API mode). `--client-side-output-generation` is rejected in both direct Hybrid and API mode.
 
 In API mode, the local VLM transport knobs (`--page-concurrency`, `--concurrency-model`, `--processing-window-size`, `--render-*`, `--batch-size`, all `--http-*`/`--max-remote-image-bytes`/`--max-decoded-pixels`/`--max-images-per-request`/`--max-redirects`/`--http-max-response-bytes`/`--temperature-retry`/`--vlm-debug` and their environment spellings) fail explicitly, because the remote server performs parsing and those controls would have no consumer; `MINERU_VL_SERVER` is submitted as the per-task `server_url` when `--url` is absent.
 
@@ -420,9 +430,10 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | Page-pipeline concurrency cap (any positive value), bounding only the number of simultaneously running page pipelines; request-level concurrency is governed by `MINERU_VLM_HTTP_CONCURRENCY`. |
 | `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | Concurrency model, one of `classic\|two-phase`. `classic`: the long-standing single-encoder pipeline (default); `two-phase`: splits each page's semantic work into an encode-all → request-all two-stage flow, removing the CPU-encode serialization bottleneck in front of request dispatch (opt-in). |
-| `MINERU_MODEL_STACK` | `auto` | Official direct Hybrid stack: `auto\|light\|full`. Upstream 4.0.4 removed `model.stack`/`MINERU_MODEL_STACK`; non-default `--model-stack` is rejected (configure via `MINERU_CONFIG`). |
+| `MINERU_MODEL_STACK` | None | Removed upstream 4.0.4. Any set value, including `auto`, fails the run on every lane; whether the failure happens before lane dispatch is not configurable. Configure `model.small_backend` / `model.vlm.engine` via `MINERU_CONFIG` instead. |
+| `MINERU_OFFICIAL_WORKER_MODE` | None | Removed. Any set value fails the run with `MINERU_OFFICIAL_WORKER_MODE was removed in MinerU 4.0.4; use --official-worker-mode`. |
 | `MINERU_OFFICIAL_PYTHON` | Python `python3`/`python` | Absolute official Hybrid interpreter path. |
-| `MINERU_MODEL_BASE_DIR` | None | Absolute official Hybrid model root. |
+| `MINERU_MODEL_BASE_DIR` | None | Absolute official Hybrid model root; injected into the worker as `MINERU_MODEL_BASE_DIR` (upstream `model.base_dir`). `MINERU_HOME` is a MinerU home directory, not the model root. |
 | `MINERU_CONFIG` | None | Absolute official Hybrid config path. |
 | `MINERU_PDF_RENDER_THREADS` | `min(cpu, 8)` | Number of rendering workers. |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | Timeout in seconds for a single render. |

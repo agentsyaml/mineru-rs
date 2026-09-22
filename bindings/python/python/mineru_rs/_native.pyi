@@ -1,6 +1,7 @@
 from typing import List, Optional, Union
 
 from os import PathLike
+from pathlib import Path
 
 # Native extension module `mineru_rs._native` (PyO3). Private surface used by
 # `mineru_rs.run` / `mineru_rs._cli`; not part of the public API contract.
@@ -21,7 +22,7 @@ def validate_pdf_options(
 def locate_markdown(
     output: Union[str, PathLike[str]],
     stem: str,
-) -> Optional[str]: ...
+) -> Optional[Path]: ...
 
 
 async def _run(
@@ -40,6 +41,7 @@ async def _run(
     image_analysis: bool,
     client_side_output_generation: bool,
     helper: Union[str, PathLike[str]],
+    tier: Optional[str] = ...,
 ) -> List[str]: ...
 
 

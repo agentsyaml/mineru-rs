@@ -43,20 +43,30 @@ protocols.
 
 Direct Hybrid accepts PDF and official image inputs only. The worker calls the
 official `mineru.parser.parse_async(path, *, tier, ocr_mode, image_analysis,
-page_range, vlm_config)` entrypoint: mineru-rs maps `--effort medium` to
-tier `standard`, and `high`/`xhigh` to tier `advanced`. Tier `standard` is
-local-only and forbids a remote URL; tiers `advanced` require an explicit
-HTTP(S) URL. `--url` / `MINERU_VL_SERVER` feed `VlmConfig.server_url` (and
-`--api-key` / model name feed `VlmConfig`); medium forbids them, high/xhigh
-require an http(s) URL. The worker mode does not change this input, effort, or
-output contract. Model-root and config paths are user configuration; upstream
-4.0.4 removed `model.stack`/`MINERU_MODEL_STACK` in favor of
-`model.small_backend` + `model.vlm.engine` configured via `MINERU_CONFIG`, so
-non-default `--model-stack` is rejected. Upstream also removed the language
-parameter, so non-default `--lang` is rejected, and the legacy env vars
-`MINERU_VL_API_KEY` / `MINERU_VL_MODEL_NAME` are no longer injected into the
-worker environment — pass credentials through the existing mineru-rs flags;
-`MINERU_HOME` / `MINERU_CONFIG` remain supported.
+page_range, vlm_config)` entrypoint. `--tier flash|basic|standard|advanced`
+maps 1:1 to the upstream tier; `--effort medium` maps to tier `standard`, and
+`high`/`xhigh` are compatibility aliases for tier `advanced` (`--tier` wins
+when both are given, and is rejected on other backends and in API mode). `--url` / `MINERU_VL_SERVER` are accepted at every
+tier/effort and feed `VlmConfig.server_url` (`--api-key` and the model name
+feed `VlmConfig`); without a URL, upstream uses its local VLM engine. Page
+ranges apply to PDF input only and are sent in upstream grammar (`3-r1` for an
+open-ended range, where `r1` is the last page, and `3-5` style bounds);
+supplying `--start`/`--end` for an image fails fast. A malformed VLM URL
+(embedded credentials, query, fragment, whitespace, or bad port) is rejected up
+front. The worker mode does not change this input, tier, or output contract.
+Model-root and config paths are user configuration; upstream 4.0.4 removed
+`model.stack`/`MINERU_MODEL_STACK` in favor of `model.small_backend` +
+`model.vlm.engine` configured via `MINERU_CONFIG`, so non-default
+`--model-stack` is rejected. `--method auto|txt|ocr` maps directly to the
+upstream `ocr_mode` parameter. The `--lang` guard compares the normalized
+language, so `en`, `japan`, `chinese_cht`, and `latin` are accepted (they
+normalize to `ch`) while other non-default values are rejected, and the legacy
+env vars `MINERU_VL_API_KEY` / `MINERU_VL_MODEL_NAME` are no longer injected
+into the worker environment — pass credentials through the existing mineru-rs
+flags. `MINERU_HOME` is a MinerU home directory, not the model root;
+`MINERU_CONFIG` remains supported, and `--official-model-dir` /
+`MINERU_MODEL_BASE_DIR` supply the model root injected into the worker as
+`MINERU_MODEL_BASE_DIR`.
 The separate `{stem}/hybrid-v4/` bundle is validated against the shared DocVortex
 protocol — schema `docvortex.middle`, schema_version `2.0` (the old
 `_backend=hybrid` marker is gone) — plus safe files and bounded bytes before

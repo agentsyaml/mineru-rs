@@ -20,7 +20,6 @@ from pathlib import Path
 import sys
 from typing import cast
 
-
 WORKER_SOURCE_CONTRACT = (
     "embed mineru_official_worker_protocol.py before "
     "mineru_official_worker.py; the combined source is self-contained"
@@ -34,10 +33,8 @@ PROTOCOL_CAP = 64 * 1024
 DIAGNOSTIC_CAP = 64 * 1024
 PERSISTENT_FRAME_CAP = 64 * 1024
 PERSISTENT_RECENT_REQUEST_CAPACITY = 64
-PERSISTENT_TIERS = ("standard", "advanced")
-# Mirror src/official_worker.rs PERSISTENT_OCR_MODES: this lane only ever
-# requests "auto", so the handshake must advertise exactly that set.
-PERSISTENT_OCR_MODES = ("auto",)
+PERSISTENT_TIERS = ("flash", "basic", "standard", "advanced")
+PERSISTENT_OCR_MODES = ("auto", "txt", "ocr")
 PERSISTENT_INPUT_FORMATS = (
     "pdf", "png", "jpeg", "jpg", "jp2", "webp", "gif", "bmp", "tiff",
 )
@@ -50,20 +47,21 @@ PERSISTENT_CAPABILITIES = {
 }
 
 # Exact per-document request field set (parse_async kwargs plus transport
-# metadata).  Optional fields may be omitted entirely or be null.
+# metadata).  Optional fields may be omitted or be null.
 DOCUMENT_REQUEST_FIELDS = frozenset(
     {"protocol", "request_id", "max_bundle_bytes", "bundle_name", "input_path",
      "bundle_path", "tier", "ocr_mode", "image_analysis"}
 )
 DOCUMENT_OPTIONAL_FIELDS = frozenset(
-    {"page_range", "vlm_server_url", "vlm_api_key", "vlm_model", "model_home", "config"}
+    {"page_range", "vlm_server_url", "vlm_api_key", "vlm_model", "model_base_dir", "config"}
 )
 
-# Only these variables are injected into the environment.  Legacy MinerU
-# variables such as MINERU_VL_API_KEY and MINERU_VL_MODEL_NAME are neither
-# injected nor popped: upstream conflicts with an explicit VlmConfig api_key,
-# so relying on them would be incorrect.
-_REQUEST_ENV_KEYS = (("MINERU_HOME", "model_home"), ("MINERU_CONFIG", "config"))
+# Only these variables are injected into the environment.  Upstream maps
+# MINERU_MODEL_BASE_DIR to Config.model.base_dir; MINERU_HOME is a home
+# directory whose models/ subtree merely defaults base_dir.  Legacy MinerU
+# variables (MINERU_VL_API_KEY, MINERU_VL_MODEL_NAME) are neither injected
+# nor popped: upstream conflicts with an explicit VlmConfig api_key.
+_REQUEST_ENV_KEYS = (("MINERU_MODEL_BASE_DIR", "model_base_dir"), ("MINERU_CONFIG", "config"))
 
 __all__ = (
     "WORKER_SOURCE_CONTRACT", "PROTOCOL", "PERSISTENT_PROTOCOL", "PACKAGE_VERSION",
@@ -158,7 +156,7 @@ def _validate_document_request(request: dict[str, object]) -> None:
     max_bundle_bytes = request["max_bundle_bytes"]
     if isinstance(max_bundle_bytes, bool) or not isinstance(max_bundle_bytes, int) or max_bundle_bytes <= 0:
         raise ValueError("max_bundle_bytes must be a positive integer")
-    for name in ("page_range", "vlm_server_url", "vlm_api_key", "vlm_model", "model_home", "config"):
+    for name in ("page_range", "vlm_server_url", "vlm_api_key", "vlm_model", "model_base_dir", "config"):
         value = request.get(name)
         if value is not None and (not isinstance(value, str) or (name != "page_range" and not value)):
             raise ValueError(f"{name} must be a string")
@@ -176,17 +174,22 @@ def _document_parse_kwargs(request: dict[str, object]) -> dict[str, object]:
     page_range = request.get("page_range")
     if page_range:
         kwargs["page_range"] = page_range
-    # Upstream VlmConfig (mineru.config) fields are server_url/api_key/model;
-    # request frames carry the vlm_-prefixed transport names.
-    vlm_fields = {
-        {"vlm_server_url": "server_url", "vlm_api_key": "api_key", "vlm_model": "model"}[name]: request[name]
+    # Upstream MinerUParser replaces (not merges) the VLM config, so start
+    # from the effective loaded config (mineru.config.config.model.vlm,
+    # honoring MINERU_CONFIG) and set only the provided vlm_* fields; tuned
+    # values such as engine/http_timeout/max_concurrency must survive.
+    # Reconstructing VlmConfig reruns its field validators on the merged set.
+    overrides = {
+        name.removeprefix("vlm_"): request[name]
         for name in ("vlm_server_url", "vlm_api_key", "vlm_model")
         if request.get(name)
     }
-    if vlm_fields:
-        from mineru.config import VlmConfig
+    if overrides:
+        from mineru.config import VlmConfig, config as mineru_config
 
-        kwargs["vlm_config"] = VlmConfig(**vlm_fields)
+        merged = mineru_config.model.vlm.model_dump()
+        merged.update(overrides)
+        kwargs["vlm_config"] = VlmConfig(**merged)
     return kwargs
 
 
@@ -217,9 +220,7 @@ def _emit(response: dict[str, object], diagnostic: str = "") -> None:
             while low <= high:
                 middle = (low + high) // 2
                 response["diagnostic"] = full[:middle]
-                candidate = json.dumps(response, ensure_ascii=True, separators=(",", ":")).encode(
-                    "utf-8"
-                )
+                candidate = json.dumps(response, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
                 if len(candidate) <= limit:
                     best, low = candidate, middle + 1
                 else:
@@ -283,7 +284,7 @@ def _persistent_required_string(value: object, name: str) -> str:
 
 def _persistent_start(frame: dict[str, object]) -> dict[str, object]:
     fields = {
-        "type", "protocol", "package_version", "schema_version", "model_home",
+        "type", "protocol", "package_version", "schema_version", "model_base_dir",
         "config", "vlm_api_key", "vlm_model", "capabilities",
     }
     if set(frame) != fields:
@@ -294,7 +295,7 @@ def _persistent_start(frame: dict[str, object]) -> dict[str, object]:
         raise ValueError("persistent startup package/schema mismatch")
     if frame["capabilities"] != PERSISTENT_CAPABILITIES:
         raise ValueError("persistent startup capability mismatch")
-    for name in ("model_home", "config", "vlm_api_key", "vlm_model"):
+    for name in ("model_base_dir", "config", "vlm_api_key", "vlm_model"):
         _persistent_string(frame[name], name, allow_none=True)
     return frame
 
@@ -343,9 +344,15 @@ def _persistent_request(
         raise ValueError("persistent ocr_mode capability mismatch")
     if not isinstance(frame["image_analysis"], bool):
         raise ValueError("persistent image_analysis must be boolean")
-    for name in ("vlm_server_url", "vlm_api_key", "vlm_model", "model_home", "config"):
-        _persistent_string(frame[name], name, allow_none=True)
-    vlm_server_url = frame["vlm_server_url"]
+    for name in ("vlm_server_url", "vlm_api_key", "vlm_model", "model_base_dir", "config"):
+        _persistent_string(frame.get(name), name, allow_none=True)
+    # Fail closed: model_base_dir/config are process-wide (injected into the
+    # environment before mineru imports its config), so a request that
+    # disagrees with the startup frame is rejected instead of silently ignored.
+    for name in ("model_base_dir", "config"):
+        if frame.get(name) != start.get(name):
+            raise ValueError(f"persistent request {name} differs from the startup frame")
+    vlm_server_url = frame.get("vlm_server_url")
     if isinstance(vlm_server_url, str) and not vlm_server_url.startswith(("http://", "https://")):
         raise ValueError("persistent vlm_server_url must be an HTTP(S) URL")
     input_path = _persistent_required_string(frame["input_path"], "input_path")
@@ -402,12 +409,10 @@ def _persistent_response_bytes(response: dict[str, object]) -> bytes:
     encoded = encode(response)
     if len(encoded) <= limit:
         return encoded
-
     fitted = {key: value for key, value in response.items() if key != "diagnostic"}
     encoded = encode(fitted)
     if len(encoded) <= limit:
         return encoded
-
     error = fitted.get("error")
     if isinstance(error, str) and error:
         low, high = 1, len(error)
@@ -454,7 +459,6 @@ def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
             startup_capture.getvalue(),
         )
         return 1
-
     recent_requests = _PersistentRecentRequests()
     expected_sequence = 1
     while True:
@@ -462,12 +466,7 @@ def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
             request = _persistent_read_frame()
             if request is None:
                 return 0
-            _persistent_request(
-                request,
-                startup,
-                expected_sequence,
-                recent_requests,
-            )
+            _persistent_request(request, startup, expected_sequence, recent_requests)
         except Exception as error:
             _emit(
                 {
@@ -487,12 +486,11 @@ def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
             kwargs = _document_parse_kwargs(request)
             with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
                 result = asyncio.run(parser.parse_async(request["input_path"], **kwargs))
-                result.save(
-                    bundle_writer(
-                        Path(cast(str, request["bundle_path"])),
-                        int(cast(int, request["max_bundle_bytes"])),
-                    )
+                writer = bundle_writer(
+                    Path(cast(str, request["bundle_path"])),
+                    int(cast(int, request["max_bundle_bytes"])),
                 )
+                result.save(writer)
             _emit(_persistent_result(request, "ok"), capture.getvalue())
         except Exception as error:
             _emit(

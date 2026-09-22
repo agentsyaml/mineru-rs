@@ -3,8 +3,9 @@ export interface RunOptions {
   output: string
   apiUrl?: string
   method?: 'auto' | 'txt' | 'ocr'
-  backend?: 'vlm-http-client'
-  effort?: 'medium' | 'high'
+  backend?: 'vlm-http-client' | 'hybrid-http-client' | 'local'
+  effort?: 'medium' | 'high' | 'xhigh'
+  tier?: 'flash' | 'basic' | 'standard' | 'advanced'
   lang?: string
   url?: string
   start?: number

@@ -27,7 +27,7 @@ use protocol::validate_persistent_request;
 pub(crate) struct OfficialSessionConfig {
     package_version: &'static str,
     schema_version: &'static str,
-    model_home: Option<PathBuf>,
+    model_base_dir: Option<PathBuf>,
     config: Option<PathBuf>,
     vlm_api_key: Option<String>,
     vlm_model: Option<String>,
@@ -35,7 +35,7 @@ pub(crate) struct OfficialSessionConfig {
 
 impl OfficialSessionConfig {
     pub(crate) fn new(
-        model_home: Option<PathBuf>,
+        model_base_dir: Option<PathBuf>,
         config: Option<PathBuf>,
         vlm_api_key: Option<String>,
         vlm_model: Option<String>,
@@ -43,7 +43,7 @@ impl OfficialSessionConfig {
         Ok(Self {
             package_version: PACKAGE_VERSION,
             schema_version: SCHEMA_VERSION,
-            model_home,
+            model_base_dir,
             config,
             vlm_api_key,
             vlm_model,
@@ -51,7 +51,7 @@ impl OfficialSessionConfig {
     }
 
     fn matches_request(&self, request: &OfficialRequest) -> Result<(), String> {
-        if request.model_home != self.model_home
+        if request.model_base_dir != self.model_base_dir
             || request.config != self.config
             || request.vlm_api_key != self.vlm_api_key
             || request.vlm_model != self.vlm_model

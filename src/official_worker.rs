@@ -69,8 +69,10 @@ impl PythonShim {
     }
 }
 
-const PERSISTENT_TIERS: &[&str] = &["standard", "advanced"];
-const PERSISTENT_OCR_MODES: &[&str] = &["auto"];
+// Mirrors upstream mineru.types.TIERS and the OCR modes accepted by
+// mineru.parser.parse_async; capabilities advertise this exact set.
+const PERSISTENT_TIERS: &[&str] = &["flash", "basic", "standard", "advanced"];
+const PERSISTENT_OCR_MODES: &[&str] = &["auto", "txt", "ocr"];
 const PERSISTENT_INPUT_FORMATS: &[&str] = &[
     "pdf", "png", "jpeg", "jpg", "jp2", "webp", "gif", "bmp", "tiff",
 ];
@@ -101,7 +103,7 @@ pub(crate) struct OfficialRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) vlm_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) model_home: Option<PathBuf>,
+    pub(crate) model_base_dir: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) config: Option<PathBuf>,
     pub(crate) max_bundle_bytes: u64,
@@ -120,7 +122,7 @@ impl OfficialRequest {
         vlm_server_url: Option<String>,
         vlm_api_key: Option<String>,
         vlm_model: Option<String>,
-        model_home: Option<PathBuf>,
+        model_base_dir: Option<PathBuf>,
         config: Option<PathBuf>,
         max_bundle_bytes: u64,
         input_path: PathBuf,
@@ -136,7 +138,7 @@ impl OfficialRequest {
             vlm_server_url,
             vlm_api_key,
             vlm_model,
-            model_home,
+            model_base_dir,
             config,
             max_bundle_bytes,
             bundle_name: crate::hybrid_v4_output::BUNDLE_NAME,

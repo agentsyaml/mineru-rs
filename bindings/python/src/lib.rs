@@ -47,6 +47,9 @@ fn locate_markdown(output: PathBuf, stem: &str) -> PyResult<Option<PathBuf>> {
 
 #[allow(clippy::too_many_arguments)]
 #[pyfunction(name = "_run")]
+// Trailing `Option` without an explicit signature is required in PyO3, so the
+// default keeps callers that omit `tier` working.
+#[pyo3(signature = (path, output, api_url, method, backend, effort, lang, url, start, end, formula, table, image_analysis, client_side_output_generation, helper, tier=None))]
 fn run_native<'py>(
     py: Python<'py>,
     path: PathBuf,
@@ -64,12 +67,16 @@ fn run_native<'py>(
     image_analysis: bool,
     client_side_output_generation: bool,
     helper: PathBuf,
+    // Last so a facade can pass it by keyword only when set, keeping prebuilt
+    // native modules from an older ABI usable for every other option.
+    tier: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut options = mineru::RunOptions::new(path, output);
     options.api_url = api_url;
     options.method = method;
     options.backend = backend;
     options.effort = effort;
+    options.tier = tier;
     options.lang = lang;
     options.url = url;
     options.start = start;

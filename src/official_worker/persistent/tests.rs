@@ -44,7 +44,7 @@ if [ "$MODE" = bad-handshake ]; then
     printf '%s\n' '{"type":"handshake","protocol":"wrong"}'
     exit 0
 fi
-printf '%s\n' '{"type":"handshake","protocol":"mineru-rs-official-worker/2","status":"ready","package_version":"4.0.4","schema_version":"2.0","max_in_flight":1,"capabilities":{"tiers":["standard","advanced"],"ocr_modes":["auto"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}'
+printf '%s\n' '{"type":"handshake","protocol":"mineru-rs-official-worker/2","status":"ready","package_version":"4.0.4","schema_version":"2.0","max_in_flight":1,"capabilities":{"tiers":["flash","basic","standard","advanced"],"ocr_modes":["auto","txt","ocr"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}'
 
 requests=0
 while IFS= read -r request; do
@@ -113,7 +113,9 @@ fn persistent_request(
     request_id: &str,
     tier: &str,
 ) -> OfficialRequest {
-    let vlm_server_url = (tier == "advanced").then(|| "http://vlm.example/v1".to_owned());
+    // Any tier may carry a remote VLM URL now; standard tests exercise the
+    // URL-forwarding path directly.
+    let vlm_server_url = Some("http://vlm.example/v1".to_owned());
     let mut request = OfficialRequest::new(
         tier.into(),
         "auto".into(),
@@ -122,7 +124,7 @@ fn persistent_request(
         vlm_server_url,
         config.vlm_api_key.clone(),
         config.vlm_model.clone(),
-        config.model_home.clone(),
+        config.model_base_dir.clone(),
         config.config.clone(),
         1024,
         PathBuf::new(),
@@ -202,7 +204,7 @@ async fn persistent_worker_reuses_one_pid_and_keeps_bundles_independent() {
     assert_eq!(startup["package_version"], PACKAGE_VERSION);
     assert_eq!(startup["schema_version"], SCHEMA_VERSION);
     assert_eq!(
-        startup["model_home"],
+        startup["model_base_dir"],
         temp.path().join("models").to_str().unwrap()
     );
     assert_eq!(

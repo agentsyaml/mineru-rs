@@ -41,6 +41,7 @@ pub struct NativeRunOptions {
     pub method: Option<String>,
     pub backend: Option<String>,
     pub effort: Option<String>,
+    pub tier: Option<String>,
     pub lang: Option<String>,
     pub url: Option<String>,
     pub start: Option<u32>,
@@ -77,6 +78,9 @@ pub async fn run_native(input: NativeRunOptions, helper: String) -> napi::Result
     }
     if let Some(value) = input.effort {
         options.effort = value;
+    }
+    if let Some(value) = input.tier {
+        options.tier = Some(value);
     }
     if let Some(value) = input.lang {
         options.lang = value;

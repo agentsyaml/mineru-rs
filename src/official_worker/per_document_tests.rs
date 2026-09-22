@@ -1,13 +1,17 @@
 #[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use super::{OfficialRequest, OfficialWorker};
 use super::{
-    OfficialRequest, OfficialWorker, PYTHON_SHIM, PythonShim, STDERR_CAP,
-    process::with_truncated_diagnostic, read_diagnostic,
+    PYTHON_SHIM, PythonShim, STDERR_CAP, process::with_truncated_diagnostic, read_diagnostic,
 };
 
+#[cfg(unix)]
 fn test_request() -> OfficialRequest {
     OfficialRequest::new(
         "standard".into(),

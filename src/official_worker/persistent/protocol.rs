@@ -27,17 +27,15 @@ pub(super) fn validate_persistent_request(request: &OfficialRequest) -> Result<(
     if !PERSISTENT_TIERS.contains(&request.tier.as_str()) {
         return Err("official persistent tier is unsupported".into());
     }
-    // Mirror the CLI preflight: tier "advanced" requires an explicit HTTP(S)
-    // VLM endpoint; tier "standard" is local-only and forbids one.
-    if request.tier == "advanced" {
-        let url = request.vlm_server_url.as_deref().unwrap_or_default();
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(
-                "official persistent tier advanced requires an HTTP(S) vlm_server_url".into(),
-            );
-        }
-    } else if request.vlm_server_url.is_some() {
-        return Err("official persistent tier standard forbids a vlm_server_url".into());
+    // Upstream honours a remote VLM at any tier (tier.py skips the local VLM
+    // modules when a server_url is set), so only syntax matters here; the CLI
+    // preflight already applied VlmConfig._normalize_server_url parity.
+    if request
+        .vlm_server_url
+        .as_deref()
+        .is_some_and(|url| !url.starts_with("http://") && !url.starts_with("https://"))
+    {
+        return Err("official persistent vlm_server_url must be an HTTP(S) URL".into());
     }
     if !PERSISTENT_OCR_MODES.contains(&request.ocr_mode.as_str()) {
         return Err("official persistent ocr_mode is unsupported".into());
@@ -60,7 +58,7 @@ pub(super) fn persistent_start_frame(config: &OfficialSessionConfig) -> Value {
         "protocol": PERSISTENT_PROTOCOL,
         "package_version": config.package_version,
         "schema_version": config.schema_version,
-        "model_home": config.model_home,
+        "model_base_dir": config.model_base_dir,
         "config": config.config,
         "vlm_api_key": config.vlm_api_key,
         "vlm_model": config.vlm_model,
@@ -86,7 +84,7 @@ pub(super) fn persistent_request_frame(
         "vlm_server_url": request.vlm_server_url,
         "vlm_api_key": config.vlm_api_key,
         "vlm_model": config.vlm_model,
-        "model_home": config.model_home,
+        "model_base_dir": config.model_base_dir,
         "config": config.config,
         "bundle_name": crate::hybrid_v4_output::BUNDLE_NAME,
         "input_path": request.input_path,

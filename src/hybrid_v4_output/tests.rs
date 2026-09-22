@@ -17,6 +17,9 @@ fn bundle(root: &Path, middle: &str) -> PathBuf {
 
 const VALID_MIDDLE: &str = r#"{"schema":"docvortex.middle","schema_version":"2.0","pages":[{}]}"#;
 
+const EMPTY_PAGES_MIDDLE: &str =
+    r#"{"schema":"docvortex.middle","schema_version":"2.0","pages":[],"is_full_document":true}"#;
+
 fn stage_validation(bundle: &Path, byte_cap: u64) -> Result<(), String> {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("stage")).unwrap();
@@ -26,12 +29,19 @@ fn stage_validation(bundle: &Path, byte_cap: u64) -> Result<(), String> {
 }
 
 #[test]
+fn accepts_an_empty_pages_document() {
+    let temp = tempfile::tempdir().unwrap();
+    let staged = bundle(temp.path(), EMPTY_PAGES_MIDDLE);
+    stage_validation(&staged, 1024).expect("upstream may emit zero retained pages");
+}
+
+#[test]
 fn accepts_v4_shape_and_replaces_atomically() {
     let temp = tempfile::tempdir().unwrap();
     let first = bundle(temp.path(), VALID_MIDDLE);
     std::fs::create_dir(first.join("images")).unwrap();
     std::fs::write(first.join("images/chart.png"), b"png").unwrap();
-    std::fs::write(first.join("model_output.json"), "[{}]").unwrap();
+    std::fs::write(first.join("model_output.json"), "{}").unwrap();
     validate_and_publish(&first, temp.path(), "document", 1024).unwrap();
     assert_eq!(
         std::fs::read_to_string(temp.path().join("document/hybrid-v4/markdown.md")).unwrap(),
@@ -61,7 +71,7 @@ fn rejects_schema_backend_empty_pages_unknown_and_cap() {
     for middle in [
         r#"{"schema":"docvortex.middle","schema_version":"1.0","pages":[{}]}"#,
         r#"{"schema":"docvortex.other","schema_version":"2.0","pages":[{}]}"#,
-        r#"{"schema":"docvortex.middle","schema_version":"2.0","pages":[]}"#,
+        r#"{"schema":"docvortex.middle","schema_version":"2.0","pages":[null]}"#,
     ] {
         let temp = tempfile::tempdir().unwrap();
         let input = bundle(temp.path(), middle);

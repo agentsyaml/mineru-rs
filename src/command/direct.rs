@@ -88,7 +88,14 @@ pub(super) struct DirectOptions {
     pub official_hybrid: bool,
     /// An explicit CLI/environment override; `None` selects after batch preflight.
     pub official_worker_mode: Option<super::OfficialWorkerMode>,
+    /// `--tier flash|basic|standard|advanced` (1:1 upstream tier); `None` derives
+    /// from the compatibility `--effort` alias.
+    pub tier: Option<String>,
+    /// Legacy `--effort medium|high|xhigh`; mapped medium->standard,
+    /// high/xhigh->advanced when `tier` is not set explicitly.
     pub effort: String,
+    /// `--method auto|txt|ocr`, forwarded as the upstream ocr_mode.
+    pub method: String,
     pub model_stack: String,
     pub model_stack_explicit: bool,
     pub official_python: Option<PathBuf>,
@@ -817,6 +824,16 @@ fn official_image_or_pdf(kind: DocumentKind) -> bool {
     )
 }
 
+/// Resolves the effective upstream parse tier: an explicit `--tier` wins over
+/// the `--effort` compatibility alias (medium -> standard,
+/// high/xhigh -> advanced).
+fn request_tier(options: &DirectOptions) -> &str {
+    if let Some(tier) = &options.tier {
+        return tier;
+    }
+    effort_tier(&options.effort)
+}
+
 /// Maps the CLI effort knob onto the MinerU 4.0.4 parse tier: "medium" maps to
 /// "standard"; "high"/"xhigh" map to "advanced".
 fn effort_tier(effort: &str) -> &'static str {
@@ -832,10 +849,16 @@ fn validate_official_hybrid_input(
     bytes: &[u8],
 ) -> Result<(), DirectError> {
     if kind == DocumentKind::Pdf {
-        validate_official_page_selection(kind, route, bytes)
-    } else {
-        crate::input_prepare::preflight_image(bytes, kind, route).map_err(err)
+        return validate_official_page_selection(kind, route, bytes);
     }
+    // Upstream rejects a page range for non-PDF sources (page_range_invalid);
+    // fail fast here instead of silently ignoring the selection.
+    if route.start_page != 0 || route.end_page.is_some() {
+        return Err(err(
+            "page ranges are only supported for PDF input; images use full-document parsing",
+        ));
+    }
+    crate::input_prepare::preflight_image(bytes, kind, route).map_err(err)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -894,7 +917,7 @@ async fn run_official_hybrid_documents(
     });
     let persistent_worker = if worker_mode == super::OfficialWorkerMode::Persistent {
         let session = OfficialSessionConfig::new(
-            config.model_home.clone(),
+            config.model_base_dir.clone(),
             config.config.clone(),
             config.api_key.clone(),
             config.model_name.clone(),
@@ -940,14 +963,14 @@ async fn run_official_hybrid_documents(
                 None
             };
             let request = OfficialRequest::new(
-                effort_tier(&options.effort).into(),
-                "auto".into(),
+                request_tier(options).into(),
+                options.method.clone(),
                 route.image_analysis,
                 page_range,
                 config.server_url.clone(),
                 config.api_key.clone(),
                 config.model_name.clone(),
-                config.model_home.clone(),
+                config.model_base_dir.clone(),
                 config.config.clone(),
                 options.document_limits.max_output_bytes,
                 PathBuf::new(),
@@ -1020,7 +1043,7 @@ fn validate_official_page_selection(
             }
             if route.start_page >= pages || end >= pages {
                 return Err(err(format!(
-                    "official page range {}~{} is outside PDF with {pages} page(s)",
+                    "official page range {}-{} is outside PDF with {pages} page(s)",
                     route.start_page, end
                 )));
             }
@@ -1060,7 +1083,9 @@ fn official_page_range(
         .checked_add(1)
         .ok_or_else(|| err("official page start exceeds usize"))?;
     let Some(end) = route.end_page else {
-        return Ok(Some(format!("{start}~-1")));
+        // Upstream page-range syntax rejects "~" and negative pages; an open
+        // end is expressed with the reverse-relative last page "r1".
+        return Ok(Some(format!("{start}-r1")));
     };
     let end = end
         .checked_add(1)
@@ -1068,7 +1093,7 @@ fn official_page_range(
     if start == end {
         Ok(Some(start.to_string()))
     } else {
-        Ok(Some(format!("{start}~{end}")))
+        Ok(Some(format!("{start}-{end}")))
     }
 }
 
@@ -1113,7 +1138,7 @@ fn config_inputs(
 struct OfficialHybridConfig {
     #[allow(dead_code)]
     python: Option<PathBuf>,
-    model_home: Option<PathBuf>,
+    model_base_dir: Option<PathBuf>,
     config: Option<PathBuf>,
     server_url: Option<String>,
     api_key: Option<String>,
@@ -1158,17 +1183,14 @@ fn resolve_official_hybrid(
             "model_stack was removed in MinerU 4.0.4; configure model.small_backend / model.vlm.engine via MINERU_CONFIG",
         ));
     }
-    if official_text(env, "MINERU_MODEL_STACK")?.is_some() {
-        return Err(err(
-            "MINERU_MODEL_STACK was removed in MinerU 4.0.4; configure model.small_backend / model.vlm.engine via MINERU_CONFIG",
-        ));
-    }
+    // Removed environment knobs (MINERU_MODEL_STACK, MINERU_OFFICIAL_WORKER_MODE)
+    // fail closed in command::run_core for every lane, before this point.
     let python = official_path(
         options.official_python.as_deref(),
         official_text(env, "MINERU_OFFICIAL_PYTHON")?,
         "official Python executable",
     )?;
-    let model_home = official_path(
+    let model_base_dir = official_path(
         options.official_model_dir.as_deref(),
         official_text(env, "MINERU_MODEL_BASE_DIR")?,
         "official model directory",
@@ -1185,18 +1207,12 @@ fn resolve_official_hybrid(
             .or(official_text(env, "MINERU_VL_SERVER")?),
         "--url",
     )?;
-    if matches!(options.effort.as_str(), "high" | "xhigh") {
-        super::validate_hybrid_server_url(server_url.as_deref()).map_err(err)?;
-    } else if server_url.is_some() {
-        // Tier "standard" (medium effort) is local-only: a VLM URL would be
-        // forwarded inconsistently across worker modes, so reject it up front.
-        return Err(
-            "tier standard (effort medium) is local-only; unset --url or MINERU_VL_SERVER".into(),
-        );
-    }
+    // Upstream honours a remote VLM at any tier (tier.py skips local VLM
+    // modules for standard+server_url); only the URL syntax is validated here.
+    super::validate_hybrid_server_url(server_url.as_deref()).map_err(err)?;
     Ok(OfficialHybridConfig {
         python,
-        model_home,
+        model_base_dir,
         config,
         server_url,
         api_key: clean(
@@ -1786,7 +1802,9 @@ mod tests {
             api_key: None,
             official_hybrid: false,
             official_worker_mode: None,
+            tier: None,
             effort: "medium".into(),
+            method: "auto".into(),
             model_stack: "auto".into(),
             model_stack_explicit: false,
             official_python: None,
@@ -1900,7 +1918,7 @@ mod tests {
             &route,
             OfficialHybridConfig {
                 python: Some(python),
-                model_home: None,
+                model_base_dir: None,
                 config: None,
                 server_url: None,
                 api_key: None,
@@ -1942,7 +1960,7 @@ mod tests {
             &OfficialPdfOptions::default(),
             OfficialHybridConfig {
                 python: Some("/definitely/missing/python".into()),
-                model_home: None,
+                model_base_dir: None,
                 config: None,
                 server_url: None,
                 api_key: None,
@@ -1974,14 +1992,90 @@ mod tests {
         route.start_page = 2;
         assert_eq!(
             official_page_range(DocumentKind::Pdf, &route).unwrap(),
-            Some("3~-1".into())
+            Some("3-r1".into())
         );
 
         route.end_page = Some(4);
         assert_eq!(
             official_page_range(DocumentKind::Pdf, &route).unwrap(),
-            Some("3~5".into())
+            Some("3-5".into())
         );
+    }
+
+    #[test]
+    fn official_page_range_single_page_has_no_dash() {
+        let route = OfficialPdfOptions {
+            start_page: 4,
+            end_page: Some(4),
+            ..OfficialPdfOptions::default()
+        };
+        assert_eq!(
+            official_page_range(DocumentKind::Pdf, &route).unwrap(),
+            Some("5".into())
+        );
+    }
+
+    /// Pins the emitted grammar to upstream's `_SEGMENT_PATTERN` (docvortex
+    /// `document/page_range.py`) plus its documented rejection of "~" and
+    /// negative pages, so the guard runs even without the upstream wheel.
+    #[test]
+    fn page_range_grammar_matches_upstream_segment_pattern() {
+        let segment = regex::Regex::new(r"^(r?[1-9][0-9]*)(?:\s*-\s*(r?[1-9][0-9]*))?$").unwrap();
+        let accepts =
+            |value: &str| !value.is_empty() && value.split(',').all(|part| segment.is_match(part));
+
+        let mut route = OfficialPdfOptions {
+            start_page: 2,
+            ..OfficialPdfOptions::default()
+        };
+        let open = official_page_range(DocumentKind::Pdf, &route)
+            .unwrap()
+            .unwrap();
+        assert!(accepts(&open), "{open}");
+
+        route.end_page = Some(4);
+        let closed = official_page_range(DocumentKind::Pdf, &route)
+            .unwrap()
+            .unwrap();
+        assert!(accepts(&closed), "{closed}");
+
+        route.end_page = Some(2);
+        let single = official_page_range(DocumentKind::Pdf, &route)
+            .unwrap()
+            .unwrap();
+        assert!(accepts(&single), "{single}");
+
+        // The retired 3.4.x forms must never come back.
+        assert!(!accepts("3~-1"));
+        assert!(!accepts("3~5"));
+    }
+
+    /// Our emitted strings must parse under the real upstream page-range
+    /// grammar; this assertion only runs when upstream mineru is importable,
+    /// so the exact-string tests above remain the always-on guard.
+    #[test]
+    fn official_page_ranges_parse_under_upstream_mineru_when_present() {
+        let probe = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import sys; sys.path.insert(0, ''); from mineru.parser.page_range import normalize_page_range_input",
+            ])
+            .output();
+        let Ok(probe) = probe else { return };
+        if !probe.status.success() {
+            return;
+        }
+        for range in ["3-r1", "3-5", "5"] {
+            let status = std::process::Command::new("python3")
+                .args([
+                    "-c",
+                    "import sys; from mineru.parser.page_range import normalize_page_range_input; normalize_page_range_input(sys.argv[1])",
+                    range,
+                ])
+                .status()
+                .expect("upstream mineru check");
+            assert!(status.success(), "upstream rejected page range {range:?}");
+        }
     }
 
     #[tokio::test]
@@ -2020,8 +2114,10 @@ mod tests {
         document.save_to(&mut bytes).unwrap();
         std::fs::write(&pdf, bytes).unwrap();
 
-        let mut route = OfficialPdfOptions::default();
-        route.max_pages = 1;
+        let route = OfficialPdfOptions {
+            max_pages: 1,
+            ..OfficialPdfOptions::default()
+        };
         let candidates = vec![(1, pdf, DocumentKind::Pdf, "multi".into())];
         let mut failures = Vec::new();
         let error = run_official_hybrid_documents(
@@ -2029,7 +2125,7 @@ mod tests {
             &route,
             OfficialHybridConfig {
                 python: Some("/definitely/missing/python".into()),
-                model_home: None,
+                model_base_dir: None,
                 config: None,
                 server_url: None,
                 api_key: None,
@@ -2063,19 +2159,9 @@ mod tests {
             error.contains("model_stack was removed in MinerU 4.0.4"),
             "{error}"
         );
-
-        let env = super::super::Environment::from_values(HashMap::from([(
-            "MINERU_MODEL_STACK",
-            OsString::from("full"),
-        )]));
-        let options = test_options();
-        let error = resolve_official_hybrid(&options, &env)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("MINERU_MODEL_STACK was removed in MinerU 4.0.4"),
-            "{error}"
-        );
+        // The removed environment knobs (MINERU_MODEL_STACK,
+        // MINERU_OFFICIAL_WORKER_MODE) fail closed in command::run_core for
+        // every lane; see the CLI tests for that behavior.
     }
 
     #[test]
@@ -2578,7 +2664,9 @@ mod tests {
                 api_key: None,
                 official_hybrid: false,
                 official_worker_mode: None,
+                tier: None,
                 effort: "medium".into(),
+                method: "auto".into(),
                 model_stack: "auto".into(),
                 model_stack_explicit: false,
                 official_python: None,
@@ -2754,7 +2842,9 @@ mod tests {
                 api_key: None,
                 official_hybrid: false,
                 official_worker_mode: None,
+                tier: None,
                 effort: "medium".into(),
+                method: "auto".into(),
                 model_stack: "auto".into(),
                 model_stack_explicit: false,
                 official_python: None,

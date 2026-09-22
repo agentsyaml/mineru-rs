@@ -19,8 +19,9 @@ __all__ = [
 ]
 
 Method = Literal["auto", "txt", "ocr"]
-Backend = Literal["vlm-http-client", "hybrid-http-client"]
-Effort = Literal["medium", "high"]
+Backend = Literal["vlm-http-client", "hybrid-http-client", "local"]
+Effort = Literal["medium", "high", "xhigh"]
+Tier = Literal["flash", "basic", "standard", "advanced"]
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ async def run(
     method: Method = "auto",
     backend: Backend = "vlm-http-client",
     effort: Effort = "medium",
+    tier: Tier | None = None,
     lang: str = "ch",
     url: str | None = None,
     start: int = 0,
@@ -92,6 +94,9 @@ async def run(
         image_analysis,
         client_side_output_generation,
         _helper_path(),
+        # Keyword-only and omitted when unset so a prebuilt native module from an
+        # older ABI keeps working for every other option.
+        **({} if tier is None else {"tier": tier}),
     )
     return RunReport(list(warnings))
 
@@ -131,6 +136,7 @@ async def parse(
     method: Method = "auto",
     backend: Backend = "vlm-http-client",
     effort: Effort = "medium",
+    tier: Tier | None = None,
     lang: str = "ch",
     url: str | None = None,
     start: int = 0,
@@ -157,6 +163,7 @@ async def parse(
             image_analysis,
             client_side_output_generation,
             _helper_path(),
+            **({} if tier is None else {"tier": tier}),
         )
         # The CLI writes `{file_stem}/vlm/{file_stem}.md`; derive the stem the same way
         # (strip the extension from the basename) so the exact-match branch is the live path.

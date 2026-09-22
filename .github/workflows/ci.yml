@@ -75,6 +75,10 @@ jobs:
           test "$audit_status" -eq 1
       - name: Check formatting
         run: cargo +1.89.0 fmt --all -- --check
+      - name: Test official worker Python shim
+        # The shell fakes in tests/mineru_cli.rs keep Rust<->shim frames honest;
+        # this suite covers the shim's own validators and env handling.
+        run: python3 -m unittest discover -s python -p 'test_*.py'
       - name: Test root package
         # Explicit feature set, not --all-features: the union of every optional
         # backend is not a single supported runtime configuration, so CI pins the

@@ -1,9 +1,11 @@
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -182,6 +184,165 @@ class DiagnosticTests(unittest.TestCase):
         self.assertLessEqual(len(diagnostic.encode()), worker.DIAGNOSTIC_CAP)
         self.assertLessEqual(len(stderr.getvalue().encode()), worker.DIAGNOSTIC_CAP)
         self.assertLessEqual(len(output.buffer.getvalue()), worker.PROTOCOL_CAP)
+
+
+class RequestValidationTests(unittest.TestCase):
+    def _request(self, **overrides: object) -> dict[str, object]:
+        request: dict[str, object] = {
+            "protocol": worker.PROTOCOL,
+            "request_id": "validate-test",
+            "tier": "standard",
+            "ocr_mode": "auto",
+            "image_analysis": False,
+            "input_path": "input.pdf",
+            "bundle_path": "bundle",
+            "max_bundle_bytes": 1024,
+            "bundle_name": worker.BUNDLE_NAME,
+        }
+        request.update(overrides)
+        return request
+
+    def test_tier_and_ocr_mode_domains_match_upstream(self) -> None:
+        for tier in ("flash", "basic", "standard", "advanced"):
+            protocol._validate_document_request(self._request(tier=tier))
+        with self.assertRaises(ValueError):
+            protocol._validate_document_request(self._request(tier="premium"))
+        for ocr_mode in ("auto", "txt", "ocr"):
+            protocol._validate_document_request(self._request(ocr_mode=ocr_mode))
+        with self.assertRaises(ValueError):
+            protocol._validate_document_request(self._request(ocr_mode="fast"))
+
+    def test_model_base_dir_field_replaces_model_home(self) -> None:
+        protocol._validate_document_request(self._request(model_base_dir="/models"))
+        with self.assertRaises(ValueError):
+            protocol._validate_document_request(self._request(model_home="/models"))
+
+    def test_env_injection_uses_mineru_model_base_dir(self) -> None:
+        # The model root is Config.model.base_dir, mapped by upstream
+        # MINERU_MODEL_BASE_DIR; MINERU_HOME is a home directory, not this path.
+        with mock.patch.dict(os.environ, {"MINERU_HOME": "/stale/home"}, clear=False):
+            protocol._document_env(
+                self._request(model_base_dir="/models/root", config="/cfg.yaml")
+            )
+            self.assertEqual(os.environ.get("MINERU_MODEL_BASE_DIR"), "/models/root")
+            self.assertEqual(os.environ.get("MINERU_CONFIG"), "/cfg.yaml")
+            self.assertEqual(os.environ.get("MINERU_HOME"), "/stale/home")  # untouched
+            protocol._document_env(self._request())
+            self.assertNotIn("MINERU_MODEL_BASE_DIR", os.environ)
+            self.assertNotIn("MINERU_CONFIG", os.environ)
+
+    def test_parse_kwargs_preserve_loaded_vlm_config(self) -> None:
+        loaded = {
+            "server_url": "",
+            "api_key": "file-key",
+            "model": "file-model",
+            "engine": "vllm",
+            "http_timeout": 333,
+            "max_concurrency": 7,
+        }
+
+        class FakeVlm:
+            def model_dump(self) -> dict[str, object]:
+                return dict(loaded)
+
+        class FakeVlmConfig:
+            server_url: str
+            api_key: str
+            model: str
+            engine: str
+            http_timeout: int
+            max_concurrency: int
+
+            def __init__(self, **kwargs: object) -> None:
+                merged = {**loaded, **kwargs}
+                # Upstream normalizes a trailing /v1 off server_url.
+                if str(merged["server_url"]).endswith("/v1"):
+                    merged["server_url"] = str(merged["server_url"])[:-3] + "/"
+                self.__dict__.update(merged)
+
+        fake_config = mock.Mock()
+        fake_config.model.vlm = FakeVlm()
+        fake_module = mock.Mock(VlmConfig=FakeVlmConfig, config=fake_config)
+        request = self._request(vlm_server_url="https://vlm.example.com/v1")
+        with mock.patch.dict(sys.modules, {"mineru.config": fake_module}):
+            kwargs: dict[str, object] = protocol._document_parse_kwargs(request)
+        vlm = cast(FakeVlmConfig, kwargs["vlm_config"])
+        # Upstream validation runs on the merged values.
+        self.assertEqual(vlm.server_url, "https://vlm.example.com/")
+        self.assertEqual(vlm.api_key, "file-key")
+        self.assertEqual(vlm.model, "file-model")
+        self.assertEqual(vlm.engine, "vllm")
+        self.assertEqual(vlm.http_timeout, 333)
+        self.assertEqual(vlm.max_concurrency, 7)
+
+
+class PersistentFrameTests(unittest.TestCase):
+    def _startup(self, **overrides: object) -> dict[str, object]:
+        startup: dict[str, object] = {
+            "type": "start",
+            "protocol": protocol.PERSISTENT_PROTOCOL,
+            "package_version": protocol.PACKAGE_VERSION,
+            "schema_version": protocol.SCHEMA_VERSION,
+            "model_base_dir": "/models",
+            "config": None,
+            "vlm_api_key": None,
+            "vlm_model": None,
+            "capabilities": protocol.PERSISTENT_CAPABILITIES,
+        }
+        startup.update(overrides)
+        return startup
+
+    def _request(self, **overrides: object) -> dict[str, object]:
+        request: dict[str, object] = {
+            "type": "request",
+            "protocol": protocol.PERSISTENT_PROTOCOL,
+            "request_id": "persistent-1",
+            "sequence": 1,
+            "package_version": protocol.PACKAGE_VERSION,
+            "schema_version": protocol.SCHEMA_VERSION,
+            "bundle_name": protocol.BUNDLE_NAME,
+            "input_path": "input.pdf",
+            "bundle_path": "bundle",
+            "max_bundle_bytes": 1024,
+            "tier": "flash",
+            "ocr_mode": "txt",
+            "image_analysis": False,
+        }
+        request.update(overrides)
+        return request
+
+    def test_startup_frame_uses_model_base_dir(self) -> None:
+        protocol._persistent_start(self._startup())
+        legacy = self._startup()
+        del legacy["model_base_dir"]
+        legacy["model_home"] = None
+        with self.assertRaises(ValueError):
+            protocol._persistent_start(legacy)
+
+    def test_per_request_model_base_dir_and_config_must_match_startup(self) -> None:
+        startup = self._startup()
+        recent = protocol._PersistentRecentRequests()
+        protocol._persistent_request(
+            self._request(model_base_dir="/models"), startup, 1, recent
+        )
+        recent = protocol._PersistentRecentRequests()
+        with self.assertRaises(ValueError):
+            protocol._persistent_request(
+                self._request(model_base_dir="/other"), startup, 1, recent
+            )
+        recent = protocol._PersistentRecentRequests()
+        with self.assertRaises(ValueError):
+            protocol._persistent_request(
+                self._request(config="/other.yaml"), startup, 1, recent
+            )
+        recent = protocol._PersistentRecentRequests()
+        # Omitting a field the startup frame set counts as a difference.
+        with self.assertRaises(ValueError):
+            protocol._persistent_request(self._request(), startup, 1, recent)
+        recent = protocol._PersistentRecentRequests()
+        protocol._persistent_request(
+            self._request(model_base_dir="/models", config=None), startup, 1, recent
+        )
 
 
 if __name__ == "__main__":

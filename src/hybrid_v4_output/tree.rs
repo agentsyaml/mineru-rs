@@ -297,21 +297,19 @@ fn validate_json(name: &str, value: &Value) -> Result<(), String> {
                 .get("pages")
                 .and_then(Value::as_array)
                 .ok_or_else(|| "hybrid-v4 middle_json.json has no pages".to_owned())?;
-            if pages.is_empty() || pages.iter().any(Value::is_null) {
-                return Err("hybrid-v4 bundle contains empty pages".into());
+            // Upstream can legitimately emit a document with zero retained
+            // pages, so only reject malformed entries, not an empty list.
+            if pages.iter().any(Value::is_null) {
+                return Err("hybrid-v4 bundle contains null pages".into());
             }
         }
-        "model_output.json" if value.as_array().is_some_and(Vec::is_empty) => {
-            return Err("hybrid-v4 model output has empty pages".into());
+        // Both remaining documents are objects upstream; an empty array or any
+        // other shape is malformed. Their `pages` may legitimately be empty.
+        "model_output.json" if !value.is_object() => {
+            return Err("hybrid-v4 model output is not an object".into());
         }
-        "structured_content.json"
-            if value.as_array().is_some_and(Vec::is_empty)
-                || value
-                    .get("pages")
-                    .and_then(Value::as_array)
-                    .is_some_and(Vec::is_empty) =>
-        {
-            return Err("hybrid-v4 structured content has empty pages".into());
+        "structured_content.json" if !value.is_object() => {
+            return Err("hybrid-v4 structured content is not an object".into());
         }
         _ => {}
     }

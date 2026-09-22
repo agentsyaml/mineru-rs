@@ -34,7 +34,7 @@ pub(crate) const HYBRID_HTTP_CLIENT_UNSUPPORTED: &str =
     "backend=hybrid-http-client is direct-only; API mode does not support Hybrid";
 const OFFICIAL_WORKER_MODE_DIRECT_ONLY: &str =
     "--official-worker-mode applies only to direct backend=hybrid-http-client";
-const ENV_NAMES: [&str; 98] = [
+const ENV_NAMES: [&str; 99] = [
     "MINERU_LOG_LEVEL",
     "MINERU_PROCESSING_WINDOW_SIZE",
     "MINERU_OFFICIAL_PAGE_CONCURRENCY",
@@ -91,6 +91,7 @@ const ENV_NAMES: [&str; 98] = [
     "MINERU_VL_MODEL_NAME",
     "MINERU_VL_API_KEY",
     "MINERU_MODEL_STACK",
+    "MINERU_OFFICIAL_WORKER_MODE",
     "MINERU_OFFICIAL_PYTHON",
     "MINERU_MODEL_BASE_DIR",
     "MINERU_CONFIG",
@@ -186,6 +187,9 @@ pub struct RunOptions {
     pub api_key: Option<String>,
     pub method: String,
     pub backend: String,
+    /// Explicit upstream tier (`--tier flash|basic|standard|advanced`); `None`
+    /// derives from the `--effort` compatibility alias.
+    pub tier: Option<String>,
     pub effort: String,
     pub model_stack: String,
     /// Whether `model_stack` was explicitly supplied by the caller. The official MinerU 4.0.4
@@ -233,6 +237,7 @@ impl RunOptions {
             api_key: None,
             method: "auto".into(),
             backend: "vlm-http-client".into(),
+            tier: None,
             effort: "medium".into(),
             model_stack: "auto".into(),
             model_stack_explicit: false,
@@ -474,7 +479,32 @@ async fn run_core(
     if options.api_url.is_some() && options.backend == "hybrid-http-client" {
         return Err(RunError::new(HYBRID_HTTP_CLIENT_UNSUPPORTED));
     }
+    // Removed upstream knobs fail closed on every lane, so a leftover operator
+    // environment cannot silently change behavior off the direct-Hybrid path.
+    if context.environment.string("MINERU_MODEL_STACK").is_some() {
+        return Err(RunError::new(
+            "MINERU_MODEL_STACK was removed in MinerU 4.0.4; configure model.small_backend / model.vlm.engine via MINERU_CONFIG",
+        ));
+    }
+    if context
+        .environment
+        .string("MINERU_OFFICIAL_WORKER_MODE")
+        .is_some()
+    {
+        return Err(RunError::new(
+            "MINERU_OFFICIAL_WORKER_MODE was removed in MinerU 4.0.4; use --official-worker-mode",
+        ));
+    }
     let direct_hybrid = options.api_url.is_none() && options.backend == "hybrid-http-client";
+    // --tier is the upstream 4.0.4 vocabulary for the official lane only; every
+    // other lane would otherwise accept and ignore it.
+    if let Some(tier) = options.tier.as_deref()
+        && !direct_hybrid
+    {
+        return Err(RunError::new(format!(
+            "--tier {tier} applies only to direct backend=hybrid-http-client"
+        )));
+    }
     let official_worker_mode =
         resolve_official_worker_mode(&options, direct_hybrid).map_err(RunError::new)?;
     if options.api_url.is_none() && options.backend == "hybrid-http-client" {
@@ -581,6 +611,15 @@ async fn run_core(
         )));
     }
     if !matches!(
+        options.tier.as_deref(),
+        None | Some("flash") | Some("basic") | Some("standard") | Some("advanced")
+    ) {
+        return Err(RunError::new(format!(
+            "unsupported tier: {}",
+            options.tier.as_deref().unwrap_or_default()
+        )));
+    }
+    if !matches!(
         options.backend.as_str(),
         "vlm-http-client" | "hybrid-http-client" | "local"
     ) {
@@ -614,24 +653,13 @@ async fn run_core(
                 "official MinerU 4.0.4 no longer supports a language parameter",
             ));
         }
-        // MinerU 4.0.4 has no parse method parameter; only the default is accepted.
-        if options.method != "auto" {
-            return Err(RunError::new(
-                "official MinerU 4.0.4 no longer supports a method parameter",
-            ));
-        }
         if !resolved.route.formula_enable || !resolved.route.table_enable {
             return Err(RunError::new(
                 "direct Hybrid does not support formula=false or table=false",
             ));
         }
-        if matches!(options.effort.as_str(), "high" | "xhigh") {
-            let url = options
-                .url
-                .clone()
-                .or_else(|| context.environment.string("MINERU_VL_SERVER"));
-            validate_hybrid_server_url(url.as_deref()).map_err(RunError::new)?;
-        }
+        // A remote VLM URL is valid at any tier; --url syntax is validated in
+        // direct::resolve_official_hybrid (mirroring upstream VlmConfig).
     }
     if options.api_url.is_none()
         && options.end.is_some_and(|end| end < options.start)
@@ -671,7 +699,9 @@ async fn run_core(
                 api_key: options.api_key.clone(),
                 official_hybrid: options.backend == "hybrid-http-client",
                 official_worker_mode,
+                tier: options.tier.clone(),
                 effort: options.effort.clone(),
+                method: options.method.clone(),
                 model_stack: options.model_stack.clone(),
                 model_stack_explicit: options.model_stack_explicit,
                 official_python: options.official_python.clone(),
@@ -1311,17 +1341,45 @@ fn resolve_official_worker_mode(
     Ok(None)
 }
 
+/// Validates a supplied Hybrid VLM URL against the same rules upstream
+/// `VlmConfig._normalize_server_url` enforces (scheme, host, no credentials,
+/// query, fragment, whitespace, or invalid port). The trailing `/v1`
+/// normalization itself stays upstream's job and is deliberately not duplicated.
+/// A missing URL is valid: upstream supports a remote VLM at any tier, and the
+/// local engine is used when none is supplied.
 fn validate_hybrid_server_url(value: Option<&str>) -> Result<(), String> {
-    let value = value.ok_or_else(|| {
-        "Hybrid effort high/xhigh requires an explicit HTTP(S) URL via --url or MINERU_VL_SERVER"
-            .to_owned()
-    })?;
-    let parsed = value
-        .trim()
-        .parse::<url::Url>()
-        .map_err(|_| "Hybrid VLM URL must be an explicit HTTP(S) URL".to_owned())?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err("Hybrid VLM URL must be an explicit HTTP(S) URL".into());
+    let Some(value) = value else {
+        return Ok(());
+    };
+    const INVALID: &str =
+        "Hybrid VLM URL must be an HTTP(S) service URL without credentials, query or fragment";
+    if value.chars().any(char::is_whitespace) {
+        return Err(INVALID.into());
+    }
+    let parsed = value.parse::<url::Url>().map_err(|_| INVALID.to_owned())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(INVALID.into());
+    }
+    // Parsing the port rejects out-of-range values exactly like urlsplit's
+    // `.port` accessor does upstream (url::Url::parse fails on invalid ports).
+    let _ = parsed.port();
+    // Upstream requires the username/password to be absent, so an empty
+    // userinfo ("http://@host/") is invalid there even though the url crate
+    // reports an empty rather than missing username.
+    let has_empty_userinfo = value
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split(['/', '?', '#']).next())
+        .is_some_and(|authority| authority.contains('@'));
+    if parsed.host_str().is_none()
+        || has_empty_userinfo
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        // Upstream tests query/fragment for falsiness, so a bare "?" or "#"
+        // normalizes away instead of being rejected.
+        || parsed.query().is_some_and(|query| !query.is_empty())
+        || parsed.fragment().is_some_and(|fragment| !fragment.is_empty())
+    {
+        return Err(INVALID.into());
     }
     Ok(())
 }
@@ -1370,6 +1428,12 @@ pub struct Cli {
     backend: String,
     #[arg(long, value_parser = ["medium", "high", "xhigh"], default_value = "medium")]
     effort: String,
+    #[arg(
+        long,
+        value_parser = ["flash", "basic", "standard", "advanced"],
+        help = "Upstream parse tier; overrides the --effort compatibility alias"
+    )]
+    tier: Option<String>,
     #[arg(
         long,
         value_parser = ["auto", "light", "full"],
@@ -1604,6 +1668,7 @@ impl From<Cli> for RunOptions {
             api_key: cli.api_key,
             method: cli.method,
             backend: cli.backend,
+            tier: cli.tier,
             effort: cli.effort,
             model_stack: cli.model_stack.unwrap_or_else(|| "auto".into()),
             model_stack_explicit,
