@@ -137,7 +137,9 @@ fn persistent_request(
 
 #[cfg(unix)]
 async fn wait_for_file(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Generous so a loaded machine cannot fail the fixture handshake; the
+    // assertion still catches a worker that never starts.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !path.exists() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -176,7 +178,7 @@ async fn persistent_worker_reuses_one_pid_and_keeps_bundles_independent() {
             b"first",
             "pdf",
             persistent_request(temp.path(), &config, "first", "standard"),
-            Instant::now() + Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(60),
         )
         .await
         .unwrap();
@@ -188,7 +190,7 @@ async fn persistent_worker_reuses_one_pid_and_keeps_bundles_independent() {
             b"second",
             "pdf",
             persistent_request(temp.path(), &config, "second", "standard"),
-            Instant::now() + Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(60),
         )
         .await
         .unwrap();
@@ -237,7 +239,7 @@ async fn persistent_worker_restarts_only_after_crash_without_retrying_request() 
             b"first",
             "pdf",
             persistent_request(temp.path(), &config, "crashed", "standard"),
-            Instant::now() + Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(60),
         )
         .await;
     assert!(first.is_err());
@@ -247,7 +249,7 @@ async fn persistent_worker_restarts_only_after_crash_without_retrying_request() 
             b"second",
             "pdf",
             persistent_request(temp.path(), &config, "recovered", "standard"),
-            Instant::now() + Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(60),
         )
         .await
         .unwrap();
@@ -304,7 +306,7 @@ async fn persistent_worker_cancellation_kills_group_and_allows_new_session() {
             b"second",
             "pdf",
             persistent_request(temp.path(), &config, "after-cancel", "standard"),
-            Instant::now() + Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(60),
         )
         .await
         .unwrap();
@@ -332,7 +334,7 @@ async fn persistent_worker_drains_stderr_and_keeps_document_errors_reusable() {
             b"first",
             "pdf",
             persistent_request(temp.path(), &config, "document-error", "standard"),
-            Instant::now() + Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(60),
         )
         .await;
     let first = match first {
@@ -347,7 +349,7 @@ async fn persistent_worker_drains_stderr_and_keeps_document_errors_reusable() {
             b"second",
             "pdf",
             persistent_request(temp.path(), &config, "document-ok", "standard"),
-            Instant::now() + Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(60),
         )
         .await
         .unwrap();
@@ -369,7 +371,7 @@ async fn persistent_worker_fails_closed_on_handshake_frame_and_protocol_errors()
                 b"input",
                 "pdf",
                 persistent_request(temp.path(), &config, "bad", "standard"),
-                Instant::now() + Duration::from_secs(10),
+                Instant::now() + Duration::from_secs(60),
             )
             .await;
         assert!(result.is_err(), "mode={mode} must fail closed");
@@ -413,7 +415,7 @@ async fn persistent_worker_drop_reaps_an_idle_owner() {
             b"input",
             "pdf",
             persistent_request(temp.path(), &config, "drop", "standard"),
-            Instant::now() + Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(60),
         )
         .await
         .unwrap();

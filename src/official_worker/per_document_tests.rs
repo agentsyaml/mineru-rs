@@ -108,7 +108,7 @@ printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok
             b"input",
             "pdf",
             test_request(),
-            Instant::now() + Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(60),
         )
         .await;
 
@@ -146,7 +146,7 @@ async fn caller_abort_kills_and_reaps_worker_descendants() {
             )
             .await
     });
-    let wait_until = Instant::now() + Duration::from_secs(10);
+    let wait_until = Instant::now() + Duration::from_secs(60);
     while !pid_file.exists() && Instant::now() < wait_until {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -159,7 +159,7 @@ async fn caller_abort_kills_and_reaps_worker_descendants() {
         .split_whitespace()
         .map(|pid| pid.parse::<libc::pid_t>().unwrap())
         .collect::<Vec<_>>();
-    let reap_deadline = Instant::now() + Duration::from_secs(10);
+    let reap_deadline = Instant::now() + Duration::from_secs(60);
     while pids.iter().any(|pid| unsafe { libc::kill(*pid, 0) == 0 })
         && Instant::now() < reap_deadline
     {

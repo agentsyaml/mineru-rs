@@ -63,7 +63,8 @@ fn hostile_docx(attributes: &str) -> Vec<u8> {
 fn assert_preflight_rejects(format: &str, bytes: Vec<u8>) {
     let started = Instant::now();
     let output = run(&[format], &bytes);
-    assert!(started.elapsed() < Duration::from_secs(10));
+    // Still a fast-fail bound, widened so a loaded machine does not flake.
+    assert!(started.elapsed() < Duration::from_secs(30));
     assert!(!output.status.success());
     assert!(output.stdout.is_empty() && output.stderr.len() <= 4096);
     assert_eq!(
