@@ -1,24 +1,22 @@
 # Rich official SDK
 
-This additive SDK exposes the pinned official MinerU parser and owned results;
-it does not replace the existing `run`/`parse` APIs. Those legacy APIs keep
-their existing behavior and `parse` still returns Markdown plus warnings. The
-rich API invokes the external MinerU Python worker; it is not Rust-native
-inference or a change to the existing CLI/application interfaces.
+The rich SDK parses documents with the pinned official MinerU worker and returns
+an owned result with JSON, Markdown, and assets. The existing `run`/`parse`
+interfaces remain unchanged (`parse` returns Markdown and warnings).
 
-The current checkout version is `0.3.1`; this version-only change does not
-publish a crate, Python wheel, or npm package. The previously published `0.3.0`
-packages are not guaranteed to include this new API.
-Build the Rust library and Python wheel from this checkout. Rebuild the Node
-native binding from this checkout and regenerate its loader/declarations before
-using the Node surface below.
+Build the bindings from this checkout to use the rich API. For Python, build
+and install the wheel with the commands in the
+[release guide](releasing.md#before-triggering-a-release). For Node, run
+`npm ci` and `npm run build` in `bindings/node`; `index.js` is maintained, so
+restore unintended generated changes and confirm `index.d.ts` is unchanged.
+Registry and release availability is covered by the [release guide](releasing.md#current-release-boundary).
 
 ## Runtime and compatibility
 
-The official worker requires separately installed `mineru==4.0.10` and
-`docvortex==0.5.4` (plus their upstream dependencies). Its Python interpreter
-must be Python 3.10 through 3.14; the Python facade itself supports Python 3.9 and
-newer. Python and model assets are not bundled. Supply trusted absolute Python,
+The worker requires `mineru==4.0.10` and `docvortex==0.5.4` with their upstream
+dependencies. Use Python 3.10–3.14: the worker uses PEP 604 union annotations
+and upstream MinerU requires `>=3.10,<3.15`. The Python facade itself supports
+Python 3.9+. Python and model assets are not bundled. Supply trusted absolute Python,
 config, and model-directory paths through `OfficialRuntime` (Rust),
 `OfficialRuntime` (Python), or `OfficialRuntimeOptions` (Node). These paths are
 runtime configuration, not result data; Rust `Debug` and Python `repr` hide
@@ -26,9 +24,8 @@ them. Rust/Python representations redact VLM credentials. Node options are
 ordinary caller-owned JavaScript objects, so avoid logging them. Parsed VLM
 credentials are not retained in rich result data.
 
-The legacy VLM path is unchanged: MinerU 3.4.5 remains separate from the rich
-SDK's external MinerU 4.0.10 worker.
-The rich SDK does not make the 3.4.5 `run`/`parse` API return a rich result.
+The rich SDK's 4.0.10 worker is separate from the legacy 3.4.5 `run`/`parse`
+path.
 
 ## Parse inputs and options
 
@@ -79,24 +76,27 @@ use mineru::official::{
     OfficialRuntime, OfficialTier,
 };
 
-let runtime = OfficialRuntime::new().with_python("/trusted/venv/bin/python".into());
-let parser = OfficialParser::new(runtime)?;
-let input = OfficialInput::bytes("table.csv", b"name,value\na,1\n".to_vec());
-let options = OfficialParseOptions::new().with_tier(OfficialTier::Flash);
-let result = parser.parse_rich(input, options).await?;
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = OfficialRuntime::new().with_python("/trusted/venv/bin/python".into());
+    let parser = OfficialParser::new(runtime)?;
+    let input = OfficialInput::bytes("table.csv", b"name,value\na,1\n".to_vec());
+    let options = OfficialParseOptions::new().with_tier(OfficialTier::Flash);
+    let result = parser.parse_rich(input, options).await?;
 
-let rows = parser.parse_batch_rich(vec![
-    OfficialBatchItem::new(OfficialInput::path("first.pdf")),
-    OfficialBatchItem::new(OfficialInput::path("second.pdf")),
-]).await?;
-for row in rows {
-    match row.result {
-        Ok(result) => println!("{}: {}", row.index, result.markdown()),
-        Err(error) => eprintln!("{}: {error}", row.index),
+    let rows = parser.parse_batch_rich(vec![
+        OfficialBatchItem::new(OfficialInput::path("first.pdf")),
+        OfficialBatchItem::new(OfficialInput::path("second.pdf")),
+    ]).await?;
+    for row in rows {
+        match row.result {
+            Ok(result) => println!("{}: {}", row.index, result.markdown()),
+            Err(error) => eprintln!("{}: {error}", row.index),
+        }
     }
+    result.save("out", "table")?;
+    parser.shutdown().await?;
+    Ok(())
 }
-result.save("out", "table")?;
-parser.shutdown().await?;
 ```
 
 ## Python
@@ -189,7 +189,4 @@ separate 1 GiB cap applies to the worker bundle on disk; it is not a promise of
 unlimited scratch or output storage. Per-item batch failures do not discard
 successful sibling results.
 
-The new binding API is available from source-built native artifacts only until
-the corresponding Python wheel and npm package are rebuilt and released. The
-existing published `0.3.0` packages should not be assumed to export it. This
-guide documents SDK interfaces only.
+This guide covers SDK interfaces; publication availability is described above.

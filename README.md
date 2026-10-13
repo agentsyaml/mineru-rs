@@ -2,105 +2,35 @@
 
 [中文](README.zh-CN.md) | English
 
-Parse PDF, image, and Office documents into clean Markdown with MinerU: a
-Rust client library, command-line tools, and a local API server. PDF
-rendering is pure Rust and needs no native PDF runtime such as PDFium.
+Parse PDF, image, and Office documents into Markdown with a Rust library, CLI,
+and HTTP API server. PDF rendering is implemented in Rust. The legacy CLI/API
+and Python/Node `run`/`parse` paths use a remote MinerU-compatible VLM
+(MinerU 3.4.5 protocol baseline); the richer official SDK uses a separate,
+user-prepared MinerU 4.0.10 / DocVortex 0.5.4 Python worker.
 
-The MinerU VLM model can run in two ways:
+Choose a route:
 
-- **Remote** — point the tools at an OpenAI-compatible MinerU VLM service and
-  parse documents without running a model on your own machine.
-- **External provider (optional)** — point the tools at a separately prepared
-  OpenAI-compatible provider endpoint; see [Docker](#docker).
-  This is an unvalidated provider example, not a claim about MinerU 4.0.10
-  multimodal or model compatibility.
-  This is separate from CLI `backend=local`, which uses the bundled Rust
-  `mineru-office-convert` helper for isolated AnyDoc native Markdown extraction
-  of supported legacy formats and clean text PDFs. That helper does not invoke
-  Python, Microsoft Office/LibreOffice, a model, or the network.
+- **Python or Node**: install the published package and use `parse()` for
+  Markdown or `run()` for the complete output tree. See the language examples.
+- **Rich official SDK**: use the Rust, Python, or Node SDK with a separately
+  prepared Python 3.10–3.14 worker (`mineru==4.0.10`, `docvortex==0.5.4`);
+  it supports native formats. See the [SDK guide](docs/official-sdk.md).
+- **Rust CLI / API server**: build from a prepared checkout. The crate is not
+  available from crates.io because root workspace patches do not reach consumers.
+- **Local conversion**: CLI `--backend local` supports clean text PDFs and
+  selected legacy formats through the bundled Rust helper. It produces
+  Markdown only, without layout JSON or a VLM call.
 
-Within the MinerU 3.4.5 VLM scope, MinerU Rust is a drop-in replacement for the
-MinerU Python SDK's `vlm-http-client` path and can replace that VLM workflow
-completely for the PDF/VLM workflow. Direct `backend=hybrid-http-client` is a
-separate official MinerU 4.0.10 boundary: it requires a user-installed pinned
-Python package (`mineru==4.0.10`, release tag `mineru-4.0.10-released`) and, when unspecified,
-uses one embedded-shim subprocess for one runnable document or a persistent
-worker for multiple runnable documents. Explicit
-`--official-worker-mode` values override that choice.
-Its `hybrid-v4` artifacts are separate from the 3.4.5 output path. The CLI also
-provides the separate `backend=local` AnyDoc native-Markdown lane through the
-bundled Rust helper; it is not the official Hybrid backend. API Hybrid remains
-fail-closed and never aliases the 3.4.5 VLM route.
-See [the compatibility contract](docs/compatibility.md) and the [usage guide](docs/usage.md).
-Document-limit controls and their CLI/API applicability are summarized in the usage guide.
-The additive rich SDK for Rust, Python, and Node is described in the
-[official SDK guide](docs/official-sdk.md). Rebuild the bindings from this
-checkout before using it; the published `0.3.0` Python/npm packages are not
-guaranteed to contain the new native API. Legacy `run`/`parse` behavior remains
-unchanged. A separate opt-in official-v1 upload/job interface is described in
-the [official HTTP API guide](docs/official-http.md). Concentrated build and test
-checks have run; independent review is pending, and this is not release approval.
+This checkout targets 0.3.1. Check the [release guide](docs/releasing.md#current-release-boundary)
+for current package and release availability before installing a specific version.
 
-**No GPU?** The PDF/image pipeline drives a VLM endpoint, so the CPU-only
-alternative for full layout parsing is the official MinerU Python pipeline
-(PP-OCRv6): it emits the same
-`document.json` / `middle.json` / `content_list.json` / markdown contract and
-the two outputs can be consumed interchangeably. On the non-local CLI path,
-legacy office files first go through the isolated helper's bounded, text-only
-best-effort PDF fallback and then the existing PDF/VLM route. Original layout,
-images, tables, formulas, and macros may be lost, and non-ASCII characters may
-become `?`; when that conversion is unsuitable, first use Microsoft Office or
-LibreOffice to save as
-DOCX/XLSX/PPTX. Without a VLM service, the separate `backend=local` route remains
-a Markdown-only AnyDoc converter such as
-[anydoc](https://github.com/firecrawl/anydoc), isolated in the bundled Rust
-helper (Markdown only, no layout JSON).
-Native PDF output is accepted only for conservative clean text PDFs; uncertain
-PDFs fail clearly in local mode rather than pretending to provide official
-layout output.
-Official MinerU 4.0.10 direct Hybrid runs through that Python boundary with
-`--tier flash|basic|standard|advanced` mapped 1:1 to the upstream tier
-(`--effort medium|high|xhigh` remains a compatibility alias: `medium` maps to
-tier `standard`, `high`/`xhigh` map to tier `advanced`; `--tier` wins when both
-are given, and is rejected outside this backend), and `--method auto|txt|ocr` mapping directly to the upstream
-`ocr_mode`. `--url` / `MINERU_VL_SERVER` are accepted at every tier; without a
-URL, upstream uses its local VLM engine. Note the remaining upstream 4.0.10
-constraints on this lane: the `--lang` guard compares the normalized language
-(`en`, `japan`, `chinese_cht`, and `latin` are accepted, they normalize to
-`ch`; other non-default values are rejected), and model stacks are configured
-via `MINERU_CONFIG` (upstream removed `model.stack`/`MINERU_MODEL_STACK`), so
-non-default `--model-stack` is rejected. Python, MinerU, and model assets are not bundled; Docker/llama.cpp orchestration
-is outside this C1 boundary (see [compatibility](docs/compatibility.md)).
-
-The remote protocol is pinned to the MinerU `vlm-http-client` transport
-baseline, so a MinerU-compatible VLM endpoint is required — a general-purpose
-chat model will not produce layout results.
-
-Requires Rust 1.89 or newer.
-
-The crates.io `mineru` publication is temporarily suspended: root Cargo patches
-used to repair the Office XML dependency graph do not apply to crates.io
-consumers. Build or install Rust binaries from this checkout instead; Python,
-Node, container, and binary release paths remain separate. Their Office-helper
-availability is unchanged.
-
-## Performance
-
-Measured against the official MinerU Python SDK (`vlm-http-client` path), same
-VLM endpoint, same input documents:
-
-| Document | MinerU Rust | Official SDK | Speed | Memory |
-| --- | --- | --- | --- | --- |
-| 334 pages | 130.44 s / 2.15 GB | 162.24 s / 3.93 GB | **19.6% faster** | **45% less** |
-| 738 pages | 324.48 s / 2.31 GB | 361.74 s / 4.45 GB | **10.3% faster** | **48% less** |
-
-The Rust client keeps a smaller resident footprint end to end: it streams the
-VLM response and writes the output tree incrementally instead of buffering the
-full result in memory.
+See [usage](docs/usage.md), [compatibility](docs/compatibility.md),
+[SDK](docs/official-sdk.md), and [official HTTP API](docs/official-http.md).
 
 ## Quickstart
 
-Configure the VLM service with three environment variables:
+Install Python (CPython 3.9+) or Node.js 18+, then configure a MinerU-compatible
+VLM endpoint. A general-purpose chat endpoint is not sufficient.
 
 | Variable | Meaning | Example |
 | --- | --- | --- |
@@ -108,118 +38,47 @@ Configure the VLM service with three environment variables:
 | `MINERU_VL_MODEL_NAME` | Model ID | `model-id` |
 | `MINERU_VL_API_KEY` | Bearer token | `your-key` |
 
-Install `mineru` with pip or npm; Rust CLI installation from a prepared source
-checkout is documented under [Installation](#install):
-
-```sh
-pip install mineru-rs           # Python
-npm install @alexsun-top/mineru # Node.js
+```bash
+export MINERU_VL_SERVER="https://host/v1"
+export MINERU_VL_MODEL_NAME="model-id"
+# If required, enter the key without echoing it or saving it in shell history:
+read -rs -p "VLM API key: " MINERU_VL_API_KEY; export MINERU_VL_API_KEY
+printf '\n'
 ```
 
-Then parse a document:
+For the Python CLI, install the published wheel and run:
 
 ```sh
-mineru -p input.pdf -o out/
+python -m pip install mineru-rs
+mineru-rs -p input.pdf -o out/
 ```
 
-Your markdown appears in `out/`. Find a usable model ID with `GET /v1/models`
-on your endpoint. On success the `out/` directory contains `document.md`,
-`document.json`, `middle.json`, `content_list.json`, cropped `assets/`, and a
-layout preview `{stem}_layout.pdf`.
+For Node.js, check the registry version and invoke its `mineru-rs` bin:
+
+```bash
+version="$(npm view @alexsun-top/mineru version)"
+npx --yes --package="@alexsun-top/mineru@$version" -- mineru-rs -p input.pdf -o out/
+```
+
+The full output tree is written to `out/`; use `parse()` when you only need
+Markdown in memory, or `run()` to write that tree from application code.
 
 Prefer the `MINERU_VL_API_KEY` environment variable over `--api-key` so the
 key does not end up in shell history.
 
-### Optional external OpenAI-compatible provider
-
-Point `MINERU_VL_SERVER` at any separately prepared OpenAI-compatible provider
-endpoint, for example `http://localhost:30000/v1`. Provider and model
-compatibility are not validated here; no automatic Hugging Face model download
-is implied.
-
-## Rust library
-
-Crates.io installation is temporarily suspended; the Rust library example below
-applies to a checkout with this workspace dependency prepared, not a published
-registry package.
-
-```rust
-use mineru::{RunOptions, run};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    run(RunOptions::new("input.pdf", "out/")).await?;
-    Ok(())
-}
-```
-
 ## Python
 
-Wheels support CPython 3.9 and newer. Install with `uv` or pip:
-
-```sh
-uv add mineru-rs
-# or: pip install mineru-rs
-```
-
-`parse()` returns the markdown string in memory; save it yourself:
-
-```python
-import asyncio
-from pathlib import Path
-
-import mineru_rs
-
-
-async def main() -> None:
-    result = await mineru_rs.parse("input.pdf")
-    await asyncio.to_thread(
-        Path("out.md").write_text, result.markdown, encoding="utf-8"
-    )
-
-
-asyncio.run(main())
-```
-
-`run()` writes the full output tree to an output directory instead (see the
-[usage guide](docs/usage.md)). The wheel installs two equivalent
-console commands, `mineru` and `mineru-rs`; prefer `mineru-rs` when the
-upstream Python `mineru` package is also installed, since both provide a
-`mineru` entry point and the one earlier on `PATH` wins. Releases are wheels
-only; there is no sdist or source fallback for unsupported platforms or PyPy.
-
-The legacy Python `run`/`parse` flow does not bundle the
-`mineru-office-convert` helper: Office-to-PDF conversion there fails with
-"office conversion is unavailable". The separate rich SDK supports official
-worker input formats when its native binding is rebuilt; see the [SDK guide](docs/official-sdk.md).
+Install `mineru-rs` with `uv` or pip on CPython 3.9+. Use `parse()` for
+Markdown or `run()` for the complete output tree. The published wheel does not
+include the Rust Office conversion helper. See the [uv example](examples/python-uv/README.md)
+and [SDK guide](docs/official-sdk.md).
 
 ## Node.js
 
-Requires Node.js 18 or newer. Install with `pnpm` or npm:
-
-```sh
-pnpm add @alexsun-top/mineru
-# or: npm install @alexsun-top/mineru
-```
-
-```ts
-import { writeFile } from 'node:fs/promises'
-import mineru from '@alexsun-top/mineru'
-
-const { markdown } = await mineru.parse({ path: 'input.pdf' })
-await writeFile('out.md', markdown)
-```
-
-`run({ path, output })` writes the full output tree to `output` instead (see
-the [usage guide](docs/usage.md)). The root package installs two
-equivalent binaries, `mineru` and `mineru-rs`, both pointing at
-`bin/mineru.js`; prefer `mineru-rs` if another `mineru` command is already on
-`PATH`.
-
-The legacy Node `run`/`parse` flow does not bundle the
-`mineru-office-convert` helper: Office-to-PDF conversion there fails with
-"office conversion is unavailable". The separate rich SDK supports official
-worker input formats when its native binding is rebuilt; see the [SDK guide](docs/official-sdk.md).
+Install `@alexsun-top/mineru` with npm or pnpm on Node.js 18+. Use `parse()`
+for Markdown or `run()` for the complete output tree. The published package
+does not include the Rust Office conversion helper. See the [pnpm example](examples/node-pnpm/README.md)
+and [SDK guide](docs/official-sdk.md).
 
 ## CLI and API server
 
@@ -227,7 +86,7 @@ Install Rust CLI binaries from a prepared source checkout as shown below.
 
 A source build produces the `mineru`, `mineru-api`, and
 `mineru-office-convert` binaries. The conversion capabilities are opt-in
-features. Run the preparation commands under [Installation](#install) first;
+features. Run the preparation commands under [Build from source](#build-from-source) first;
 they are required before any Cargo command in this checkout.
 
 ```sh
@@ -236,71 +95,32 @@ cargo install --path . --locked --features legacy-office   # legacy → bounded 
 cargo install --path . --locked --features office,legacy-office
 ```
 
-`mineru --backend local` supports the `legacy-office` formats above and clean
-text PDFs through the bundled, bounded `mineru-office-convert` Rust helper. The
-helper does not invoke Python, Microsoft Office/LibreOffice, a model, or the
-network. Its output is `output/{stem}/office/{stem}.md` for legacy formats and
-`output/{stem}/native/{stem}.md` for native PDF Markdown. Native output contains
-only that Markdown file: it does not create `document.json`, `middle.json`,
-`content-list`, or assets. Scanned, mixed, garbled, low-quality, or uncertain
-PDFs fail clearly in local mode instead of falling back to VLM; `backend=local`
-is not a local `llama-server` backend, and API backend semantics are unchanged.
-Local mode uses the helper's bounded default policy; helper-only wall/CPU/memory/
-NOFILE/process-isolation controls are rejected rather than silently ignored when
-not explicitly supported. Only the input/output byte limits are currently
-supported for local configuration.
-
-Direct `--backend hybrid-http-client` uses the official MinerU 4.0.10 Python
-boundary for PDF/image inputs and writes separate `hybrid-v4` artifacts. It
-requires the user-installed pinned Python package and model assets; none are
-bundled. API Hybrid remains fail-closed and never silently enters the 3.4.5
-VLM route. `vlm-http-client` always keeps the existing remote behavior.
-
-Without `backend=local`, the same legacy formats use the isolated helper to
-create a bounded best-effort text PDF before the existing VLM route. This may
-lose Office layout, fonts, images, tables, formulas, or macros; convert first
-with Microsoft Office or LibreOffice to DOCX/XLSX/PPTX when those details matter.
+The `legacy-office` feature adds isolated local Markdown conversion for selected
+legacy formats and clean text PDFs. It is not a local inference backend; uncertain
+PDFs fail rather than generating layout output. See [usage](docs/usage.md) and
+[compatibility](docs/compatibility.md) for supported inputs and backend details.
 
 `mineru-api` is the HTTP API server: it accepts documents, calls the
 configured VLM, and returns result archives. It performs no local inference.
 
-```sh
+```bash
 export MINERU_VL_SERVER="https://<server>"
 export MINERU_VL_MODEL_NAME="<model-id>"
-export MINERU_VL_API_KEY="<your-key>"
+# If required, enter the key without echoing it or saving it in shell history:
+read -rs -p "VLM API key: " MINERU_VL_API_KEY; export MINERU_VL_API_KEY
+printf '\n'
 
 mineru-api --port 8000
 ```
 
-Submit a document as an async task and fetch the result:
+Keep the server bound to loopback or behind an authenticated reverse proxy:
+the task API has no built-in authentication or task ownership. See the
+[usage guide](docs/usage.md) for endpoints and complete options.
 
-```sh
-curl -X POST http://127.0.0.1:8000/tasks \
-  -F "files=@input.pdf" -F "backend=vlm-http-client" -F "response_format_zip=true"
-# poll the returned status_url, then download result_url
-```
+## Build from source
 
-The `mineru` client can submit through a running server:
-
-```sh
-mineru -p input.pdf -o output --api-url http://127.0.0.1:8000
-```
-
-`--api-key` can pass a Bearer token, but prefer `MINERU_VL_API_KEY`: a key on
-the command line is visible in the process list.
-
-See the [usage guide](docs/usage.md)
-for service configuration and complete options.
-
-## Install
-
-- **Rust CLI** — install from a prepared source checkout as shown above
-  (requires Rust 1.89+; crates.io publication is temporarily suspended).
-- **Python** — `pip install mineru-rs` (CPython 3.9+).
-- **Node.js** — `npm install @alexsun-top/mineru` (Node.js 18+).
-- **Docker** — see [Docker](#docker).
-
-Build from source:
+Requires Rust 1.89+ and Python 3.9+. Prepare dependencies before any Cargo
+command in this checkout:
 
 ```sh
 git clone https://github.com/agentsyaml/mineru-rs
@@ -311,118 +131,15 @@ cargo build --release --locked --features office,legacy-office
 ./target/release/mineru --help
 ```
 
-Run both Python commands before any Cargo command in this checkout, including
-metadata, formatting, or no-default-feature commands. Preparation requires
-Python 3.9+ and downloads the hash-pinned source archives once; `verify` checks
-the generated, ignored `.deps/office-xml041/` tree without network access.
-Install the CLI with `cargo install --path . --locked --features office,legacy-office`.
-Do not edit `.deps/` by hand; a mismatched tree fails verification. To recover a
-confirmed corrupt generated tree, remove only `.deps/office-xml041/` and rerun
-`prepare` then `verify`; do not remove `.deps/` or Cargo caches.
-
-Crates.io library installation is temporarily suspended; workspace patches are
-not inherited by registry consumers.
-
-## The binaries
-
-| Binary | Purpose |
-| --- | --- |
-| `mineru` | Canonical CLI: PDF, image, and Office documents, either directly against a VLM or through a `mineru-api` server. |
-| `mineru-api` | HTTP API server (see above). |
-| `mineru-office-convert` | Bundled Rust helper: docx/pptx/xlsx → PDF (`--features office`), legacy doc/ppt/xls/odt/rtf/epub/ods/odp/csv → bounded best-effort text PDF for non-local VLM runs, and isolated legacy/native-PDF Markdown for `backend=local` (`--features legacy-office`). The local routes invoke no Python, Office application, model, or network. |
-
-## Docker
-
-### Published Rust API image
-
-The published CPU-capable Rust API image is
-`ghcr.io/agentsyaml/mineru-cli`. It listens on container port `8000`, exposes
-`GET /health`, stores task output under `/app/output`, and runs its default
-command as a non-root user. The published release binaries include the
-`office,legacy-office` feature set; this does not add Python or local model
-inference.
-
-The stock image bundles Rust binaries only: it does not contain Python,
-`mineru==4.0.10`, or model assets. Direct official Hybrid therefore requires a
-separately prepared environment explicitly supplied to the container, while
-API Hybrid remains fail-closed and never aliases the 3.4.5 VLM route.
-Use an explicit version tag for published images. The previous published
-example below uses `:0.3.0`; this checkout targets `0.3.1`, which this
-version-only change does not publish. Releases do not update mutable `latest`.
-
-The image starts `mineru-api` on `0.0.0.0` and sets
-`MINERU_API_PUBLIC_BIND_EXPOSED=true` so Docker can reach the container port.
-That bind permission is separate from request policy: public HTTP-client access
-remains disabled unless `MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` is supplied.
-
-```sh
-mkdir -p output
-chmod a+rwx output  # grant the image's non-root user write access
-docker run --rm \
-  --publish 127.0.0.1:8000:8000 \
-  --volume "$PWD/output:/app/output" \
-  --env MINERU_VL_SERVER="https://<server>" \
-  --env MINERU_VL_MODEL_NAME="<model-id>" \
-  --env MINERU_VL_API_KEY="<your-key>" \
-  --env MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true \
-  ghcr.io/agentsyaml/mineru-cli:0.3.0
-
-curl http://127.0.0.1:8000/health
-```
-
-The bind-mounted output directory must be writable by the image's default
-non-root user. The `--publish` address controls host exposure (`127.0.0.1` here;
-`0.0.0.0` would expose the port on all host interfaces), independently of the
-container's bind permission. The command's
-`MINERU_API_ALLOW_PUBLIC_HTTP_CLIENT=true` is an explicit, per-container opt-in
-to the unauthenticated task API; omit it to keep parsing requests disabled, and
-keep it out of the Dockerfile and global image environment. Publish to loopback
-first as shown; broader exposure requires a private network or an authenticated
-reverse proxy because the API has no built-in authentication or task ownership
-isolation.
-
-### Docker Compose profiles
-
-The bundled [`docker-compose.yaml`](docker-compose.yaml) exposes one MinerU
-OpenAI-compatible provider profile on an NVIDIA GPU. Without an explicit profile,
-Compose activates the service; it binds host port `30000`:
-
-| Profile | Image | Purpose |
-| --- | --- | --- |
-| `openai-server` | `alexsuntop/mineru:3.4.2` | vLLM-backed MinerU provider image, port `30000`. |
-
-Start the vLLM server:
-
-```sh
-docker compose --profile openai-server up -d
-```
-
-The server profile binds the published host port to `127.0.0.1` by default and
-exposes `http://localhost:30000` (override the port with
-`MINERU_PORT_OVERRIDE_VLLM`). Set `MINERU_PROVIDER_BIND_HOST=<bind-host>`
-explicitly to use another bind address; broader exposure requires a private
-network or an authenticated reverse proxy. The `3.4.2` provider image is a
-separate provider-image baseline; the compatibility document's MinerU
-`3.4.5` is the VLM protocol baseline, not this image tag.
-
-Use `--profile openai-server` explicitly; do not run `docker compose up -d`
-without choosing a profile.
-
-The GHCR image above is the published Rust API image; it is not a bundled
-Python/model runtime. The Compose profile is a separate provider example and
-does not prepare or validate a MinerU 4.0.10 model.
+`prepare` fetches
+hash-pinned source archives; `verify` checks the generated `.deps/office-xml041/`
+tree offline. Do not edit that generated tree by hand. Install with
+`cargo install --path . --locked --features office,legacy-office`.
 
 ## Examples
 
-- [examples/python-uv](examples/python-uv) — Python with `uv`
-- [examples/node-pnpm](examples/node-pnpm) — Node.js with `pnpm`
-
-## Build and test
-
-```sh
-cargo build --release
-cargo test
-```
+- [Python + uv](examples/python-uv/README.md)
+- [Node.js + pnpm](examples/node-pnpm/README.md)
 
 ## License
 

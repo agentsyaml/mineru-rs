@@ -1,6 +1,21 @@
 # Compatibility
 
-`mineru` is pinned to the MinerU 3.4.5 `vlm-http-client` baseline:
+## Route and format matrix
+
+| Surface | Upstream/runtime | Inputs and behavior | Outputs |
+| --- | --- | --- | --- |
+| CLI `vlm-http-client` (default) | MinerU 3.4.5 VLM protocol; external OpenAI-compatible service | PDF and eight image formats; local inference and `mineru-api` are outside this compatibility scope | Existing MinerU-style result tree |
+| CLI `hybrid-http-client` | Official MinerU 4.0.10 worker; external Python 3.10–3.14 environment | Direct mode only; PDF and eight image formats | `{stem}/hybrid-v4/` official bundle |
+| CLI `--backend local` | Rust text extraction; requires the `legacy-office` build feature | Legacy Office formats and clean text PDFs | Markdown only |
+| Rich Rust/Python/Node SDK | Official MinerU 4.0.10 / DocVortex 0.5.4 worker | 28 extensions; native formats require `flash` | Owned results and nine render targets |
+| Official-v1 HTTP API | Official MinerU 4.0.10 / DocVortex 0.5.4 worker | Upload/job API; PDF, images, and native formats; native requires `flash` | Markdown, middle JSON, structured content, or ZIP |
+| Existing legacy bindings/API | MinerU 3.4.5 VLM behavior | Existing input and option contract | Existing output tree or Markdown/warnings |
+
+The 3.4.5 VLM and 4.0.10 official worker are separate routes. The latter's
+format support does not widen the former. See the [SDK guide](official-sdk.md)
+and [HTTP guide](official-http.md) for their own option and result contracts.
+
+## MinerU 3.4.5 VLM baseline
 
 - MinerU: `mineru==3.4.5`, `mineru-3.4.5-py3-none-any.whl`, release tag
   `mineru-3.4.5-released`, commit
@@ -82,27 +97,22 @@ atomic publication. It contains `markdown.md`, `middle_json.json`,
 It is never sent through the MinerU 3.4.5 builders, `official_route`, Office
 conversion, or the project-private AnyDoc lane. API Hybrid remains fail-closed.
 
-### Additive rich SDK
+### Rich SDK and official HTTP API
 
-The Rust `official` module and Python/Node rich binding surfaces are a separate
-library API, not a widening of the direct Hybrid CLI route above. They accept
-the 28 filename extensions listed in the [official SDK guide](official-sdk.md),
-including 19 native formats that require tier `flash`; PDF and eight image
-formats remain tiered. They call the same external MinerU 4.0.10 / DocVortex
-0.5.4 Python boundary and require the worker's Python 3.10+ environment. The
-Python facade itself supports Python 3.9+.
+The Rust `official` module and Python/Node rich binding surfaces accept the 28
+extensions listed in the [official SDK guide](official-sdk.md); 19 native
+formats require tier `flash`, while PDF and eight image formats support all
+four tiers. They use the external MinerU 4.0.10 / DocVortex 0.5.4 worker
+(Python 3.10–3.14). The Python facade itself supports Python 3.9+.
 
 The legacy `run`/`parse` APIs remain unchanged; rich result types are additive.
-The current checkout version is `0.3.1`, with no publication implied. New
-Python and Node native binding APIs require artifacts rebuilt from this
-checkout. Do not infer that the currently published `0.3.0` wheel or npm
-package already contains them. This compatibility note is limited to the
-library SDK surface.
+See the [SDK guide](official-sdk.md) for binding build instructions and the
+[release guide](releasing.md#current-release-boundary) for registry availability
+and publication constraints.
 
-The opt-in official-v1 upload/job service is a separate interface alongside
-the existing server routes. See the [official HTTP API guide](official-http.md);
-concentrated build/test checks and independent review are pending. This is not
-release approval.
+The official-v1 upload/job service is a separate opt-in interface alongside
+the existing server routes. Its accepted input, limits, and four output formats
+are documented in the [HTTP API guide](official-http.md).
 
 Rust library consumers of the 3.4.5 VLM lane should note one public-API break
 shipping with this release: `VlmBatchPriority::PerItem` was removed in favor of
@@ -111,11 +121,10 @@ priorities should construct them per request instead.
 
 ## Scope
 
-The source-audited MinerU 3.4.5 CLI baseline is frozen in the intended tracked
-artifacts `tests/fixtures/official/mineru_3.4.5_cli_contract.json` and
-`tests/official_cli_contract.rs`. They record the environment inventory,
-schema, and critical distinctions. The current Rust CLI is **NOT FULL DROP-IN**
-compatible with MinerU 3.4.5.
+The source-audited MinerU 3.4.5 CLI baseline is recorded in
+`tests/fixtures/official/mineru_3.4.5_cli_contract.json` and
+`tests/official_cli_contract.rs`. The current Rust CLI is not a full drop-in
+replacement for MinerU 3.4.5.
 
 This compatibility declaration covers OpenAI-compatible VLM HTTP transport for
 PDF pages, layout and block extraction, postprocessing, outputs, and layout
@@ -139,10 +148,11 @@ and existence of every referenced asset. Preview PDFs must retain page count
 and CropBox geometry. It intentionally ignores PDF, image, and JSON bytes,
 JSON key order, filenames, and private metadata.
 
-## Published Rust API image
+## Rust API container image
 
-The published GHCR image is `ghcr.io/agentsyaml/mineru-cli`. It runs the Rust
-`mineru-api` default command as a non-root user on container port `8000`, serves
+The GHCR image is `ghcr.io/agentsyaml/mineru-cli`. Verify tag availability
+before pulling; see the [release guide](releasing.md#current-release-boundary).
+It runs the Rust `mineru-api` default command as a non-root user on container port `8000`, serves
 `GET /health`, and uses `/app/output` for task output. Configure its external
 VLM with `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and
 `MINERU_VL_API_KEY`; the image performs no local inference. Publish it to
@@ -150,7 +160,7 @@ loopback first with `127.0.0.1:8000:8000`; broader exposure requires a private
 network or an authenticated reverse proxy because the API has no built-in
 authentication or task ownership isolation.
 
-The published release binaries use `office,legacy-office`, but the stock image
+The release workflow builds binaries with `office,legacy-office`, but the stock image
 contains Rust binaries only: no Python, `mineru==4.0.10`, or model assets.
 Direct official Hybrid therefore needs a separately prepared environment
 explicitly supplied to the image, and API Hybrid remains fail-closed. This

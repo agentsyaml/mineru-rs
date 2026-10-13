@@ -1,9 +1,9 @@
-# Generated input fixtures
+# Generated image inputs
 
-These files are generated from solid colors and carry no third-party image content.
-The commands run once when the fixtures were created; tests do not invoke these tools.
-
-ImageMagick `7.1.2-26` and macOS `sips-316`:
+These fixtures contain solid-color image content authored for the tests; no
+third-party image assets are included. Tests read the committed files and do
+not run the generation tools. To reproduce them, use ImageMagick `7.1.2-26`
+and macOS `sips-316`:
 
 ```sh
 magick -size 2x3 xc:red frame-red.png
@@ -15,7 +15,9 @@ sips -s format jp2 tiny-rgb-source.png --out tiny-rgb.jp2
 rm frame-red.png frame-blue.png tiny-rgb-source.png
 ```
 
-SHA-256:
+The commands above are run from a scratch directory, not this fixture
+directory. Verify committed outputs with `shasum -a 256` (macOS) or
+`sha256sum` (Linux):
 
 ```text
 0e72eff7770ccd570afc2f1da4426a3374bc6465553b3e1a5b1c7b893b83e36f  two-frame.apng

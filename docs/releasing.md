@@ -1,315 +1,173 @@
-# Releasing
+# Release maintenance
 
-Releases coordinate PyPI `mineru-rs`, npm `@alexsun-top/mineru`, and the GHCR container image
-`ghcr.io/agentsyaml/mineru-cli`. Registry credentials must be short-lived
-environment variables or trusted-publisher OIDC credentials. Never store a
-registry token in the repository, GitHub secrets, `.npmrc`, or Cargo
-configuration.
+This guide covers maintainer preflight and the protected GitHub Actions release
+workflow in `.github/workflows/release.yml`. Run repository commands from the
+root. Release builds use Rust 1.89.0 and pinned local Office sources. Python
+3.9+ can prepare those sources and build the local wheel; use Python 3.11+ for
+the audit checker, which reads TOML with `tomllib`. The workflow builds five
+Python wheels, six native npm packages plus the npm root package, six binary
+archives, and a two-architecture GHCR image.
 
-## Current crate-publication boundary
+## Current release boundary
 
-The crates.io `mineru` publication is temporarily suspended. The root workspace
-patches use prepared local sources and are not inherited by a crates.io
-consumer, so a published `mineru 0.3.1` would not carry this dependency repair.
-The release workflow keeps `publish-crate` disabled; this does not block its
-separate Python-wheel, Node-package, binary, or container paths. The release
-source snapshot and its associated build evidence are not binary-release assets
-or a `.crate` package.
+Crates.io publication is suspended because the root workspace's local
+`[patch.crates-io]` repairs are not inherited by downstream consumers. Do not
+enable or perform crate publication until the published dependency chain is
+safe. Before dispatch, inspect GitHub tags/releases and query each enabled
+registry for the candidate `X.Y.Z`; reuse an existing version only when its
+artifacts match the workflow's expected identity and digests. CI success alone
+does not establish publication. PyPI, npm, the CLI container, and GitHub binary
+releases are separate outputs. See
+[`office-xml041/PROVENANCE.md`](../tools/deps/office-xml041/PROVENANCE.md) for
+the local dependency source records and constraints.
 
-The workspace retains Rust 1.89 and the `office2pdf 0.6.5`,
-`umya-spreadsheet 2.3.3`, and `citationberg 0.6.1` identities, adapted to use
-genuine registry `quick-xml 0.41.0`. Source archives, hashes, exact edits, and
-license references are recorded in
-[`tools/deps/office-xml041/PROVENANCE.md`](../tools/deps/office-xml041/PROVENANCE.md)
-and its hash-checked metadata. This documents provenance, not a claim that all
-security issues are fixed or that the dependencies are certified. This repair
-does not change the separate MinerU 3.4.5 VLM baseline. CI's audit policy
-requires a zero-finding result and an empty ignore list; it does not carry an
-advisory exception.
+## Before triggering a release
 
-Before any Cargo command from a checkout, use Python 3.9+ to run
-`python3 tools/deps/prepare_office.py prepare` followed by
-`python3 tools/deps/prepare_office.py verify`. Preparation may need network
-access once to download the pinned archives; verification is offline. See the
-[usage guide](usage.md#build-and-prerequisites) for the ignored generated-tree
-contract.
+1. Prepare the ignored Office sources before any Cargo command. Python 3.9+
+   suffices for these source tools; preparation may download the pinned archives,
+   while verification is offline:
 
-## One-time repository and registry setup
+   ```sh
+   python3 tools/deps/prepare_office.py prepare
+   python3 tools/deps/prepare_office.py verify
+   python3 -m unittest discover -s tools/deps -p 'test_*.py'
+   python3 tools/deps/office_xml_parity.py
+   ```
 
-Protect `main` and allow release dispatch only from that protected branch. The
-`workflow_dispatch` definition is selected from `main`; the workflow fails
-closed unless its `GITHUB_SHA` equals the requested commit. Create protected
-GitHub environments named `crates-io`, `pypi`, `npm`, and `ghcr`, each with
-required reviewers and the appropriate OIDC trusted-publisher controls. Do not
-restrict these environments to release tags.
+2. Synchronize the workspace version, workspace package entries in
+   `Cargo.lock`, `bindings/node/package.json`, both root version entries in
+   `bindings/node/package-lock.json`, and the expected version constants in
+   maintained `bindings/node/index.js` to stable `X.Y.Z`. Python wheel version
+   is derived from the workspace; do not edit separate Python version metadata.
+   Verify root package and target identities:
 
-- PyPI: create a **pending trusted publisher** for project `mineru-rs`,
-  repository `agentsyaml/mineru-rs`, workflow `release.yml`, environment
-  `pypi`. Do not bootstrap or publish `0.0.1` to PyPI.
-- crates.io: after the bootstrap below creates `mineru`, configure its trusted
-  publisher for repository `agentsyaml/mineru-rs`, workflow `release.yml`,
-  environment `crates-io`, then yank `0.0.1`. This is historical setup only;
-  crate publishing remains suspended under the current dependency boundary.
-- npm: control the `@alexsun-top` scope. After bootstrap creates all seven
-  records, configure a trusted publisher on every record for repository
-  `agentsyaml/mineru-rs`, workflow `release.yml`, environment `npm`.
-- GHCR: `publish-container` uses the workflow `GITHUB_TOKEN` with only
-  `contents: read` and `packages: write` permissions.
+   ```sh
+   cargo +1.89.0 metadata --locked --no-deps --format-version 1
+   ```
 
-No long-lived registry token belongs in GitHub Actions. The active PyPI and npm
-jobs acquire OIDC credentials only after release artifacts pass verification;
-the crates.io job is disabled. GHCR uses the job-scoped `GITHUB_TOKEN`
-permissions above.
+   Verify all six native platform-package manifests use `X.Y.Z`. They are
+   generated during release staging; this checkout has no tracked per-platform
+   `package.json` files to edit.
 
-## Published GHCR image contract
+3. Complete every local check below before committing and pushing:
 
-The existing `publish-container` job publishes the Rust API image
-`ghcr.io/agentsyaml/mineru-cli` for `linux/amd64` and `linux/arm64`. Its
-release binaries are built with `office,legacy-office`; the image's default
-command listens on container port `8000`, serves `GET /health`, runs as its
-configured non-root user, and writes task output under `/app/output`.
-Each release publishes version, minor, and major tags, but never publishes or
-updates mutable `latest`; use an explicit tag only after that version is
-published. The pull below is a historical example of the previous `0.3.0`:
+   ```sh
+   cargo +1.89.0 fmt --all -- --check
+   cargo +1.89.0 test --locked -p mineru --all-targets --features office
+   cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features
+   RUSTDOCFLAGS="-D warnings" cargo +1.89.0 doc --locked -p mineru --no-deps
+   cargo +1.89.0 clippy --locked -p mineru --all-targets --features office
+   cargo build --bins --features office
+   ```
+
+In addition to the Cargo checks, run the audit check and six self-tests below;
+Python 3.11+ is required by the audit policy checker. Install cargo-audit under
+the ignored build directory rather than replacing a globally installed tool,
+and pass its exit status to the checker:
 
 ```sh
-docker pull ghcr.io/agentsyaml/mineru-cli:0.3.0
+cargo +1.89.0 install cargo-audit --version 0.22.2 --locked --root target/tools
+audit_report="$(mktemp)"
+trap 'rm -f "$audit_report"' EXIT
+set +e
+target/tools/bin/cargo-audit audit --json > "$audit_report"
+audit_status=$?
+set -e
+python3.11 .github/scripts/check_cargo_audit.py check \
+  --report "$audit_report" --lockfile Cargo.lock --audit-status "$audit_status"
 ```
 
-The image bundles Rust binaries only. It does not contain Python,
-`mineru==4.0.10`, or model assets, so direct official Hybrid needs a separately
-prepared environment explicitly supplied to the image and API Hybrid remains
-fail-closed. Supply `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and
-`MINERU_VL_API_KEY` for an external VLM provider. Documented local publication
-is `127.0.0.1:8000:8000`; broader exposure belongs on a private network or
-behind an authenticated reverse proxy. This section describes the immutable
-workflow contract; it does not change that workflow.
-
-## Historical non-user-facing 0.0.1 bootstrap
-
-This records the one-time `0.0.1` bootstrap that preceded the first automated
-`0.1.0` OIDC release. It is distinct from the current `0.3.1` workspace version
-and is not itself a user-facing release. Do not run its crates.io publishing
-steps while crate publication is suspended above.
-
-Perform bootstrap from a temporary checkout or branch with the Cargo workspace
-version changed to `0.0.1`. Main remains at the current workspace version (`0.3.1`).
-
-### crates.io
-
-The crates.io bootstrap is the actual package, not a placeholder. Use a
-short-lived token only through the environment:
+Run all six release-script self-tests:
 
 ```sh
-export CARGO_REGISTRY_TOKEN='<short-lived-token>'
-cargo +1.89.0 generate-lockfile
-cargo +1.89.0 metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; expected = {"mineru": "0.0.1", "mineru-node": "0.0.1", "mineru-python": "0.0.1"}; actual = {p["name"]: p["version"] for p in json.load(sys.stdin)["packages"]}; assert actual == expected, actual'
-cargo +1.89.0 package -p mineru --locked
-cargo +1.89.0 publish -p mineru --locked
+python3 .github/scripts/verify_release.py self-test
+python3 .github/scripts/stage_binding_artifacts.py self-test
+python3 .github/scripts/attach_release_assets.py self-test
+python3.11 .github/scripts/check_cargo_audit.py self-test
+python3 .github/scripts/verify_container_release.py self-test
+python3 .github/scripts/container_smoke.py --self-check
 ```
 
-After publishing, restore the real workspace version and `Cargo.lock` (or
-discard the temporary checkout). Configure trusted publishing immediately,
-then yank the bootstrap and remove the token from the environment:
+4. Confirm full CI passes for the commit on protected `main`. Release dispatch
+   separately requires a completed successful **push** CI run for exactly that
+   commit and branch. Do not dispatch from a branch or an unverified SHA.
+
+For a fuller local binding preflight, build/install the Python wheel and run
+`python -m unittest discover -s bindings/python/tests -p 'test_*.py'`; in
+`bindings/node`, run `npm ci`, `npm run build`, and `npm test`. `index.js` is
+maintained; restore any generated change and confirm `index.d.ts` is unchanged.
+
+The Python wheel smoke sequence used for local preflight is:
 
 ```sh
-CARGO_REGISTRY_TOKEN="$CARGO_REGISTRY_TOKEN" cargo yank --vers 0.0.1 mineru
-unset CARGO_REGISTRY_TOKEN
-```
-
-### npm
-
-Create seven temporary, metadata-only `0.0.1` package directories with these
-exact manifest names:
-
-1. `@alexsun-top/mineru-darwin-x64`
-2. `@alexsun-top/mineru-darwin-arm64`
-3. `@alexsun-top/mineru-linux-x64-gnu`
-4. `@alexsun-top/mineru-linux-arm64-gnu`
-5. `@alexsun-top/mineru-win32-x64-msvc`
-6. `@alexsun-top/mineru-win32-arm64-msvc`
-7. `@alexsun-top/mineru`
-
-These records deliberately contain no usable native build. They exist only to
-establish ownership and trusted publishers and must never receive `latest`.
-Use a short-lived granular token through `NODE_AUTH_TOKEN`. A temporary npm
-config may reference the environment variable, but must not contain its value:
-
-```sh
-export NODE_AUTH_TOKEN='<short-lived-granular-token>'
-export NPM_CONFIG_USERCONFIG="$(mktemp)"
-trap 'rm -f "$NPM_CONFIG_USERCONFIG"' EXIT
-printf '%s\n' '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}' > "$NPM_CONFIG_USERCONFIG"
-
-npm publish bootstrap/mineru-darwin-x64 --tag bootstrap --access public
-npm publish bootstrap/mineru-darwin-arm64 --tag bootstrap --access public
-npm publish bootstrap/mineru-linux-x64-gnu --tag bootstrap --access public
-npm publish bootstrap/mineru-linux-arm64-gnu --tag bootstrap --access public
-npm publish bootstrap/mineru-win32-x64-msvc --tag bootstrap --access public
-npm publish bootstrap/mineru-win32-arm64-msvc --tag bootstrap --access public
-npm publish bootstrap/mineru --tag bootstrap --access public
-```
-
-Confirm each directory's `package.json` has the exact corresponding name before
-publishing. Deprecate every unusable bootstrap version:
-
-```sh
-npm deprecate '@alexsun-top/mineru-darwin-x64@0.0.1' 'Metadata-only bootstrap; do not use.'
-npm deprecate '@alexsun-top/mineru-darwin-arm64@0.0.1' 'Metadata-only bootstrap; do not use.'
-npm deprecate '@alexsun-top/mineru-linux-x64-gnu@0.0.1' 'Metadata-only bootstrap; do not use.'
-npm deprecate '@alexsun-top/mineru-linux-arm64-gnu@0.0.1' 'Metadata-only bootstrap; do not use.'
-npm deprecate '@alexsun-top/mineru-win32-x64-msvc@0.0.1' 'Metadata-only bootstrap; do not use.'
-npm deprecate '@alexsun-top/mineru-win32-arm64-msvc@0.0.1' 'Metadata-only bootstrap; do not use.'
-npm deprecate '@alexsun-top/mineru@0.0.1' 'Metadata-only bootstrap; do not use.'
-rm -f "$NPM_CONFIG_USERCONFIG"
-trap - EXIT
-unset NPM_CONFIG_USERCONFIG NODE_AUTH_TOKEN
-```
-
-After the historical automated `0.1.0` OIDC release succeeded, obtain a fresh
-short-lived granular token authorized for these packages and remove all bootstrap
-dist-tags using a new temporary config. Ongoing releases remain OIDC-only:
-
-```sh
-export NODE_AUTH_TOKEN='<fresh-short-lived-granular-token>'
-export NPM_CONFIG_USERCONFIG="$(mktemp)"
-trap 'rm -f "$NPM_CONFIG_USERCONFIG"' EXIT
-printf '%s\n' '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}' > "$NPM_CONFIG_USERCONFIG"
-
-npm dist-tag rm @alexsun-top/mineru-darwin-x64 bootstrap
-npm dist-tag rm @alexsun-top/mineru-darwin-arm64 bootstrap
-npm dist-tag rm @alexsun-top/mineru-linux-x64-gnu bootstrap
-npm dist-tag rm @alexsun-top/mineru-linux-arm64-gnu bootstrap
-npm dist-tag rm @alexsun-top/mineru-win32-x64-msvc bootstrap
-npm dist-tag rm @alexsun-top/mineru-win32-arm64-msvc bootstrap
-npm dist-tag rm @alexsun-top/mineru bootstrap
-
-rm -f "$NPM_CONFIG_USERCONFIG"
-trap - EXIT
-unset NPM_CONFIG_USERCONFIG NODE_AUTH_TOKEN
-```
-
-## Version and tag contract
-
-Before release, the Cargo workspace version, npm manifest version, both npm
-lockfile root versions, and intended PyPI wheel version must all be the same
-stable `X.Y.Z`. Commit and push those synchronized files; do not change
-manifests just to prepare the workflow.
-
-## Local preflight
-
-The previous `quick-xml` advisory exceptions are no longer the current audit policy. The current CI audit gate requires a clean result and does not rely on an exception; this is not a claim of security certification. Native macOS has no reliable no-entitlement hard memory cap, so hostile Office processing there requires an external VM or container memory boundary.
-The reviewed lock exception for registry-reported yanked transitive `arrayref` 0.3.9 was removed after crates.io unyanked it.
-The release Node matrix retains all six native runner/architecture pairs. Each
-runs its Node 24 test; five pairs also run the Node 18.20.8 smoke with
-`matrix.node-arch`. The `win32-arm64-msvc` pair intentionally skips the Node 18
-setup and smoke because the official Node 18 win-arm64 build is unavailable.
-The verified Rust 1.89 macOS Node release build uses command-scoped
-`CARGO_PROFILE_RELEASE_STRIP=none` with the macOS SDK 27 environment; it does
-not change global Rust settings or the MSRV.
-
-Run from the repository root unless a subshell changes directory:
-
-```sh
-python3 tools/deps/prepare_office.py prepare
-python3 tools/deps/prepare_office.py verify
-cargo +1.89.0 fmt --all -- --check
-cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features
-cargo +1.89.0 check --locked -p mineru-python
-cargo +1.89.0 check --locked -p mineru-node
-cargo +1.89.0 metadata --locked --no-deps
 python3.9 -m venv /tmp/mineru-release-venv
 /tmp/mineru-release-venv/bin/pip install maturin
 /tmp/mineru-release-venv/bin/maturin build --release --locked --manifest-path bindings/python/Cargo.toml
 /tmp/mineru-release-venv/bin/pip install --force-reinstall target/wheels/mineru_rs-*.whl
 /tmp/mineru-release-venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
-
-# index.js is maintained and hardened; index.d.ts is generated.
-(cd bindings/node && npm ci && npm run build && git restore --source=HEAD -- index.js && git diff --exit-code -- index.d.ts)
-# Install that package under node_modules, then run:
-(cd bindings/node && npm test)
-
-python3 .github/scripts/verify_release.py self-test
-python3 .github/scripts/attach_release_assets.py self-test
-python3 .github/scripts/check_cargo_audit.py self-test
-python3 .github/scripts/verify_container_release.py self-test
-python3 .github/scripts/container_smoke.py --self-check
-
-/tmp/mineru-release-venv/bin/mineru --help
-/tmp/mineru-release-venv/bin/mineru-rs --help
-(cd bindings/node && ./node_modules/.bin/mineru --help && ./node_modules/.bin/mineru-rs --help)
-git diff --check
 ```
 
-Both launcher names must work for each binding. The wheel installs `mineru` and
-`mineru-rs`; the npm root package installs the same two names, and the six npm
-platform packages install none.
+The automated Node release build uses Node 24.18.1 and npm 12.0.2; package
+`engines` requires Node 18 or newer. `npm ci` must use the committed
+`bindings/node/package-lock.json`.
 
-Inspect Cargo metadata to confirm the three packages are `mineru`,
-`mineru-python`, and `mineru-node`, the root library target is `mineru`, exactly
-the three documented binaries exist (`mineru`, `mineru-api`, and
-`mineru-office-convert`), and no
-package or target is named `mineru-cli`. Confirm Python wheels are `cp39-abi3`
-and no raw `linux_*` wheel is released. Do not build or publish a Python sdist.
+## Dispatch and publication
 
-## Trigger and publication sequence
+After synchronized version changes pass CI, commit and push them to protected
+`main`. Select that exact tip and dispatch the workflow from `main`:
 
-1. Bump the synchronized version, commit, and push it to protected `main`.
-2. Confirm the selected commit is the current protected-main tip, then wait for
-   its completed successful **push** CI run:
+```sh
+commit='<40-lowercase-sha>'
+test "$(git rev-parse origin/main)" = "$commit"
+gh workflow run release.yml --ref main -f version=X.Y.Z -f commit="$commit"
+```
 
-   ```sh
-   commit='<40-lowercase-sha>'
-   test "$(git rev-parse origin/main)" = "$commit"
-   gh workflow run release.yml --ref main -f version=X.Y.Z -f commit="$commit"
-   ```
+The workflow checks that the requested commit equals the dispatch ref's
+`GITHUB_SHA`, verifies exact successful push-CI evidence, and rejects an
+existing `vX.Y.Z` tag or release before building. Protected environments named
+`pypi`, `npm`, and `ghcr` gate registry jobs; PyPI and npm use trusted-publisher
+OIDC, and GHCR uses a job-scoped `GITHUB_TOKEN` with `packages: write`. Do not
+store registry tokens in the repository, GitHub secrets, `.npmrc`, or Cargo
+configuration. There is no active crates.io publication job.
 
-   The workflow normalizes the full hexadecimal SHA, rejects a workflow ref
-   whose `GITHUB_SHA` differs from it, and requires successful push CI with
-   exactly that `head_sha` and `main` branch before any registry publication.
-   It also rejects an existing `vX.Y.Z` tag or release.
+The workflow verifies and publishes five wheels, seven npm tarballs, and the
+multi-platform container only after its build and artifact checks succeed. The
+source-build job records evidence from a fresh tracked-source snapshot; it is
+not a `.crate` package and is not uploaded as a binary release asset.
 
-Crates.io publication is disabled. The remaining separate protected jobs
-publish PyPI wheels, six npm native packages plus the npm root package, and the
-`mineru-cli` container image (`publish-container` builds `Dockerfile.release`
-for `linux/amd64` and `linux/arm64` and publishes
-`ghcr.io/agentsyaml/mineru-cli`). The source-build job records evidence from a
-fresh tracked-source snapshot; it neither produces a consumer `.crate` nor adds
-that snapshot to GitHub binary-release assets. This describes workflow paths,
-not a completed or newly published version.
+GitHub Release assets are exactly six main-library archives and `SHA256SUMS`:
 
-## GitHub Release assets
+```text
+mineru-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+mineru-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz
+mineru-vX.Y.Z-x86_64-apple-darwin.tar.gz
+mineru-vX.Y.Z-aarch64-apple-darwin.tar.gz
+mineru-vX.Y.Z-x86_64-pc-windows-msvc.zip
+mineru-vX.Y.Z-aarch64-pc-windows-msvc.zip
+SHA256SUMS
+```
 
-The GitHub Release has exactly seven uploaded assets (replace `X.Y.Z` with the
-release version): the six main-library platform archives and `SHA256SUMS`:
+Each archive contains `mineru` and `mineru-office-convert` in one root
+directory (`.exe` on Windows). Verify downloads with `sha256sum -c SHA256SUMS`
+or the platform equivalent. Crates, wheels, and npm tarballs remain registry
+artifacts, not GitHub Release uploads.
 
-1. `mineru-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
-2. `mineru-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz`
-3. `mineru-vX.Y.Z-x86_64-apple-darwin.tar.gz`
-4. `mineru-vX.Y.Z-aarch64-apple-darwin.tar.gz`
-5. `mineru-vX.Y.Z-x86_64-pc-windows-msvc.zip`
-6. `mineru-vX.Y.Z-aarch64-pc-windows-msvc.zip`
-7. `SHA256SUMS`
+`publish-release` creates and publishes a draft only after publication and
+asset verification pass. On failure it removes only the draft and exact tag
+created by that run; it preserves anything that no longer matches those exact
+identities. Published releases and tags are not replaced. Reruns fail closed
+for conflicting assets: a matching name and digest is skipped, while a
+same-name/different-digest asset fails instead of being overwritten. The
+workflow does not use `--clobber` or modify the release body. GitHub's automatic
+source-code archives are not uploaded assets or Rust `.crate` packages.
 
-Each main-library archive has one root directory and exactly `mineru` plus
-`mineru-office-convert` (`.exe` on Windows). Verify the downloaded files with
-`sha256sum -c SHA256SUMS` (or the platform equivalent). Crates, wheels, and npm
-tarballs remain registry artifacts and are never attached to the GitHub Release.
+## One-time registry configuration
 
-`publish-release` creates a draft only after the full publication graph passes,
-uploads and verifies this exact set, then publishes it. A failure before publish
-deletes only that newly created draft. Published releases and tags are immutable:
-reruns fail rather than delete, recreate, or replace them. GitHub may show
-automatic `Source code (zip)` and `Source code (tar.gz)` links; those are GitHub
-generated source links, not uploaded release assets and not Rust `.crate`
-packages.
-
-Re-running a release is idempotent: an asset whose name and SHA-256 already
-match is skipped, and a same-name asset with a different digest fails the job
-instead of being replaced. Nothing uses `--clobber`, and the job never modifies
-`latest`, any dist-tag, or the release body and metadata. `SHA256SUMS` is
-generated in a separate staging directory so the crate, wheel, npm, and binary
-directories continue to match their exact expected payloads.
-
-This document specifies commands; it does not assert that bootstrap, preflight,
-trusted-publisher setup, or publication has been performed.
+Protect `main` and restrict release dispatch to it. Configure protected GitHub
+environments `pypi`, `npm`, and `ghcr` with required reviewers. Configure
+trusted publishers for PyPI project `mineru-rs` and all seven npm records under
+`@alexsun-top`, using repository `agentsyaml/mineru-rs`, workflow `release.yml`,
+and the corresponding `pypi` or `npm` environment. GHCR publication uses the
+job-scoped GitHub token. The crates.io `mineru` bootstrap and publication
+instructions are intentionally omitted: the current dependency-boundary issue
+keeps crate publishing suspended.

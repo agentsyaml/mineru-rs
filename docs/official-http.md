@@ -1,25 +1,13 @@
 # Opt-in official-v1 HTTP API
 
-This guide describes the declared source interface for the additive official
-MinerU 4.0.10 API in `mineru-api`. It is opt-in and separate from the existing
-legacy multipart/task routes. Concentrated build/test checks for this
-implementation are pending, as is independent review. This is not a
-release-readiness or compatibility claim.
+This guide describes the opt-in MinerU 4.0.10 upload/job API in `mineru-api`.
+The [compatibility matrix](compatibility.md#route-and-format-matrix) compares it
+with the CLI and SDK. This API returns requested artifacts, not an in-memory
+SDK `OfficialResult`.
 
-| Surface | Input/options | Result |
-| --- | --- | --- |
-| Legacy Rust `run` and Python/Node `run`/`parse` | Existing 3.4.5 behavior; no rich result controls | Existing output tree or Markdown/warnings |
-| Rich local SDK | Six parse controls; 28 recognized extensions; external 4.0.10 worker | Owned result/assets and nine render targets |
-| Official-v1 HTTP API | Upload/job workflow; tier, OCR mode, output formats, per-file PDF range only | Four outputs: Markdown, middle JSON, structured content, ZIP |
-
-These surfaces are additive and have separate input/options/result contracts.
-The HTTP API does not expose rich local rendering or assets as an in-memory
-`OfficialResult`. This service is not a WebUI, router, or model-serving runtime.
-
-The server does not perform local model inference. Jobs use the separately
-installed MinerU 4.0.10 / DocVortex 0.5.4 Python worker (Python 3.10 through
-3.14). The current checkout version is `0.3.1`; this version-only change does
-not publish a release. Existing routes are not replaced by `/v1`.
+Jobs use the separately installed MinerU 4.0.10 / DocVortex 0.5.4 Python worker
+(Python 3.10–3.14); the server does not perform local model inference. Existing
+routes remain available alongside `/v1`.
 
 ## Enablement and trusted runtime
 
@@ -164,6 +152,16 @@ skipped. It does not kill a sibling process. Shutdown stops new admissions,
 flags queued/running work, drains the active parse and worker, then clears
 retained files/jobs. A running cancellation or shutdown can therefore take
 close to the configured per-parse timeout.
+
+## Security
+
+Keep the listener on loopback or behind an authenticated, access-controlled
+reverse proxy. The service has no built-in user authentication or per-job
+ownership checks; anyone who can reach it can operate on retained upload, job,
+and output records. Treat uploaded documents and returned artifacts as sensitive.
+Python, config, and model paths are trusted server startup inputs and must come
+from the operator, never request data. Restrict local HTML resource roots in the
+SDK to directories the application intends the worker to read.
 
 ## Rust client
 
