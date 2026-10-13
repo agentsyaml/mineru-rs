@@ -11,6 +11,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent))
 import mineru_official_worker as worker  # noqa: E402
 import mineru_official_worker_protocol as protocol  # noqa: E402
+import mineru_official_worker_operations as worker_operations  # noqa: E402
+import mineru_official_worker_render as worker_render  # noqa: E402
 
 
 class _BinaryInput:
@@ -116,6 +118,31 @@ class BundleWriterTests(unittest.TestCase):
         self.assertEqual(collision.read_bytes(), b"sentinel")
         self.assertEqual(list(image_dir.glob(".image.jpg.*.tmp")), [])
 
+    def test_typed_rebasing_preserves_metadata_extensions_and_code(self) -> None:
+        writer = worker.BundleWriter(self.root, 4096, typed_references=True)
+        writer.write("sample.png", b"image")
+        middle = {
+            "metadata": {"document": {"title": "sample.png"}},
+            "extensions": {"image_path": "ordinary-value", "sample.png": "ordinary-key"},
+            "pages": [{"blocks": [
+                {"type": "image", "index": 0, "content": [
+                    {"type": "image_body", "index": 0, "image_path": "sample.png", "content": '<img src="sample.png"> ![a](sample.png) ![b](sample.png) <img src="sample.png"> ![c](sample.png)'}
+                ]},
+                {"type": "code", "index": 1, "sub_type": "code", "guess_lang": "text", "content": [
+                    {"type": "code_body", "index": 1, "content": "![literal](sample.png)"}
+                ]},
+            ]}],
+        }
+        value = json.dumps(middle)
+        actual = writer._rewrite_text_bytes("middle_json.json", value.encode()).decode()
+        restored = json.loads(actual)
+        self.assertEqual(restored["metadata"]["document"]["title"], "sample.png")
+        self.assertEqual(restored["extensions"]["image_path"], "ordinary-value")
+        self.assertEqual(restored["extensions"]["sample.png"], "ordinary-key")
+        image, code = restored["pages"][0]["blocks"]
+        self.assertEqual(image["content"][0]["image_path"], "images/sample.png")
+        self.assertEqual(image["content"][0]["content"], '<img src="images/sample.png"> ![a](images/sample.png) ![b](images/sample.png) <img src="images/sample.png"> ![c](images/sample.png)')
+        self.assertEqual(code["content"][0]["content"], "![literal](sample.png)")
 
 class DiagnosticTests(unittest.TestCase):
     def test_both_streams_are_captured_and_large_diagnostics_stay_bounded(self) -> None:
@@ -186,6 +213,82 @@ class DiagnosticTests(unittest.TestCase):
         self.assertLessEqual(len(output.buffer.getvalue()), worker.PROTOCOL_CAP)
 
 
+class OfficialOperationSerializationTests(unittest.TestCase):
+    def test_json_serialization_honors_skip_defaults_for_empty_pages(self) -> None:
+        class EmptyPages:
+            def to_dict(self, *, skip_defaults: bool) -> dict[str, object]:
+                page: dict[str, object] = {"page_idx": 1}
+                value: dict[str, object] = {"pages": [page]}
+                if not skip_defaults:
+                    page["blocks"] = []
+                    value.update({"schema_version": "2.0", "producer": "MinerU"})
+                return value
+
+            def to_json(self) -> str:
+                return json.dumps(self.to_dict(skip_defaults=True), ensure_ascii=False)
+
+        result = EmptyPages()
+        self.assertEqual(worker_operations.serialize_result(result, True, False), {"pages": [{"page_idx": 1}]})
+        self.assertEqual(
+            worker_operations.serialize_result(result, False, False),
+            {"pages": [{"page_idx": 1, "blocks": []}], "schema_version": "2.0", "producer": "MinerU"},
+        )
+        encoded = worker_operations.serialize_result(result, False, True)
+        self.assertIsInstance(encoded, str)
+        self.assertIn('"schema_version": "2.0"', cast(str, encoded))
+        self.assertIn('"producer": "MinerU"', cast(str, encoded))
+
+    def test_empty_render_options_are_allowed_for_all_frozen_formats(self) -> None:
+        for output_format in (
+            "markdown", "html", "latex", "docx", "epub", "structured_content",
+            "content_list", "content_list_v2", "pdf",
+        ):
+            self.assertEqual(worker_render.validate_render_options(output_format, {}), {})
+        with self.assertRaises(ValueError):
+            worker_render.validate_render_options("pdf", {"standalone": False})
+
+    def test_version_pin_in_both_worker_modes(self) -> None:
+        self.assertEqual(worker.PACKAGE_VERSION, "4.0.10")
+        request = {
+            "protocol": worker.PROTOCOL, "request_id": "version-test",
+            "tier": "standard", "ocr_mode": "auto", "image_analysis": False,
+            "input_path": "input.pdf", "bundle_path": "bundle",
+            "max_bundle_bytes": 1024, "bundle_name": worker.BUNDLE_NAME,
+        }
+        startup = {
+            "type": "start", "protocol": protocol.PERSISTENT_PROTOCOL,
+            "package_version": protocol.PACKAGE_VERSION,
+            "schema_version": protocol.SCHEMA_VERSION, "model_base_dir": None,
+            "config": None, "vlm_api_key": None, "vlm_model": None,
+            "capabilities": protocol.PERSISTENT_CAPABILITIES,
+        }
+        for version, accepted in (("4.0.10", True), ("4.0.4", False)):
+            for persistent in (False, True):
+                output = _BinaryOutput()
+                stdin = _BinaryInput(json.dumps(request).encode())
+                with (
+                    mock.patch.object(sys, "stdin", stdin),
+                    mock.patch.object(sys, "__stdout__", output),
+                    mock.patch.object(sys, "stderr", io.StringIO()),
+                    mock.patch.dict(os.environ),
+                    mock.patch.object(worker, "BundleWriter", return_value=object()),
+                    mock.patch.object(worker.importlib.metadata, "version", return_value=version),
+                    mock.patch.object(worker.importlib, "import_module", return_value=mock.Mock()),
+                    mock.patch.object(worker.asyncio, "run", return_value=mock.Mock()),
+                    mock.patch.object(protocol.importlib.metadata, "version", return_value=version),
+                    mock.patch.object(protocol, "_persistent_read_frame", side_effect=[startup, None]),
+                ):
+                    if persistent:
+                        protocol._persistent_main(lambda _path, _limit, **_kwargs: object())
+                    else:
+                        worker.main()
+                response = json.loads(output.buffer.getvalue().decode().splitlines()[0])
+                failed = response["type"] == "error" if persistent else response["status"] == "error"
+                self.assertEqual(failed, not accepted)
+                if not accepted:
+                    self.assertIn("4.0.10", response["error"])
+
+
 class RequestValidationTests(unittest.TestCase):
     def _request(self, **overrides: object) -> dict[str, object]:
         request: dict[str, object] = {
@@ -203,6 +306,7 @@ class RequestValidationTests(unittest.TestCase):
         return request
 
     def test_tier_and_ocr_mode_domains_match_upstream(self) -> None:
+        self.assertEqual(worker.PROTOCOL, "mineru-rs-official-worker/1")
         for tier in ("flash", "basic", "standard", "advanced"):
             protocol._validate_document_request(self._request(tier=tier))
         with self.assertRaises(ValueError):
@@ -277,6 +381,16 @@ class RequestValidationTests(unittest.TestCase):
 
 
 class PersistentFrameTests(unittest.TestCase):
+    def test_persistent_capability_orders_preserve_sdk_and_legacy_contracts(self) -> None:
+        self.assertEqual(
+            protocol.PERSISTENT_CAPABILITIES["input_formats"],
+            ["pdf", "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "jp2", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "rtf", "odt", "ods", "odp", "html", "htm", "shtml", "mhtml", "mht", "csv", "tsv", "epub", "ofd"],
+        )
+        self.assertEqual(
+            protocol.PERSISTENT_LEGACY_CAPABILITIES["input_formats"],
+            ["pdf", "png", "jpeg", "jpg", "jp2", "webp", "gif", "bmp", "tiff"],
+        )
+
     def _startup(self, **overrides: object) -> dict[str, object]:
         startup: dict[str, object] = {
             "type": "start",
@@ -313,6 +427,8 @@ class PersistentFrameTests(unittest.TestCase):
 
     def test_startup_frame_uses_model_base_dir(self) -> None:
         protocol._persistent_start(self._startup())
+        legacy = self._startup(capabilities=protocol.PERSISTENT_LEGACY_CAPABILITIES)
+        self.assertEqual(protocol._persistent_handshake(legacy)["capabilities"], protocol.PERSISTENT_LEGACY_CAPABILITIES)
         legacy = self._startup()
         del legacy["model_base_dir"]
         legacy["model_home"] = None

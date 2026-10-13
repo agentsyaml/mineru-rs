@@ -1,41 +1,27 @@
 #!/usr/bin/env python3
-"""Fail closed on the temporary, reviewed cargo-audit exception set."""
+"""Fail closed unless cargo-audit finds no vulnerabilities or ignored findings."""
 
 import argparse
-import datetime as dt
 import json
 import tempfile
 import tomllib
 from pathlib import Path
+from typing import NoReturn
 
-VULNERABILITIES = {
-    ("RUSTSEC-2026-0194", "quick-xml", "0.37.5"),
-    ("RUSTSEC-2026-0195", "quick-xml", "0.37.5"),
-    ("RUSTSEC-2026-0194", "quick-xml", "0.38.4"),
-    ("RUSTSEC-2026-0195", "quick-xml", "0.38.4"),
-}
 WARNINGS = {
     ("RUSTSEC-2025-0141", "bincode", "1.3.3"),
     ("RUSTSEC-2024-0436", "paste", "1.0.15"),
     ("RUSTSEC-2026-0206", "rustybuzz", "0.20.1"),
     ("RUSTSEC-2026-0192", "ttf-parser", "0.25.1"),
+    ("RUSTSEC-2024-0449", "unsafe-libyaml", "0.2.11"),
     ("RUSTSEC-2024-0320", "yaml-rust", "0.4.5"),
 }
-EDGES = {
-    ("umya-spreadsheet", "2.3.3", "quick-xml", "0.37.5"),
-    # office2pdf is the reverse parent of umya-spreadsheet in Cargo.lock.
-    ("office2pdf", "0.6.5", "umya-spreadsheet", "2.3.3"),
-    ("office2pdf", "0.6.5", "quick-xml", "0.38.4"),
-    ("office2pdf", "0.6.5", "typst", "0.14.2"),
-    ("citationberg", "0.6.1", "quick-xml", "0.38.4"),
-    ("hayagriva", "0.9.1", "citationberg", "0.6.1"),
-    ("typst-library", "0.14.2", "hayagriva", "0.9.1"),
-    ("typst", "0.14.2", "typst-library", "0.14.2"),
-}
-EXPIRY = dt.date(2026, 9, 30)
+QUICK_XML_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+QUICK_XML_VERSION = "0.41.0"
+QUICK_XML_CHECKSUM = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 
 
-def fail(message):
+def fail(message: str) -> NoReturn:
     raise ValueError(message)
 
 
@@ -59,72 +45,45 @@ def exact_set(items, expected, label, parser=tuple_from):
         fail(f"unexpected {label}: {sorted(set(found) ^ expected)!r}")
 
 
-def package_map(lock):
-    packages = lock.get("package")
-    if not isinstance(packages, list):
-        fail("Cargo.lock lacks package list")
-    result = {}
-    for package in packages:
-        if not isinstance(package, dict):
-            fail("Cargo.lock package is malformed")
-        name, version = package.get("name"), package.get("version")
-        if not isinstance(name, str) or not isinstance(version, str):
-            fail("Cargo.lock package lacks name/version")
-        key = (name, version)
-        if key in result:
-            fail(f"duplicate Cargo.lock package {key}")
-        dependencies = package.get("dependencies", [])
-        if not isinstance(dependencies, list) or not all(isinstance(item, str) for item in dependencies):
-            fail(f"malformed dependencies for {key}")
-        result[key] = dependencies
-    return result
-
-
 def check_lock(lock):
-    packages = package_map(lock)
-
-    def depends_on(dependencies, child, child_version):
-        if f"{child} {child_version}" in dependencies:
-            return True
-        if child in dependencies:
-            return [key for key in packages if key[0] == child] == [(child, child_version)]
-        return False
-
-    for parent, parent_version, child, child_version in EDGES:
-        dependencies = packages.get((parent, parent_version))
-        if dependencies is None or not depends_on(dependencies, child, child_version):
-            fail(f"missing reviewed edge {parent} {parent_version} -> {child} {child_version}")
-    for version, expected_parents in {
-        "0.37.5": {("umya-spreadsheet", "2.3.3")},
-        "0.38.4": {("office2pdf", "0.6.5"), ("citationberg", "0.6.1")},
-    }.items():
-        if ("quick-xml", version) not in packages:
-            fail(f"missing vulnerable quick-xml {version}")
-        parents = {
-            key for key, dependencies in packages.items()
-            if depends_on(dependencies, "quick-xml", version)
-        }
-        if parents != expected_parents:
-            fail(f"quick-xml {version} parent drift: {sorted(parents)!r}")
-def check_expiry(today):
-    # The exception set is pinned exactly by finding identity, package name,
-    # package version, and dependency edges above; the project's own version is
-    # unrelated to whether those exceptions still apply, so no project version
-    # gate exists.
-    if today >= EXPIRY:
-        fail(f"cargo-audit exception expired on {EXPIRY.isoformat()}")
+    if not isinstance(lock, dict) or lock.get("version") != 4:
+        fail("Cargo.lock must use the reviewed version 4 format")
+    packages = lock.get("package") if isinstance(lock, dict) else None
+    if not isinstance(packages, list) or not all(isinstance(item, dict) for item in packages):
+        fail("Cargo.lock lacks a valid package list")
+    xml_packages = [item for item in packages if item.get("name") == "quick-xml"]
+    if len(xml_packages) != 1:
+        fail(f"Cargo.lock must contain exactly one quick-xml package, found {len(xml_packages)}")
+    package = xml_packages[0]
+    if package.get("version") != QUICK_XML_VERSION:
+        fail(f"Cargo.lock quick-xml must be {QUICK_XML_VERSION}")
+    if package.get("source") != QUICK_XML_SOURCE:
+        fail("Cargo.lock quick-xml is not from the crates.io registry")
+    checksum = package.get("checksum")
+    if checksum != QUICK_XML_CHECKSUM:
+        fail("Cargo.lock quick-xml checksum is not the genuine crates.io 0.41.0 digest")
 
 
-def check(report, lock, today=None):
+def check(report, lock, audit_status):
     if not isinstance(report, dict) or set(report) != {"database", "lockfile", "settings", "vulnerabilities", "warnings"}:
         fail("malformed cargo-audit report schema")
+    if not isinstance(report["database"], dict) or not isinstance(report["lockfile"], dict):
+        fail("malformed cargo-audit database or lockfile metadata")
     settings = report["settings"]
     if not isinstance(settings, dict) or settings.get("ignore") != []:
         fail("cargo-audit report was filtered or malformed")
+    if type(audit_status) is not int or audit_status != 0:
+        fail(f"cargo-audit exited with status {audit_status}")
     vulnerabilities = report["vulnerabilities"]
-    if not isinstance(vulnerabilities, dict) or vulnerabilities.get("found") is not True or vulnerabilities.get("count") != 4 or not isinstance(vulnerabilities.get("list"), list):
+    if (
+        not isinstance(vulnerabilities, dict)
+        or set(vulnerabilities) != {"found", "count", "list"}
+        or vulnerabilities.get("found") is not False
+        or type(vulnerabilities.get("count")) is not int
+        or vulnerabilities["count"] != 0
+        or vulnerabilities.get("list") != []
+    ):
         fail("vulnerability count/found/list mismatch")
-    exact_set(vulnerabilities["list"], VULNERABILITIES, "vulnerability")
     warnings = report["warnings"]
     if (
         not isinstance(warnings, dict)
@@ -137,31 +96,29 @@ def check(report, lock, today=None):
             fail("malformed unmaintained warning")
     exact_set(warnings["unmaintained"], WARNINGS, "warning")
     check_lock(lock)
-    check_expiry(today or dt.datetime.now(dt.timezone.utc).date())
+
+
+def load_report(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"cannot parse cargo-audit JSON: {error}")
 
 
 def fixture():
     report = {
         "database": {}, "lockfile": {}, "settings": {"ignore": []},
-        "vulnerabilities": {"found": True, "count": 4, "list": []},
+        "vulnerabilities": {"found": False, "count": 0, "list": []},
         "warnings": {"unmaintained": []},
     }
-    report["vulnerabilities"]["list"] = [
-        {"advisory": {"id": advisory}, "package": {"name": name, "version": version}}
-        for advisory, name, version in sorted(VULNERABILITIES)
-    ]
     report["warnings"]["unmaintained"] = [
         {"kind": "unmaintained", "advisory": {"id": advisory}, "package": {"name": name, "version": version}}
         for advisory, name, version in sorted(WARNINGS)
     ]
-    packages = {}
-    for parent, parent_version, child, child_version in EDGES:
-        packages.setdefault((parent, parent_version), []).append(f"{child} {child_version}")
-        packages.setdefault((child, child_version), [])
-    lock = {"package": [
-        {"name": name, "version": version, "dependencies": dependencies}
-        for (name, version), dependencies in packages.items()
-    ]}
+    lock = {"version": 4, "package": [{
+        "name": "quick-xml", "version": QUICK_XML_VERSION,
+        "source": QUICK_XML_SOURCE, "checksum": QUICK_XML_CHECKSUM,
+    }]}
     return report, lock
 
 
@@ -171,33 +128,43 @@ def self_test():
         root = Path(directory)
         report_path, lock_path = root / "report.json", root / "Cargo.lock"
         report_path.write_text(json.dumps(report))
-        lock_path.write_text("\n".join(
-            "[[package]]\nname = \"{}\"\nversion = \"{}\"\ndependencies = [{}]\n".format(
-                package["name"], package["version"], ", ".join(json.dumps(item) for item in package["dependencies"])
-            ) for package in lock["package"]
-        ))
+        xml = lock["package"][0]
+        lock_path.write_text(
+            'version = 4\n\n'
+            f'[[package]]\nname = "quick-xml"\nversion = "{xml["version"]}"\n'
+            f'source = "{xml["source"]}"\nchecksum = "{xml["checksum"]}"\n'
+        )
         report = json.loads(report_path.read_text())
         lock = tomllib.loads(lock_path.read_text())
-    check(report, lock, dt.date(2026, 1, 1))
-    cases = []
-    unknown = json.loads(json.dumps(report)); unknown["vulnerabilities"]["list"][0]["advisory"]["id"] = "RUSTSEC-0000-0000"; cases.append((unknown, lock))
-    changed_version = json.loads(json.dumps(report)); changed_version["vulnerabilities"]["list"][0]["package"]["version"] = "0.37.6"; cases.append((changed_version, lock))
-    edge = json.loads(json.dumps(lock))
-    next(package for package in edge["package"] if package["name"] == "umya-spreadsheet")["dependencies"] = []
-    cases.append((report, edge))
-    warning = json.loads(json.dumps(report)); warning["warnings"]["unmaintained"].append(warning["warnings"]["unmaintained"][0]); cases.append((warning, lock))
-    cases.append(({}, lock))
-    for bad_report, bad_lock in cases:
+    check(report, lock, 0)
+
+    def rejected(bad_report=report, bad_lock=lock, status=0):
         try:
-            check(bad_report, bad_lock, dt.date(2026, 1, 1))
+            check(bad_report, bad_lock, status)
         except ValueError:
-            continue
-        raise AssertionError("self-test accepted an invalid fixture")
-    try:
-        check(report, lock, EXPIRY)
-    except ValueError:
-        return
-    raise AssertionError("self-test accepted an expired exception")
+            return
+        raise AssertionError("self-test accepted an invalid audit result")
+
+    for key, value in (("found", True), ("count", 1), ("list", [{"id": "vulnerability"}])):
+        bad = json.loads(json.dumps(report)); bad["vulnerabilities"][key] = value
+        rejected(bad)
+    bad = json.loads(json.dumps(report)); bad["settings"]["ignore"] = ["RUSTSEC-2026-0194"]; rejected(bad)
+    bad = json.loads(json.dumps(report)); bad["warnings"]["unexpected"] = []; rejected(bad)
+    for key, value in (("version", "0.38.4"), ("source", "git+https://example.invalid/quick-xml"), ("checksum", "not-a-checksum")):
+        bad = json.loads(json.dumps(lock)); bad["package"][0][key] = value
+        rejected(bad_lock=bad)
+    bad = json.loads(json.dumps(lock)); bad["package"].append(dict(bad["package"][0])); rejected(bad_lock=bad)
+    rejected(status=1)
+    rejected({})
+    with tempfile.TemporaryDirectory() as directory:
+        malformed = Path(directory) / "report.json"
+        malformed.write_text("{")
+        try:
+            load_report(malformed)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("self-test accepted malformed JSON")
 
 
 def main():
@@ -207,17 +174,18 @@ def main():
     production = subcommands.add_parser("check")
     production.add_argument("--report", type=Path, required=True)
     production.add_argument("--lockfile", type=Path, required=True)
+    production.add_argument("--audit-status", type=int, required=True)
     args = parser.parse_args()
     if args.command == "self-test":
         self_test()
         return
     try:
-        report = json.loads(args.report.read_text())
+        report = load_report(args.report)
         lock = tomllib.loads(args.lockfile.read_text())
-    except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
+    except (OSError, tomllib.TOMLDecodeError) as error:
         fail(f"cannot parse audit inputs: {error}")
-    check(report, lock)
-    print("cargo-audit exception approved: RUSTSEC-2026-0194, RUSTSEC-2026-0195 (quick-xml); expires 2026-09-30 UTC")
+    check(report, lock, args.audit_status)
+    print("cargo-audit report is clean; quick-xml lock entry is registry version 0.41.0")
 
 
 if __name__ == "__main__":

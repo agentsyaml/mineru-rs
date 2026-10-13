@@ -1,6 +1,7 @@
-//! Per-document subprocess boundary for the pinned MinerU 4.0.4 parser.
+//! Per-document subprocess boundary for the pinned MinerU 4.0.10 parser.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
@@ -20,55 +21,22 @@ use tokio::{
 #[cfg(test)]
 mod per_document_tests;
 mod persistent;
-mod process;
+pub(crate) mod process;
+mod python_shim;
 
 pub(crate) use persistent::{OfficialPersistentWorker, OfficialSessionConfig};
+use python_shim::PythonShim;
+#[cfg(test)]
+pub(crate) use python_shim::{PYTHON_SHIM, PYTHON_WORKER_FILES};
 
 const PROTOCOL: &str = "mineru-rs-official-worker/1";
-const PACKAGE_VERSION: &str = "4.0.4";
+const PACKAGE_VERSION: &str = "4.0.10";
 const SCHEMA_VERSION: &str = "2.0";
 const PERSISTENT_PROTOCOL: &str = "mineru-rs-official-worker/2";
 const STDOUT_CAP: usize = 64 * 1024;
 const STDERR_CAP: usize = 64 * 1024;
 const REQUEST_CAP: usize = 64 * 1024;
 const REAP_GRACE: Duration = Duration::from_millis(250);
-const PYTHON_SHIM: &str = concat!(
-    include_str!("../python/mineru_official_worker_protocol.py"),
-    "\n",
-    include_str!("../python/mineru_official_worker.py"),
-);
-
-struct PythonShim {
-    _temporary: TempDir,
-    path: PathBuf,
-}
-
-impl PythonShim {
-    fn new() -> Result<Self, String> {
-        let temporary = tempfile::tempdir()
-            .map_err(|error| format!("official worker Python shim tempdir: {error}"))?;
-        let path = temporary.path().join("official_worker.py");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| format!("official worker Python shim create: {error}"))?;
-        file.write_all(PYTHON_SHIM.as_bytes())
-            .map_err(|error| format!("official worker Python shim write: {error}"))?;
-        file.flush()
-            .map_err(|error| format!("official worker Python shim flush: {error}"))?;
-        drop(file);
-        Ok(Self {
-            _temporary: temporary,
-            path,
-        })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
 // Mirrors upstream mineru.types.TIERS and the OCR modes accepted by
 // mineru.parser.parse_async; capabilities advertise this exact set.
 const PERSISTENT_TIERS: &[&str] = &["flash", "basic", "standard", "advanced"];
@@ -87,7 +55,7 @@ use process::{
     copy_runtime_environment, official_executable, terminate, with_truncated_diagnostic,
 };
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct OfficialRequest {
     pub(crate) protocol: &'static str,
     pub(crate) request_id: String,
@@ -106,6 +74,14 @@ pub(crate) struct OfficialRequest {
     pub(crate) model_base_dir: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) config: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_context: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) official_vlm_config: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) operation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) operation_assets: Option<PathBuf>,
     pub(crate) max_bundle_bytes: u64,
     pub(crate) bundle_name: &'static str,
     pub(crate) input_path: PathBuf,
@@ -140,6 +116,10 @@ impl OfficialRequest {
             vlm_model,
             model_base_dir,
             config,
+            source_context: None,
+            official_vlm_config: None,
+            operation: None,
+            operation_assets: None,
             max_bundle_bytes,
             bundle_name: crate::hybrid_v4_output::BUNDLE_NAME,
             input_path,
@@ -175,8 +155,20 @@ impl OfficialWorker {
         &self,
         input: &[u8],
         suffix: &str,
+        request: OfficialRequest,
+        deadline: Instant,
+    ) -> Result<OfficialBundle, String> {
+        self.run_with_files(input, suffix, request, deadline, &[])
+            .await
+    }
+
+    pub(crate) async fn run_with_files(
+        &self,
+        input: &[u8],
+        suffix: &str,
         mut request: OfficialRequest,
         deadline: Instant,
+        files: &[(&str, &[u8])],
     ) -> Result<OfficialBundle, String> {
         if input.is_empty() {
             return Err("official Hybrid input is empty".into());
@@ -191,6 +183,31 @@ impl OfficialWorker {
         file.write_all(input)
             .and_then(|_| file.flush())
             .map_err(|e| format!("official worker input snapshot: {e}"))?;
+        if !files.is_empty() && request.operation.is_none() {
+            return Err("private operation files require an operation".into());
+        }
+        if request.operation.is_some() {
+            let operation_root = temporary.path().join("operation-assets");
+            std::fs::create_dir_all(&operation_root)
+                .map_err(|e| format!("operation asset directory: {e}"))?;
+            for (name, bytes) in files {
+                let relative = Path::new(name);
+                if relative.is_absolute()
+                    || relative
+                        .components()
+                        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+                {
+                    return Err("unsafe private operation asset path".into());
+                }
+                let target = operation_root.join(relative);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("operation asset directory: {e}"))?;
+                }
+                std::fs::write(target, bytes).map_err(|e| format!("operation asset write: {e}"))?;
+            }
+            request.operation_assets = Some(operation_root);
+        }
         let bundle = temporary.path().join(crate::hybrid_v4_output::BUNDLE_NAME);
         request.input_path = input_path;
         request.bundle_path = bundle.clone();
@@ -317,7 +334,9 @@ impl OfficialWorker {
             return Err("official worker request id mismatch".into());
         }
         if response.package_version != PACKAGE_VERSION {
-            return Err("official worker MinerU package version is not 4.0.4".into());
+            return Err(format!(
+                "official worker MinerU package version is not {PACKAGE_VERSION}"
+            ));
         }
         if response.schema_version != SCHEMA_VERSION {
             return Err("official worker result schema version mismatch".into());

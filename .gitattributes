@@ -1,3 +1,4 @@
 *.pdf binary
 tests/fixtures/official/** whitespace=-trailing-space
 tests/fixtures/legacy/** -text
+/tools/deps/office-xml041/*.json text eol=lf

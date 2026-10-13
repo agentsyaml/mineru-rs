@@ -7,15 +7,21 @@
 MinerU VLM 模型有两种运行方式：
 
 - **远程**——让工具连接 OpenAI 兼容的 MinerU VLM 服务，无需在自己的机器上运行模型即可解析文档。
-- **外部服务（可选）**——让工具连接一个在仓库外准备好的 OpenAI 兼容服务端点；见 [Docker](#docker)。这是未经验证的 provider 示例，不表示兼容 MinerU 4.0.4 的多模态协议或模型。这与 CLI 的 `backend=local` 不同：后者通过隔离的 Rust `mineru-office-convert` 辅助程序调用 AnyDoc，抽取支持的旧格式和干净文本 PDF Markdown；该辅助程序不启动 Python、Microsoft Office/LibreOffice，不加载模型，也不发网络请求。
+- **外部服务（可选）**——让工具连接一个在仓库外准备好的 OpenAI 兼容服务端点；见 [Docker](#docker)。这是未经验证的 provider 示例，不表示兼容 MinerU 4.0.10 的多模态协议或模型。这与 CLI 的 `backend=local` 不同：后者通过隔离的 Rust `mineru-office-convert` 辅助程序调用 AnyDoc，抽取支持的旧格式和干净文本 PDF Markdown；该辅助程序不启动 Python、Microsoft Office/LibreOffice，不加载模型，也不发网络请求。
 
-在 MinerU 3.4.5 VLM 范围内，MinerU Rust 是 MinerU Python SDK `vlm-http-client` 路径的可直接替代实现，可以完全替代该 VLM 工作流。直接 `backend=hybrid-http-client` 是独立的官方 MinerU 4.0.4 边界：要求用户安装精确版本的 Python 包（`mineru==4.0.4`，发布 tag `v4.0.4`）；未指定 worker 模式时，一个可运行文档使用一个带内嵌 shim 的子进程，多个可运行文档使用 persistent worker。显式 `--official-worker-mode` 会覆盖该自动选择。输出写入独立的 `hybrid-v4` 路径。CLI 另提供独立的 `backend=local` AnyDoc 原生 Markdown 路径；这是项目私有的 native lane，不是官方 Hybrid。API Hybrid 仍 fail-closed，不会冒充旧 3.4.5 VLM 路径。参见[兼容性契约](docs/compatibility.md)和[使用指南](docs/usage.md)。文档大小限制控制项及其 CLI/API 适用范围见使用指南。
+在 MinerU 3.4.5 VLM 范围内，MinerU Rust 是 MinerU Python SDK `vlm-http-client` 路径的可直接替代实现，可以完全替代该 VLM 工作流。直接 `backend=hybrid-http-client` 是独立的官方 MinerU 4.0.10 边界：要求用户安装精确版本的 Python 包（`mineru==4.0.10`，发布 tag `mineru-4.0.10-released`）；未指定 worker 模式时，一个可运行文档使用一个带内嵌 shim 的子进程，多个可运行文档使用 persistent worker。显式 `--official-worker-mode` 会覆盖该自动选择。输出写入独立的 `hybrid-v4` 路径。CLI 另提供独立的 `backend=local` AnyDoc 原生 Markdown 路径；这是项目私有的 native lane，不是官方 Hybrid。API Hybrid 仍 fail-closed，不会冒充旧 3.4.5 VLM 路径。参见[兼容性契约](docs/compatibility.md)和[使用指南](docs/usage.md)。文档大小限制控制项及其 CLI/API 适用范围见使用指南。
 
-**没有 GPU？** PDF/图像流水线仍驱动 VLM 端点；需要完整版面解析时，纯 CPU 的替代方案是官方 MinerU Python pipeline（PP-OCRv6）：它产出相同的 `document.json` / `middle.json` / `content_list.json` / markdown 契约，两份输出可互换消费。非 local CLI 路径的旧格式会先由隔离 helper 尽力生成有界的仅文本 PDF，再进入现有 PDF/VLM 路径；原版式、图片、表格、公式和宏可能丢失，非 ASCII 字符可能变成 `?`，若不适用请先用 Microsoft Office 或 LibreOffice 保存为 DOCX/XLSX/PPTX。无 VLM 服务时仍可用 `backend=local`（通过隔离 Rust helper 运行 AnyDoc，仅 Markdown、无版面 JSON）；该路径不启动 Python、Office，不加载模型，也不发网络请求。不确定的 PDF 会明确失败，不伪造 official 输出。官方 MinerU 4.0.4 直接 Hybrid 经该 Python 边界运行：`--tier flash|basic|standard|advanced` 与上游 tier 一一对应（`--effort medium|high|xhigh` 仍是兼容别名：`medium` 映射到 tier `standard`，`high`/`xhigh` 映射到 tier `advanced`；两者同时给出时 `--tier` 优先；在其他 backend 与 API 模式下 `--tier` 会被拒绝），`--method auto|txt|ocr` 直接映射到上游 `ocr_mode`。任意 tier 都接受 `--url` / `MINERU_VL_SERVER`；不提供 URL 时上游使用其本地 VLM 引擎。注意上游 4.0.4 在该 lane 的其余约束：`--lang` 守卫按规范化后的语言比较（`en`、`japan`、`chinese_cht`、`latin` 会被接受，它们规范化为 `ch`；其他非默认值会被拒绝）；模型栈改由 `MINERU_CONFIG` 配置（上游移除了 `model.stack`/`MINERU_MODEL_STACK`），非默认 `--model-stack` 会被拒绝。Python、MinerU 与模型文件不随 Rust 二进制打包。Docker/llama.cpp 编排不属于此边界（见[兼容性说明](docs/compatibility.md)）。
+Rust、Python 与 Node 的新增 rich SDK 见[官方 SDK 指南](docs/official-sdk.md)。使用前须从本仓库构建对应的 native binding；当前发布的 `0.3.0` Python/npm 包不保证包含新 API。原有 `run`/`parse` 行为不变。另有独立的 opt-in official-v1 上传/作业接口，见[HTTP API 指南](docs/official-http.md)；实现仍待集中构建与测试。
+
+**没有 GPU？** PDF/图像流水线仍驱动 VLM 端点；需要完整版面解析时，纯 CPU 的替代方案是官方 MinerU Python pipeline（PP-OCRv6）：它产出相同的 `document.json` / `middle.json` / `content_list.json` / markdown 契约，两份输出可互换消费。非 local CLI 路径的旧格式会先由隔离 helper 尽力生成有界的仅文本 PDF，再进入现有 PDF/VLM 路径；原版式、图片、表格、公式和宏可能丢失，非 ASCII 字符可能变成 `?`，若不适用请先用 Microsoft Office 或 LibreOffice 保存为 DOCX/XLSX/PPTX。无 VLM 服务时仍可用 `backend=local`（通过隔离 Rust helper 运行 AnyDoc，仅 Markdown、无版面 JSON）；该路径不启动 Python、Office，不加载模型，也不发网络请求。不确定的 PDF 会明确失败，不伪造 official 输出。官方 MinerU 4.0.10 直接 Hybrid 经该 Python 边界运行：`--tier flash|basic|standard|advanced` 与上游 tier 一一对应（`--effort medium|high|xhigh` 仍是兼容别名：`medium` 映射到 tier `standard`，`high`/`xhigh` 映射到 tier `advanced`；两者同时给出时 `--tier` 优先；在其他 backend 与 API 模式下 `--tier` 会被拒绝），`--method auto|txt|ocr` 直接映射到上游 `ocr_mode`。任意 tier 都接受 `--url` / `MINERU_VL_SERVER`；不提供 URL 时上游使用其本地 VLM 引擎。注意当前 4.0.10 lane 的其余约束：`--lang` 守卫按规范化后的语言比较（`en`、`japan`、`chinese_cht`、`latin` 会被接受，它们规范化为 `ch`；其他非默认值会被拒绝）；模型栈已在 4.0.10 之前移除，当前版本不支持 `model.stack`/`MINERU_MODEL_STACK`，模型栈改由 `MINERU_CONFIG` 配置，非默认 `--model-stack` 会被拒绝。Python、MinerU 与模型文件不随 Rust 二进制打包。Docker/llama.cpp 编排不属于此边界（见[兼容性说明](docs/compatibility.md)）。
 
 远程协议固定于 MinerU `vlm-http-client` 传输基线，因此需要兼容 MinerU 的 VLM 端点——通用聊天模型无法产出版面结果。
 
 需要 Rust 1.89 或更高版本。
+
+由于根 Cargo 补丁不会传递给 crates.io 消费者，`mineru` 的 crates.io 发布暂时暂停。
+Rust 二进制请从本仓库构建或安装；Python、Node、容器和二进制发布路径独立保留，
+其 Office helper 可用性没有改变。
 
 ## 性能
 
@@ -38,10 +44,9 @@ Rust 客户端全程保持更小的常驻内存：流式消费 VLM 响应并增�
 | `MINERU_VL_MODEL_NAME` | 模型 ID | `model-id` |
 | `MINERU_VL_API_KEY` | Bearer 令牌 | `your-key` |
 
-通过 Cargo、pip 或 npm 安装 `mineru` 命令：
+通过 pip 或 npm 安装 `mineru`；Rust CLI 从已准备的源码仓库安装，见[安装](#安装)：
 
 ```sh
-cargo install mineru            # Rust
 pip install mineru-rs           # Python
 npm install @alexsun-top/mineru # Node.js
 ```
@@ -64,9 +69,8 @@ mineru -p input.pdf -o out/
 
 ## Rust 库
 
-```sh
-cargo add mineru
-```
+crates.io 安装暂时暂停；下方 Rust 库示例适用于已准备好本工作区依赖的源码检出，
+并非已发布的 registry 软件包。
 
 ```rust
 use mineru::{RunOptions, run};
@@ -108,7 +112,7 @@ asyncio.run(main())
 
 `run()` 则把完整输出树写入输出目录（见[使用指南](docs/usage.md)）。该 wheel 安装两个等效的控制台命令 `mineru` 和 `mineru-rs`；若同时安装了上游 Python `mineru` 软件包，应优先使用 `mineru-rs`，因为两者都提供 `mineru` 入口点，`PATH` 中靠前的那个会生效。发布物仅为 wheel；对于不受支持的平台或 PyPy，没有 sdist 或源代码回退方案。
 
-Python wheel 不打包 `mineru-office-convert` 辅助程序：绑定包暂不支持 Office 格式（`.docx`/`.pptx`/`.xlsx`）输入，传入 Office 文档会报 "office conversion is unavailable"。PDF 与图像输入不受影响；需要 Office 转换时请使用 Rust CLI（`cargo install mineru --features office`）或 `mineru-api` 服务端。
+旧版 Python `run`/`parse` 流程不打包 `mineru-office-convert`，也不执行 Office 到 PDF 转换；传入 Office 文档会报 "office conversion is unavailable"。从本仓库构建 native binding 后，独立 rich SDK 可使用官方 worker 支持的输入格式，详见[SDK 指南](docs/official-sdk.md)。
 
 ## Node.js
 
@@ -129,26 +133,23 @@ await writeFile('out.md', markdown)
 
 `run({ path, output })` 则把完整输出树写入 `output`（见[使用指南](docs/usage.md)）。根软件包安装两个等效二进制文件 `mineru` 和 `mineru-rs`，两者都指向 `bin/mineru.js`；若 `PATH` 上已有另一个 `mineru` 命令，应优先使用 `mineru-rs`。
 
-npm 软件包不打包 `mineru-office-convert` 辅助程序：绑定包暂不支持 Office 格式（`.docx`/`.pptx`/`.xlsx`）输入，传入 Office 文档会报 "office conversion is unavailable"。PDF 与图像输入不受影响；需要 Office 转换时请使用 Rust CLI（`cargo install mineru --features office`）或 `mineru-api` 服务端。
+旧版 Node `run`/`parse` 流程不打包 `mineru-office-convert`，也不执行 Office 到 PDF 转换；传入 Office 文档会报 "office conversion is unavailable"。从本仓库构建 native binding 后，独立 rich SDK 可使用官方 worker 支持的输入格式，详见[SDK 指南](docs/official-sdk.md)。
 
 ## CLI 和 API 服务端
 
-```sh
-cargo install mineru
-mineru --help
-```
+从已准备的源码仓库安装 Rust CLI，命令见下文。
 
-该软件包安装 `mineru`、`mineru-api` 和 `mineru-office-convert` 三个二进制文件。转换能力按 feature 可选启用：
+源码构建会生成 `mineru`、`mineru-api` 和 `mineru-office-convert` 三个二进制文件。转换能力按 feature 可选启用。请先按下文“安装”运行依赖准备命令；在此仓库执行任何 Cargo 命令前都必须先准备：
 
 ```sh
-cargo install mineru --features office          # docx/pptx/xlsx → PDF + VLM
-cargo install mineru --features legacy-office   # 旧格式 → 尽力文本 PDF + VLM；local/native PDF → Markdown
-cargo install mineru --features office,legacy-office
+cargo install --path . --locked --features office          # docx/pptx/xlsx → PDF + VLM
+cargo install --path . --locked --features legacy-office   # 旧格式 → 尽力文本 PDF + VLM；local/native PDF → Markdown
+cargo install --path . --locked --features office,legacy-office
 ```
 
 `mineru --backend local` 支持上述 `legacy-office` 旧格式和干净文本 PDF，并通过隔离且有界的 Rust `mineru-office-convert` 辅助程序运行 AnyDoc：不启动 Python、Microsoft Office/LibreOffice，不调用模型，也不发网络请求。旧格式输出为 `output/{stem}/office/{stem}.md`，native PDF 输出为 `output/{stem}/native/{stem}.md`，后者只有 Markdown 文件，不生成 `document.json`、`middle.json`、`content-list` 或 assets。扫描、混合、乱码、低质量或不确定的 PDF 会明确失败，不回退到 VLM；`backend=local` 也不是本地 `llama-server` 后端。local 使用辅助程序的有界默认策略；helper 专属的 wall/CPU/内存/NOFILE/进程隔离参数在未明确支持时会明确拒绝，不会静默忽略。当前仅支持输入/输出字节限制配置。`mineru-api` 的 backend 语义保持不变。
 
-`--backend hybrid-http-client` 在直接模式使用官方 MinerU 4.0.4 worker；API 模式仍明确拒绝，不会静默进入旧 VLM 路径。默认 `vlm-http-client` 始终保持现有远程 VLM 行为。
+`--backend hybrid-http-client` 在直接模式使用官方 MinerU 4.0.10 worker；API 模式仍明确拒绝，不会静默进入旧 VLM 路径。默认 `vlm-http-client` 始终保持现有远程 VLM 行为。
 
 不使用 `backend=local` 时，同一组旧格式会由隔离 helper 先生成有界的仅文本尽力 PDF，再进入现有 VLM 路径。该转换可能丢失 Office 原版式、图片、表格、公式或宏，非 ASCII 字符可能变为 `?`；若这些细节重要，请先用 Microsoft Office 或 LibreOffice 转存为 DOCX/XLSX/PPTX。
 
@@ -182,7 +183,7 @@ mineru -p input.pdf -o output --api-url http://127.0.0.1:8000
 
 ## 安装
 
-- **crates.io**——`cargo install mineru`（加 `--features office` 支持 docx/pptx/xlsx→PDF，加 `--features legacy-office` 支持非 local CLI 的旧格式尽力文本 PDF 转换；需 Rust 1.89+）。
+- **Rust CLI**——按下文说明从已准备的源码仓库安装（需 Rust 1.89+；crates.io 发布暂时暂停）。
 - **Python**——`pip install mineru-rs`（支持 CPython 3.9+）。
 - **Node.js**——`npm install @alexsun-top/mineru`（需 Node.js 18+）。
 - **Docker**——见 [Docker](#docker)。
@@ -192,11 +193,20 @@ mineru -p input.pdf -o output --api-url http://127.0.0.1:8000
 ```sh
 git clone https://github.com/agentsyaml/mineru-rs
 cd mineru-rs
-cargo build --release
+python3 tools/deps/prepare_office.py prepare
+python3 tools/deps/prepare_office.py verify
+cargo build --release --locked --features office,legacy-office
 ./target/release/mineru --help
 ```
 
-作为库使用：`cargo add mineru`。
+在此仓库执行任何 Cargo 命令前（包括 metadata、格式检查和 no-default-feature 命令），
+都必须先运行以上两个 Python 命令。需要 Python 3.9+；prepare 首次会联网下载带哈希校验的
+源码归档，verify 离线检查生成的、被忽略的 `.deps/office-xml041/`。不要手工修改该目录；
+目录内容不匹配时校验会失败。确认生成目录损坏后，只移除 `.deps/office-xml041/` 并重新运行
+prepare、verify；不要删除整个 `.deps/` 或 Cargo 缓存。安装 CLI：
+`cargo install --path . --locked --features office,legacy-office`。
+
+crates.io 库安装暂时暂停；工作区补丁不会传递给 registry 消费者。
 
 ## 二进制文件
 
@@ -215,11 +225,12 @@ cargo build --release
 非 root 用户运行。已发布版本的 Rust 二进制使用 `office,legacy-office`
 feature；这不包含 Python 或本地模型推理。
 
-该镜像只包含 Rust 二进制：不包含 Python、`mineru==4.0.4` 或模型文件。
+该镜像只包含 Rust 二进制：不包含 Python、`mineru==4.0.10` 或模型文件。
 因此，官方 Hybrid 需要显式提供一个另行准备好的环境；API Hybrid 在该镜像中仍
 fail-closed，绝不会冒充 3.4.5 VLM 路径。
-已发布镜像请使用明确的版本化 tag，例如当前的 `:0.3.0`；发布流程不会发布或
-更新可变的 `latest` tag。
+已发布镜像请使用明确的版本化 tag；下方 `:0.3.0` 是上一版已发布镜像示例。本工作树
+目标版本为 `0.3.1`，本次仅修改版本号，不会发布该版本。发布流程不会更新可变的
+`latest` tag。
 
 该镜像默认用 `--host 0.0.0.0` 启动 `mineru-api`，并设置
 `MINERU_API_PUBLIC_BIND_EXPOSED=true`，使 Docker 可以访问容器端口。该监听权限
@@ -275,7 +286,7 @@ provider-image baseline；兼容性文档中的 MinerU `3.4.5` 是 VLM 协议基
 时运行 `docker compose up -d`。
 
 上面的 GHCR 镜像是已发布的 Rust API 镜像，不是包含 Python/模型的推理运行时。
-Compose profile 只是独立的 provider 示例，不会准备或验证 MinerU 4.0.4 模型。
+Compose profile 只是独立的 provider 示例，不会准备或验证 MinerU 4.0.10 模型。
 
 ## 示例
 

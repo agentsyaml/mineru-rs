@@ -133,6 +133,37 @@ pub(super) fn copy_bundle(bundle: &Path, stage: &Dir, byte_cap: u64) -> Result<(
     )
 }
 
+pub(crate) fn read_bundle_file_nofollow(
+    bundle: &Path,
+    relative: &Path,
+    cap: u64,
+) -> Result<Vec<u8>, String> {
+    let parts = relative
+        .components()
+        .map(|part| match part {
+            std::path::Component::Normal(name) => Ok(name.to_owned()),
+            _ => Err("unsafe hybrid-v4 result path".to_owned()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parts.is_empty() {
+        return Err("empty hybrid-v4 result path".into());
+    }
+    let mut directory = super::open_bundle(bundle)?;
+    for part in &parts[..parts.len() - 1] {
+        directory = open_child(&directory, &part)?;
+    }
+    let mut file = super::open_file_nofollow(&directory, &parts[parts.len() - 1])?;
+    let expected = file.metadata().map_err(|e| e.to_string())?.len();
+    if expected > cap {
+        return Err("hybrid-v4 result file exceeds its read limit".into());
+    }
+    let bytes = read_bounded(&mut file, cap)?;
+    if bytes.len() as u64 != expected {
+        return Err("hybrid-v4 result file changed while reading".into());
+    }
+    Ok(bytes)
+}
+
 fn walk_directory(
     source: &Dir,
     destination: &Dir,

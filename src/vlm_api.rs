@@ -12,6 +12,7 @@ use axum::{
         multipart::{MultipartError, MultipartRejection},
     },
     http::{StatusCode, header},
+    middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -40,6 +41,10 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     task::JoinSet,
 };
+
+#[cfg(test)]
+#[path = "vlm_api_official_policy_tests.rs"]
+mod official_policy_tests;
 
 #[cfg(test)]
 const FILE_CAP: u64 = 1024 * 1024 * 1024;
@@ -582,6 +587,39 @@ pub async fn serve(
     config: ServiceConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), std::io::Error> {
+    serve_inner(listener, config, None, shutdown).await
+}
+
+pub struct ServiceBuilder {
+    config: ServiceConfig,
+    official_runtime: Option<crate::official::OfficialRuntime>,
+}
+impl ServiceBuilder {
+    pub fn new(config: ServiceConfig) -> Self {
+        Self {
+            config,
+            official_runtime: None,
+        }
+    }
+    pub fn with_official_runtime(mut self, runtime: crate::official::OfficialRuntime) -> Self {
+        self.official_runtime = Some(runtime);
+        self
+    }
+    pub async fn serve(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<(), std::io::Error> {
+        serve_inner(listener, self.config, self.official_runtime, shutdown).await
+    }
+}
+
+async fn serve_inner(
+    listener: tokio::net::TcpListener,
+    config: ServiceConfig,
+    official_runtime: Option<crate::official::OfficialRuntime>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), std::io::Error> {
     let transport_policy = config
         .document_limits
         .unwrap_or_else(crate::DocumentLimitPolicy::defaults);
@@ -647,19 +685,33 @@ pub async fn serve(
         #[cfg(test)]
         test_http: config.test_http,
     };
+    let official_service = match official_runtime {
+        Some(runtime) => Some(crate::vlm_api_official::start(
+            runtime,
+            app.slots.clone(),
+            app.gate.clone(),
+            app.ids.clone(),
+            app.retention,
+            app.limits.file,
+            app.limits.body,
+            app.server_zip_cap,
+        )?),
+        None => None,
+    };
     let (cleanup_stop, mut cleanup_stopped) = oneshot::channel();
     let cleanup_app = app.clone();
+    let cleanup_official = official_service.clone();
     let cleanup = tokio::spawn(async move {
         let mut tick = tokio::time::interval(cleanup_app.cleanup_interval);
         tick.tick().await;
         loop {
             tokio::select! {
-                _ = tick.tick() => { cleanup_records(&cleanup_app.records, cleanup_app.retention); reap_workers(&cleanup_app.workers, &cleanup_app.records, &cleanup_app.events).await; }
+                _ = tick.tick() => { cleanup_records(&cleanup_app.records, cleanup_app.retention); reap_workers(&cleanup_app.workers, &cleanup_app.records, &cleanup_app.events).await; if let Some(service) = &cleanup_official { service.cleanup_expired(); } }
                 _ = &mut cleanup_stopped => break,
             }
         }
     });
-    let router = Router::new()
+    let router = Router::<App>::new()
         .route("/health", get(health))
         .route("/tasks", post(submit))
         .route("/file_parse", post(file_parse))
@@ -667,14 +719,29 @@ pub async fn serve(
         .route("/tasks/{id}/result", get(result))
         .layer(DefaultBodyLimit::max(app.limits.body))
         .with_state(app.clone());
+    let router = match &official_service {
+        Some(service) => router.merge(
+            service
+                .router()
+                .route_layer(from_fn_with_state(app.clone(), official_submission_policy)),
+        ),
+        None => router.route("/v1/health", get(official_v1_health)),
+    };
     crate::progress_events::emit(
         &app.events,
         ProgressEvent::ServerStarted {
             address: addr.to_string(),
         },
     );
+    let shutdown_service = official_service.clone();
+    let shutdown_signal = async move {
+        shutdown.await;
+        if let Some(service) = shutdown_service {
+            service.stop_admissions();
+        }
+    };
     let result = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(shutdown_signal)
         .await;
     let _ = cleanup_stop.send(());
     let _ = cleanup.await;
@@ -705,6 +772,12 @@ pub async fn serve(
         let _ = probe.send("raster");
     }
     app.records.lock().unwrap().clear();
+    if let Some(service) = &official_service {
+        service
+            .shutdown()
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
     #[cfg(test)]
     if let Some(probe) = &shutdown_probe {
         let _ = probe.send("records");
@@ -712,9 +785,54 @@ pub async fn serve(
     crate::progress_events::emit(&app.events, ProgressEvent::ServerStopped);
     result
 }
+async fn official_v1_health() -> Json<crate::official_api::Health> {
+    Json(crate::official_api::Health {
+        status: "ok",
+        version: "4.0.10",
+        features: crate::official_api::HealthFeatures {
+            webhook: false,
+            output_formats: Vec::new(),
+            sources: Vec::new(),
+        },
+    })
+}
 fn error(code: StatusCode, message: &'static str) -> Response {
     (code, Json(json!({"detail":message}))).into_response()
 }
+const PUBLIC_CLIENT_DISABLED: &str = "public HTTP-client requests are disabled";
+
+fn public_http_client_allowed(app: &App) -> bool {
+    !app.public_listener || app.allow_public_http_client
+}
+
+fn official_submission_route(method: &axum::http::Method, path: &str) -> bool {
+    if method == axum::http::Method::POST && matches!(path, "/v1/uploads" | "/v1/parse/jobs") {
+        return true;
+    }
+    let parts: Vec<_> = path.split('/').collect();
+    parts.len() == 5
+        && parts[1] == "v1"
+        && parts[2] == "uploads"
+        && !parts[3].is_empty()
+        && ((method == axum::http::Method::PUT && parts[4] == "content")
+            || (method == axum::http::Method::POST && parts[4] == "complete"))
+}
+
+async fn official_submission_policy(
+    State(app): State<App>,
+    request: axum::http::Request<Body>,
+    next: Next,
+) -> Response {
+    if !official_submission_route(request.method(), request.uri().path())
+        || public_http_client_allowed(&app)
+    {
+        return next.run(request).await;
+    }
+    rejected(&app.events, PUBLIC_CLIENT_DISABLED);
+    crate::official_api::wire::WireError::bad("public_policy", PUBLIC_CLIENT_DISABLED)
+        .into_response()
+}
+
 struct PublicPostPolicy;
 impl FromRequestParts<App> for PublicPostPolicy {
     type Rejection = Response;
@@ -723,12 +841,9 @@ impl FromRequestParts<App> for PublicPostPolicy {
         _: &mut axum::http::request::Parts,
         app: &App,
     ) -> Result<Self, Self::Rejection> {
-        if app.public_listener && !app.allow_public_http_client {
-            rejected(&app.events, "public HTTP-client requests are disabled");
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "public HTTP-client requests are disabled",
-            ));
+        if !public_http_client_allowed(app) {
+            rejected(&app.events, PUBLIC_CLIENT_DISABLED);
+            return Err(error(StatusCode::BAD_REQUEST, PUBLIC_CLIENT_DISABLED));
         }
         Ok(Self)
     }
@@ -2583,6 +2698,23 @@ mod tests {
     use std::io::Read;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn legacy_service_config_still_constructs_without_official_runtime() {
+        let config =
+            ServiceConfig::new(1, PathBuf::new(), OfficialPdfOptions::default(), None, None)
+                .unwrap();
+        let _builder = ServiceBuilder::new(config);
+    }
+
+    #[tokio::test]
+    async fn disabled_official_health_advertises_no_capabilities() {
+        let Json(health) = official_v1_health().await;
+        assert_eq!(health.status, "ok");
+        assert_eq!(health.version, "4.0.10");
+        assert!(health.features.output_formats.is_empty());
+        assert!(health.features.sources.is_empty());
+    }
 
     fn nested_fixture() -> Vec<u8> {
         let mut doc = lopdf::Document::with_version("1.5");

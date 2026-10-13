@@ -1,7 +1,16 @@
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
-from typing import List, Literal, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Union
+
+from .official import (
+    HtmlSourceContext, OfficialBatchItem, OfficialBatchResult, OfficialBinary,
+    OfficialJson, OfficialLatexDelimiter, OfficialLatexDelimiters, OfficialOcrMode,
+    OfficialParseOptions, OfficialParser, OfficialPdfLayout, OfficialRenderFormat,
+    OfficialRenderMode, OfficialRenderOptions, OfficialRendered, OfficialResult,
+    OfficialRuntime, OfficialText, OfficialTier, OfficialVersionMetadata,
+    OfficialVlmConfig, OfficialWorkerMode, parse_batch_rich, parse_rich,
+)
 
 Method = Literal["auto", "txt", "ocr"]
 Backend = Literal["vlm-http-client"]

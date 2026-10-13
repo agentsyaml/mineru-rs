@@ -1,4 +1,4 @@
-"""Project-owned adapter for the pinned MinerU 4.0.4 parser.
+"""Project-owned adapter for the pinned MinerU 4.0.10 parser.
 
 This is not an official MinerU worker protocol.  Rust supplies one JSON request
 on stdin and owns the process lifetime; this shim only imports MinerU, invokes
@@ -16,15 +16,16 @@ import tempfile
 from typing import Iterable, Union
 
 
-# The protocol source is prepended by the later Rust embedding lane.  In a
-# normal file invocation, import the same exports from the sibling module.
-if "WORKER_SOURCE_CONTRACT" not in globals():
-    from mineru_official_worker_protocol import (
-        BUNDLE_NAME, DIAGNOSTIC_CAP, PACKAGE_VERSION, PROTOCOL, PROTOCOL_CAP,
-        BoundedCapture, LimitError, WORKER_SOURCE_CONTRACT, _bounded_text,
-        _document_env, _document_parse_kwargs, _emit, _persistent_main,
-        _response, _validate_document_request,
-    )
+from mineru_official_worker_contract import BUNDLE_NAME, DIAGNOSTIC_CAP, PACKAGE_VERSION, PROTOCOL, PROTOCOL_CAP, LimitError
+from mineru_official_worker_protocol import (
+    BoundedCapture, WORKER_SOURCE_CONTRACT, _bounded_text, _document_env,
+    _document_parse_kwargs, _emit, _persistent_main, _response, _validate_document_request,
+)
+from mineru_official_worker_bundle import (
+    rewrite_markdown_image_references,
+    rewrite_reference_tokens,
+    rewrite_typed_json_references,
+)
 
 
 MAX_BUNDLE_ENTRIES = 8_192
@@ -53,13 +54,13 @@ def _read_bounded(path: Path, limit: int) -> bytes:
 
 class BundleWriter:
     _FIXED_FILES = frozenset(
-        {"markdown.md", "middle_json.json", "structured_content.json", "model_output.json"}
+        {"markdown.md", "middle_json.json", "structured_content.json", "model_output.json", "operation.json", "render.json", "render.bin"}
     )
     # Only these files carry image references worth rewriting; content_list
     # is no longer produced upstream and model_output is left untouched.
     _REWRITE_FILES = frozenset({"markdown.md", "middle_json.json", "structured_content.json"})
 
-    def __init__(self, root: Path, limit: int) -> None:
+    def __init__(self, root: Path, limit: int, *, typed_references: bool = False) -> None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise LimitError("bundle byte limit must be positive")
         self.root = root
@@ -77,6 +78,7 @@ class BundleWriter:
         self._file_names: dict[str, str] = {}
         self._name_bytes = 0
         self._alias_bytes = 0
+        self._typed_references = typed_references
 
     def _name(self, name: object) -> str:
         if not isinstance(name, (str, bytes, os.PathLike)):
@@ -307,11 +309,16 @@ class BundleWriter:
         except UnicodeDecodeError:
             return value
         if relative == "markdown.md":
-            rewritten = _rewrite_reference_tokens(text, self._image_aliases)
+            rewritten = (
+                rewrite_markdown_image_references(text, self._image_aliases)
+                if self._typed_references
+                else rewrite_reference_tokens(text, self._image_aliases)
+            )
         else:
-            # middle_json.json and structured_content.json use identical
-            # bounded JSON string-value rewriting.
-            rewritten = _rewrite_json_references(text, self._image_aliases, self._text_json_limit)
+            if self._typed_references:
+                rewritten = rewrite_typed_json_references(text, self._image_aliases, self._text_json_limit)
+            else:
+                rewritten = _rewrite_json_references(text, self._image_aliases, self._text_json_limit)
         encoded = rewritten.encode("utf-8")
         if len(encoded) > self._text_json_limit:
             raise LimitError("official text or JSON file exceeds its limit")
@@ -344,39 +351,6 @@ class BundleWriter:
             name,
             (value[index : index + 64 * 1024].encode("utf-8") for index in range(0, len(value), 64 * 1024)),
         )
-
-
-def _reference_boundary(value: str, index: int) -> bool:
-    if index < 0 or index >= len(value):
-        return True
-    character = value[index]
-    return not (character.isalnum() or character in "._-/\\")
-
-
-def _rewrite_reference_tokens(value: str, aliases: dict[str, str]) -> str:
-    replacements = sorted(
-        ((alias, target) for alias, target in aliases.items() if alias != target),
-        key=lambda item: (-len(item[0]), item[0]),
-    )
-    if not replacements:
-        return value
-    output: list[str] = []
-    index = 0
-    while index < len(value):
-        for alias, target in replacements:
-            end = index + len(alias)
-            if (
-                value.startswith(alias, index)
-                and _reference_boundary(value, index - 1)
-                and _reference_boundary(value, end)
-            ):
-                output.append(target)
-                index = end
-                break
-        else:
-            output.append(value[index])
-            index += 1
-    return "".join(output)
 
 
 def _rewrite_json_references(
@@ -473,16 +447,24 @@ def main() -> None:
         _validate_document_request(request)
         package = importlib.metadata.version("mineru")
         if package != PACKAGE_VERSION:
-            _emit(_response(request, "error", package, "MinerU package version is not 4.0.4"))
+            _emit(_response(request, "error", package, f"MinerU package version is not {PACKAGE_VERSION}"))
             return
         with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
             _document_env(request)
             importlib.import_module("mineru")
-            parser = importlib.import_module("mineru.parser")
+            if request.get("operation") is not None:
+                from mineru_official_worker_operations import dispatch
 
-            kwargs = _document_parse_kwargs(request)
-            result = asyncio.run(parser.parse_async(request["input_path"], **kwargs))
-            result.save(BundleWriter(Path(request["bundle_path"]), int(request["max_bundle_bytes"])))
+                importlib.import_module("mineru.parser")
+                dispatch(request, BundleWriter)
+            else:
+                parser = importlib.import_module("mineru.parser")
+                kwargs = _document_parse_kwargs(request)
+                result = asyncio.run(parser.parse_async(request["input_path"], **kwargs))
+                result.save(BundleWriter(
+                    Path(request["bundle_path"]), int(request["max_bundle_bytes"]),
+                    typed_references=request.get("source_context") is not None,
+                ))
         _emit(_response(request, "ok", package), capture.getvalue())
     except Exception as error:  # The parent owns the bounded failure surface.
         request = request if "request" in locals() and isinstance(request, dict) else {}

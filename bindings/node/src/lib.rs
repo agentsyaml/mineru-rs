@@ -4,6 +4,8 @@ use napi::bindgen_prelude::Utf16String;
 use napi_derive::napi;
 use std::{ffi::OsString, path::PathBuf};
 
+mod official;
+
 fn napi_error(error: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(error.to_string())
 }

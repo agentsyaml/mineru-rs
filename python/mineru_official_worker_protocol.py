@@ -1,10 +1,4 @@
-"""Protocol support shared by the MinerU official worker entry point.
-
-When embedded by Rust, this source is concatenated before
-``mineru_official_worker.py``.  The entry point imports these exports only when
-the protocol source was not already included, so the combined source does not
-need a sibling module at runtime.
-"""
+"""Protocol support imported as a sibling by the private worker entry point."""
 
 from __future__ import annotations
 
@@ -20,41 +14,18 @@ from pathlib import Path
 import sys
 from typing import cast
 
-WORKER_SOURCE_CONTRACT = (
-    "embed mineru_official_worker_protocol.py before "
-    "mineru_official_worker.py; the combined source is self-contained"
+from mineru_official_worker_contract import (
+    BUNDLE_NAME, DIAGNOSTIC_CAP, DOCUMENT_OPTIONAL_FIELDS, LimitError,
+    PACKAGE_VERSION, PERSISTENT_CAPABILITIES, PERSISTENT_LEGACY_CAPABILITIES, PERSISTENT_FRAME_CAP,
+    PERSISTENT_PROTOCOL, PROTOCOL, PROTOCOL_CAP, SCHEMA_VERSION, TIERS,
+    validate_document_request as _validate_document_request, redact_error,
 )
-PROTOCOL = "mineru-rs-official-worker/1"
-PERSISTENT_PROTOCOL = "mineru-rs-official-worker/2"
-PACKAGE_VERSION = "4.0.4"
-SCHEMA_VERSION = "2.0"
-BUNDLE_NAME = "hybrid-v4"
-PROTOCOL_CAP = 64 * 1024
-DIAGNOSTIC_CAP = 64 * 1024
-PERSISTENT_FRAME_CAP = 64 * 1024
-PERSISTENT_RECENT_REQUEST_CAPACITY = 64
-PERSISTENT_TIERS = ("flash", "basic", "standard", "advanced")
-PERSISTENT_OCR_MODES = ("auto", "txt", "ocr")
-PERSISTENT_INPUT_FORMATS = (
-    "pdf", "png", "jpeg", "jpg", "jp2", "webp", "gif", "bmp", "tiff",
-)
-PERSISTENT_CAPABILITIES = {
-    "tiers": list(PERSISTENT_TIERS),
-    "ocr_modes": list(PERSISTENT_OCR_MODES),
-    "input_formats": list(PERSISTENT_INPUT_FORMATS),
-    "bundle_name": BUNDLE_NAME,
-    "cancellation": "process-terminate",
-}
 
-# Exact per-document request field set (parse_async kwargs plus transport
-# metadata).  Optional fields may be omitted or be null.
-DOCUMENT_REQUEST_FIELDS = frozenset(
-    {"protocol", "request_id", "max_bundle_bytes", "bundle_name", "input_path",
-     "bundle_path", "tier", "ocr_mode", "image_analysis"}
-)
-DOCUMENT_OPTIONAL_FIELDS = frozenset(
-    {"page_range", "vlm_server_url", "vlm_api_key", "vlm_model", "model_base_dir", "config"}
-)
+WORKER_SOURCE_CONTRACT = "normal sibling imports from a private materialized worker directory"
+PERSISTENT_RECENT_REQUEST_CAPACITY = 64
+PERSISTENT_TIERS = TIERS
+PERSISTENT_OCR_MODES = ("auto", "txt", "ocr")
+PERSISTENT_INPUT_FORMATS = PERSISTENT_CAPABILITIES["input_formats"]
 
 # Only these variables are injected into the environment.  Upstream maps
 # MINERU_MODEL_BASE_DIR to Config.model.base_dir; MINERU_HOME is a home
@@ -71,12 +42,8 @@ __all__ = (
 )
 
 
-class LimitError(RuntimeError):
-    pass
-
-
 def _bounded_text(value: str, limit: int = DIAGNOSTIC_CAP) -> str:
-    return value.encode("utf-8", "replace")[:limit].decode("utf-8", "ignore")
+    return redact_error(value, limit)
 
 
 class BoundedCapture(io.TextIOBase):
@@ -133,38 +100,6 @@ def _response(
     return response
 
 
-def _validate_document_request(request: dict[str, object]) -> None:
-    """Strict field-set validation for one per-document request frame."""
-    if request.get("protocol") != PROTOCOL:
-        raise ValueError("unsupported adapter protocol")
-    if request.get("bundle_name") != BUNDLE_NAME:
-        raise ValueError("unsupported bundle name")
-    present = set(request)
-    if not (DOCUMENT_REQUEST_FIELDS <= present <= DOCUMENT_REQUEST_FIELDS | DOCUMENT_OPTIONAL_FIELDS):
-        raise ValueError("request has unknown or missing fields")
-    if not isinstance(request["request_id"], str):
-        raise ValueError("request_id must be a string")
-    if request["tier"] not in PERSISTENT_TIERS:
-        raise ValueError("request tier capability mismatch")
-    if request["ocr_mode"] not in PERSISTENT_OCR_MODES:
-        raise ValueError("request ocr_mode capability mismatch")
-    if not isinstance(request["image_analysis"], bool):
-        raise ValueError("image_analysis must be boolean")
-    for name in ("input_path", "bundle_path"):
-        if not isinstance(request[name], str) or not request[name]:
-            raise ValueError(f"{name} must be a nonempty string")
-    max_bundle_bytes = request["max_bundle_bytes"]
-    if isinstance(max_bundle_bytes, bool) or not isinstance(max_bundle_bytes, int) or max_bundle_bytes <= 0:
-        raise ValueError("max_bundle_bytes must be a positive integer")
-    for name in ("page_range", "vlm_server_url", "vlm_api_key", "vlm_model", "model_base_dir", "config"):
-        value = request.get(name)
-        if value is not None and (not isinstance(value, str) or (name != "page_range" and not value)):
-            raise ValueError(f"{name} must be a string")
-    vlm_server_url = request.get("vlm_server_url")
-    if isinstance(vlm_server_url, str) and not vlm_server_url.startswith(("http://", "https://")):
-        raise ValueError("vlm_server_url must be an HTTP(S) URL")
-
-
 def _document_parse_kwargs(request: dict[str, object]) -> dict[str, object]:
     kwargs: dict[str, object] = {
         "tier": request["tier"],
@@ -174,6 +109,27 @@ def _document_parse_kwargs(request: dict[str, object]) -> dict[str, object]:
     page_range = request.get("page_range")
     if page_range:
         kwargs["page_range"] = page_range
+    source_context = request.get("source_context")
+    if source_context is not None:
+        if not isinstance(source_context, dict) or set(source_context) - {"source_uri", "local_resource_root", "transport_encoding"}:
+            raise ValueError("source_context must be an object")
+        from docvortex.document.contracts import HtmlSourceContext
+
+        context = dict(source_context)
+        root = context.get("local_resource_root")
+        if root is not None:
+            context["local_resource_root"] = Path(root)
+        kwargs["source_context"] = HtmlSourceContext(**context)
+    replacement = request.get("official_vlm_config")
+    if replacement is not None:
+        if not isinstance(replacement, dict) or set(replacement) != {"engine", "server_url", "api_key", "model", "http_timeout", "max_concurrency"}:
+            raise ValueError("official_vlm_config must be an object")
+        if any(request.get(name) is not None for name in ("vlm_server_url", "vlm_api_key", "vlm_model")):
+            raise ValueError("full VLM config cannot be combined with legacy VLM aliases")
+        from mineru.config import VlmConfig
+
+        kwargs["vlm_config"] = VlmConfig(**replacement)
+        return kwargs
     # Upstream MinerUParser replaces (not merges) the VLM config, so start
     # from the effective loaded config (mineru.config.config.model.vlm,
     # honoring MINERU_CONFIG) and set only the provided vlm_* fields; tuned
@@ -182,7 +138,7 @@ def _document_parse_kwargs(request: dict[str, object]) -> dict[str, object]:
     overrides = {
         name.removeprefix("vlm_"): request[name]
         for name in ("vlm_server_url", "vlm_api_key", "vlm_model")
-        if request.get(name)
+        if request.get(name) is not None
     }
     if overrides:
         from mineru.config import VlmConfig, config as mineru_config
@@ -293,7 +249,7 @@ def _persistent_start(frame: dict[str, object]) -> dict[str, object]:
         raise ValueError("persistent startup frame protocol mismatch")
     if frame["package_version"] != PACKAGE_VERSION or frame["schema_version"] != SCHEMA_VERSION:
         raise ValueError("persistent startup package/schema mismatch")
-    if frame["capabilities"] != PERSISTENT_CAPABILITIES:
+    if frame["capabilities"] not in (PERSISTENT_CAPABILITIES, PERSISTENT_LEGACY_CAPABILITIES):
         raise ValueError("persistent startup capability mismatch")
     for name in ("model_base_dir", "config", "vlm_api_key", "vlm_model"):
         _persistent_string(frame[name], name, allow_none=True)
@@ -308,7 +264,7 @@ def _persistent_handshake(start: dict[str, object]) -> dict[str, object]:
         "package_version": PACKAGE_VERSION,
         "schema_version": SCHEMA_VERSION,
         "max_in_flight": 1,
-        "capabilities": PERSISTENT_CAPABILITIES,
+        "capabilities": start["capabilities"],
     }
 
 
@@ -431,7 +387,7 @@ def _persistent_response_bytes(response: dict[str, object]) -> bytes:
     return encoded
 
 
-def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
+def _persistent_main(bundle_writer: Callable[..., object]) -> int:
     startup_capture = BoundedCapture(DIAGNOSTIC_CAP)
     try:
         startup = _persistent_read_frame()
@@ -440,7 +396,7 @@ def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
         _persistent_start(startup)
         package = importlib.metadata.version("mineru")
         if package != PACKAGE_VERSION:
-            raise ValueError("MinerU package version is not 4.0.4")
+            raise ValueError(f"MinerU package version is not {PACKAGE_VERSION}")
         with contextlib.redirect_stdout(startup_capture), contextlib.redirect_stderr(startup_capture):
             _document_env(startup)
             parser = importlib.import_module("mineru.parser")
@@ -489,6 +445,7 @@ def _persistent_main(bundle_writer: Callable[[Path, int], object]) -> int:
                 writer = bundle_writer(
                     Path(cast(str, request["bundle_path"])),
                     int(cast(int, request["max_bundle_bytes"])),
+                    typed_references=request.get("source_context") is not None,
                 )
                 result.save(writer)
             _emit(_persistent_result(request, "ok"), capture.getvalue())

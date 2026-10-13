@@ -1,11 +1,38 @@
 # Releasing
 
-Releases are coordinated across crates.io `mineru`, PyPI `mineru-rs`, npm
-`@alexsun-top/mineru`, and the GHCR container image
+Releases coordinate PyPI `mineru-rs`, npm `@alexsun-top/mineru`, and the GHCR container image
 `ghcr.io/agentsyaml/mineru-cli`. Registry credentials must be short-lived
 environment variables or trusted-publisher OIDC credentials. Never store a
 registry token in the repository, GitHub secrets, `.npmrc`, or Cargo
 configuration.
+
+## Current crate-publication boundary
+
+The crates.io `mineru` publication is temporarily suspended. The root workspace
+patches use prepared local sources and are not inherited by a crates.io
+consumer, so a published `mineru 0.3.1` would not carry this dependency repair.
+The release workflow keeps `publish-crate` disabled; this does not block its
+separate Python-wheel, Node-package, binary, or container paths. The release
+source snapshot and its associated build evidence are not binary-release assets
+or a `.crate` package.
+
+The workspace retains Rust 1.89 and the `office2pdf 0.6.5`,
+`umya-spreadsheet 2.3.3`, and `citationberg 0.6.1` identities, adapted to use
+genuine registry `quick-xml 0.41.0`. Source archives, hashes, exact edits, and
+license references are recorded in
+[`tools/deps/office-xml041/PROVENANCE.md`](../tools/deps/office-xml041/PROVENANCE.md)
+and its hash-checked metadata. This documents provenance, not a claim that all
+security issues are fixed or that the dependencies are certified. This repair
+does not change the separate MinerU 3.4.5 VLM baseline. CI's audit policy
+requires a zero-finding result and an empty ignore list; it does not carry an
+advisory exception.
+
+Before any Cargo command from a checkout, use Python 3.9+ to run
+`python3 tools/deps/prepare_office.py prepare` followed by
+`python3 tools/deps/prepare_office.py verify`. Preparation may need network
+access once to download the pinned archives; verification is offline. See the
+[usage guide](usage.md#build-and-prerequisites) for the ignored generated-tree
+contract.
 
 ## One-time repository and registry setup
 
@@ -21,16 +48,18 @@ restrict these environments to release tags.
   `pypi`. Do not bootstrap or publish `0.0.1` to PyPI.
 - crates.io: after the bootstrap below creates `mineru`, configure its trusted
   publisher for repository `agentsyaml/mineru-rs`, workflow `release.yml`,
-  environment `crates-io`, then yank `0.0.1`.
+  environment `crates-io`, then yank `0.0.1`. This is historical setup only;
+  crate publishing remains suspended under the current dependency boundary.
 - npm: control the `@alexsun-top` scope. After bootstrap creates all seven
   records, configure a trusted publisher on every record for repository
   `agentsyaml/mineru-rs`, workflow `release.yml`, environment `npm`.
 - GHCR: `publish-container` uses the workflow `GITHUB_TOKEN` with only
   `contents: read` and `packages: write` permissions.
 
-No long-lived registry token belongs in GitHub Actions. The crates.io, PyPI,
-and npm jobs acquire OIDC credentials only after all release artifacts pass
-verification; GHCR uses the job-scoped `GITHUB_TOKEN` permissions above.
+No long-lived registry token belongs in GitHub Actions. The active PyPI and npm
+jobs acquire OIDC credentials only after release artifacts pass verification;
+the crates.io job is disabled. GHCR uses the job-scoped `GITHUB_TOKEN`
+permissions above.
 
 ## Published GHCR image contract
 
@@ -40,14 +69,15 @@ release binaries are built with `office,legacy-office`; the image's default
 command listens on container port `8000`, serves `GET /health`, runs as its
 configured non-root user, and writes task output under `/app/output`.
 Each release publishes version, minor, and major tags, but never publishes or
-updates mutable `latest`; use an explicit version tag in commands:
+updates mutable `latest`; use an explicit tag only after that version is
+published. The pull below is a historical example of the previous `0.3.0`:
 
 ```sh
 docker pull ghcr.io/agentsyaml/mineru-cli:0.3.0
 ```
 
 The image bundles Rust binaries only. It does not contain Python,
-`mineru==4.0.4`, or model assets, so direct official Hybrid needs a separately
+`mineru==4.0.10`, or model assets, so direct official Hybrid needs a separately
 prepared environment explicitly supplied to the image and API Hybrid remains
 fail-closed. Supply `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and
 `MINERU_VL_API_KEY` for an external VLM provider. Documented local publication
@@ -58,11 +88,12 @@ workflow contract; it does not change that workflow.
 ## Historical non-user-facing 0.0.1 bootstrap
 
 This records the one-time `0.0.1` bootstrap that preceded the first automated
-`0.1.0` OIDC release. It is distinct from the current `0.3.0` workspace version
-and is not itself a user-facing release.
+`0.1.0` OIDC release. It is distinct from the current `0.3.1` workspace version
+and is not itself a user-facing release. Do not run its crates.io publishing
+steps while crate publication is suspended above.
 
 Perform bootstrap from a temporary checkout or branch with the Cargo workspace
-version changed to `0.0.1`. Main remains at the current workspace version (`0.3.0`).
+version changed to `0.0.1`. Main remains at the current workspace version (`0.3.1`).
 
 ### crates.io
 
@@ -167,24 +198,26 @@ manifests just to prepare the workflow.
 
 ## Local preflight
 
-The temporary `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` (`quick-xml`) exception is mitigated reachability, not fixed or unreachable: mandatory full OOXML preflight runs before Office conversion. It expires on 2026-09-30 and must be reviewed or removed then. Native macOS has no reliable no-entitlement hard memory cap, so hostile Office processing there requires an external VM or container memory boundary.
+The previous `quick-xml` advisory exceptions are no longer the current audit policy. The current CI audit gate requires a clean result and does not rely on an exception; this is not a claim of security certification. Native macOS has no reliable no-entitlement hard memory cap, so hostile Office processing there requires an external VM or container memory boundary.
 The reviewed lock exception for registry-reported yanked transitive `arrayref` 0.3.9 was removed after crates.io unyanked it.
 The release Node matrix retains all six native runner/architecture pairs. Each
 runs its Node 24 test; five pairs also run the Node 18.20.8 smoke with
 `matrix.node-arch`. The `win32-arm64-msvc` pair intentionally skips the Node 18
 setup and smoke because the official Node 18 win-arm64 build is unavailable.
+The verified Rust 1.89 macOS Node release build uses command-scoped
+`CARGO_PROFILE_RELEASE_STRIP=none` with the macOS SDK 27 environment; it does
+not change global Rust settings or the MSRV.
 
 Run from the repository root unless a subshell changes directory:
 
 ```sh
+python3 tools/deps/prepare_office.py prepare
+python3 tools/deps/prepare_office.py verify
 cargo +1.89.0 fmt --all -- --check
 cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features
 cargo +1.89.0 check --locked -p mineru-python
 cargo +1.89.0 check --locked -p mineru-node
 cargo +1.89.0 metadata --locked --no-deps
-cargo +1.89.0 package --locked -p mineru --list
-cargo +1.89.0 publish --locked -p mineru --dry-run
-
 python3.9 -m venv /tmp/mineru-release-venv
 /tmp/mineru-release-venv/bin/pip install maturin
 /tmp/mineru-release-venv/bin/maturin build --release --locked --manifest-path bindings/python/Cargo.toml
@@ -236,11 +269,14 @@ and no raw `linux_*` wheel is released. Do not build or publish a Python sdist.
    exactly that `head_sha` and `main` branch before any registry publication.
    It also rejects an existing `vX.Y.Z` tag or release.
 
-The workflow keeps crates.io, PyPI, npm (six native packages plus root), and
-GHCR publication: separate protected jobs publish crates.io, PyPI wheels, the
-six npm native packages plus npm root package, and the `mineru-cli` container
-image (`publish-container` builds `Dockerfile.release` for `linux/amd64` and
-`linux/arm64` and publishes `ghcr.io/agentsyaml/mineru-cli`).
+Crates.io publication is disabled. The remaining separate protected jobs
+publish PyPI wheels, six npm native packages plus the npm root package, and the
+`mineru-cli` container image (`publish-container` builds `Dockerfile.release`
+for `linux/amd64` and `linux/arm64` and publishes
+`ghcr.io/agentsyaml/mineru-cli`). The source-build job records evidence from a
+fresh tracked-source snapshot; it neither produces a consumer `.crate` nor adds
+that snapshot to GitHub binary-release assets. This describes workflow paths,
+not a completed or newly published version.
 
 ## GitHub Release assets
 

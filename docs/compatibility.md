@@ -18,12 +18,14 @@ The bundled Compose image `alexsuntop/mineru:3.4.2` is a separate provider-image
 baseline. The MinerU 3.4.5 version above is the VLM protocol baseline for this
 compatibility contract, not a Compose image-tag requirement.
 
-### MinerU 4.0.4 direct Hybrid
+### MinerU 4.0.10 direct Hybrid
 
-Direct `hybrid-http-client` is a separate, pinned boundary for the MinerU 4.0.4
-release (tag `v4.0.4`). It requires a user-installed Python environment with
-exactly `mineru==4.0.4` (upstream requires Python >=3.10,<3.15; dependencies
-include `mineru-vl-utils>=2.0.5,<3` and `docvortex`); Python, MinerU,
+Direct `hybrid-http-client` is a separate, pinned boundary for the MinerU 4.0.10
+release (tag `mineru-4.0.10-released`). Install with
+`python -m pip install mineru==4.0.10`. Upstream requires Python >=3.10,<3.15 and declares
+`docvortex>=0.5.4,<1` and `mineru-vl-utils>=2.0.5,<3`. The confirmed wheel
+`mineru-4.0.10-py3-none-any.whl` has SHA256
+`9731eb8afb9756bb2e3a8e3e6a69252786434602eeb4ff36f7e7a5f2aa8ac107`. Python, MinerU,
 and model assets are not bundled. When no worker mode is specified, selection is
 automatic after input preflight: one runnable document invokes the official
 `mineru.parser.parse_async` entrypoint in one fresh subprocess, while multiple runnable
@@ -37,14 +39,17 @@ but Tokio spawns the worker before `WindowsJob::attach` runs. A very fast
 descendant created in that interval can escape the job, so cleanup is best effort
 for that race. The official worker has no hard RSS or GPU quota.
 Select either mode explicitly with `--official-worker-mode per-document` or
-`--official-worker-mode persistent`; The project-owned JSON envelopes are
+`--official-worker-mode persistent`. The project-owned JSON envelopes are
 `mineru-rs-official-worker/1` and internal `/2`, not official MinerU stdin/stdout
 protocols.
 
 Direct Hybrid accepts PDF and official image inputs only. The worker calls the
-official `mineru.parser.parse_async(path, *, tier, ocr_mode, image_analysis,
-page_range, vlm_config)` entrypoint. `--tier flash|basic|standard|advanced`
-maps 1:1 to the upstream tier; `--effort medium` maps to tier `standard`, and
+official `mineru.parser.parse_async` entrypoint with the arguments used by this
+project: `path`, `tier`, `ocr_mode`, `image_analysis`, `page_range`, and
+`vlm_config`. This is not the complete upstream signature; the optional upstream
+`source_context` argument is not supplied by this project. `--tier
+flash|basic|standard|advanced` maps 1:1 to the upstream tier; `--effort medium`
+maps to tier `standard`, and
 `high`/`xhigh` are compatibility aliases for tier `advanced` (`--tier` wins
 when both are given, and is rejected on other backends and in API mode). `--url` / `MINERU_VL_SERVER` are accepted at every
 tier/effort and feed `VlmConfig.server_url` (`--api-key` and the model name
@@ -54,9 +59,10 @@ open-ended range, where `r1` is the last page, and `3-5` style bounds);
 supplying `--start`/`--end` for an image fails fast. A malformed VLM URL
 (embedded credentials, query, fragment, whitespace, or bad port) is rejected up
 front. The worker mode does not change this input, tier, or output contract.
-Model-root and config paths are user configuration; upstream 4.0.4 removed
-`model.stack`/`MINERU_MODEL_STACK` in favor of `model.small_backend` +
-`model.vlm.engine` configured via `MINERU_CONFIG`, so non-default
+Model-root and config paths are user configuration; `model.stack`/
+`MINERU_MODEL_STACK` was removed before 4.0.10, and the current version does not
+support it. Configure `model.small_backend` + `model.vlm.engine` via
+`MINERU_CONFIG`, so non-default
 `--model-stack` is rejected. `--method auto|txt|ocr` maps directly to the
 upstream `ocr_mode` parameter. The `--lang` guard compares the normalized
 language, so `en`, `japan`, `chinese_cht`, and `latin` are accepted (they
@@ -75,6 +81,28 @@ atomic publication. It contains `markdown.md`, `middle_json.json`,
 `content_list.json` is no longer produced.
 It is never sent through the MinerU 3.4.5 builders, `official_route`, Office
 conversion, or the project-private AnyDoc lane. API Hybrid remains fail-closed.
+
+### Additive rich SDK
+
+The Rust `official` module and Python/Node rich binding surfaces are a separate
+library API, not a widening of the direct Hybrid CLI route above. They accept
+the 28 filename extensions listed in the [official SDK guide](official-sdk.md),
+including 19 native formats that require tier `flash`; PDF and eight image
+formats remain tiered. They call the same external MinerU 4.0.10 / DocVortex
+0.5.4 Python boundary and require the worker's Python 3.10+ environment. The
+Python facade itself supports Python 3.9+.
+
+The legacy `run`/`parse` APIs remain unchanged; rich result types are additive.
+The current checkout version is `0.3.1`, with no publication implied. New
+Python and Node native binding APIs require artifacts rebuilt from this
+checkout. Do not infer that the currently published `0.3.0` wheel or npm
+package already contains them. This compatibility note is limited to the
+library SDK surface.
+
+The opt-in official-v1 upload/job service is a separate interface alongside
+the existing server routes. See the [official HTTP API guide](official-http.md);
+concentrated build/test checks and independent review are pending. This is not
+release approval.
 
 Rust library consumers of the 3.4.5 VLM lane should note one public-API break
 shipping with this release: `VlmBatchPriority::PerItem` was removed in favor of
@@ -96,7 +124,7 @@ general or full MinerU 3.4.5 compatibility claim.
 
 The `hybrid-http-client` token is not an alias for `vlm-http-client`, and it
 does not invoke the project-private AnyDoc native lane. Direct mode uses the
-official 4.0.4 worker; API mode remains explicitly unsupported. The default
+official 4.0.10 worker; API mode remains explicitly unsupported. The default
 `vlm-http-client` remains the existing 3.4.5 VLM-only path.
 
 Validation is semantic and structural only. It never promises byte-identical
@@ -123,7 +151,7 @@ network or an authenticated reverse proxy because the API has no built-in
 authentication or task ownership isolation.
 
 The published release binaries use `office,legacy-office`, but the stock image
-contains Rust binaries only: no Python, `mineru==4.0.4`, or model assets.
+contains Rust binaries only: no Python, `mineru==4.0.10`, or model assets.
 Direct official Hybrid therefore needs a separately prepared environment
 explicitly supplied to the image, and API Hybrid remains fail-closed. This
 container boundary adds no compatibility claim beyond the protocol scope above.
@@ -142,7 +170,7 @@ complex-layout, low-confidence, empty, and low-quality inputs rather than
 fabricating official output. Accepted output is only
 `{stem}/native/{stem}.md`; it contains no `document.json`, `middle.json`,
 `content-list`, preview, or assets. Native local PDF page selection is not
-supported. This lane is not the official MinerU `hybrid-engine` or the 4.0.4
+supported. This lane is not the official MinerU `hybrid-engine` or the 4.0.10
 local-model worker.
 
 ## Legacy office formats (`.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv`)

@@ -181,7 +181,7 @@ fn process_is_running(pid: u32) -> bool {
 }
 
 async fn assert_processes_dead(pids: &[u32]) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while pids.iter().any(|pid| process_is_running(*pid)) && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -192,7 +192,7 @@ async fn assert_processes_dead(pids: &[u32]) {
 }
 
 async fn wait_for_child_exit(child: &mut Child) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

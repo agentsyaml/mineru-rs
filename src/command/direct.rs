@@ -834,7 +834,7 @@ fn request_tier(options: &DirectOptions) -> &str {
     effort_tier(&options.effort)
 }
 
-/// Maps the CLI effort knob onto the MinerU 4.0.4 parse tier: "medium" maps to
+/// Maps the CLI effort knob onto the MinerU 4.0.10 parse tier: "medium" maps to
 /// "standard"; "high"/"xhigh" map to "advanced".
 fn effort_tier(effort: &str) -> &'static str {
     match effort {
@@ -1176,11 +1176,11 @@ fn resolve_official_hybrid(
     options: &DirectOptions,
     env: &super::Environment,
 ) -> Result<OfficialHybridConfig, DirectError> {
-    // ponytail: MinerU 4.0.4 removed per-run model stacks; engine selection now happens
+    // ponytail: the current API has no model-stack option; engine selection happens
     // through MINERU_CONFIG (model.small_backend / model.vlm.engine).
     if options.model_stack_explicit || options.model_stack != "auto" {
         return Err(err(
-            "model_stack was removed in MinerU 4.0.4; configure model.small_backend / model.vlm.engine via MINERU_CONFIG",
+            "model_stack is not supported by MinerU 4.0.10; configure model.small_backend / model.vlm.engine via MINERU_CONFIG",
         ));
     }
     // Removed environment knobs (MINERU_MODEL_STACK, MINERU_OFFICIAL_WORKER_MODE)
@@ -2156,7 +2156,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("model_stack was removed in MinerU 4.0.4"),
+            error.contains("model_stack is not supported by MinerU 4.0.10"),
             "{error}"
         );
         // The removed environment knobs (MINERU_MODEL_STACK,

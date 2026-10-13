@@ -7,6 +7,8 @@ use pyo3::{
 };
 use std::{ffi::OsString, path::PathBuf};
 
+mod official;
+
 fn value_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
@@ -158,6 +160,7 @@ fn run_cli_native<'py>(
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    official::register(module)?;
     module.add_function(wrap_pyfunction!(canonical_stem, module)?)?;
     module.add_function(wrap_pyfunction!(validate_pdf_options, module)?)?;
     module.add_function(wrap_pyfunction!(locate_markdown, module)?)?;

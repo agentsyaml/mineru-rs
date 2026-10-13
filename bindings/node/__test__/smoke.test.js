@@ -123,7 +123,11 @@ function child(source) {
 
 async function main() {
   const started = Date.now()
-  assert.deepEqual(Object.keys(api).sort(), ['canonicalStem', 'parse', 'run', 'runCli', 'validatePdfOptions'])
+  assert.deepEqual(Object.keys(api).sort(), [
+    'OfficialError', 'OfficialOcrMode', 'OfficialParser', 'OfficialPdfLayout', 'OfficialRenderFormat',
+    'OfficialRenderMode', 'OfficialResult', 'OfficialTier', 'OfficialWorkerMode',
+    'canonicalStem', 'parse', 'parseBatchRich', 'parseRich', 'run', 'runCli', 'validatePdfOptions',
+  ])
   assert.equal('signal' in api.run, false)
   assert.equal(api.canonicalStem('a bad/pdf'), 'a bad_pdf')
   assert.equal(api.canonicalStem(''), 'document')

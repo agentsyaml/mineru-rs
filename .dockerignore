@@ -1,6 +1,7 @@
 .git/
 .github/
 .slim/
+.deps/
 .ignore
 target/
 node_modules/

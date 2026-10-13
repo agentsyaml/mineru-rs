@@ -8,9 +8,22 @@ See [compatibility.md](compatibility.md) for the compatibility baseline and repr
 Rust 1.89 is required:
 
 ```sh
-cargo build --release
+python3 tools/deps/prepare_office.py prepare
+python3 tools/deps/prepare_office.py verify
+cargo build --locked --release --features office,legacy-office
 ./target/release/mineru --help
 ```
+
+Run `prepare` and then `verify` before **any** Cargo command in this checkout,
+including metadata, formatting, and no-default-feature commands. The bootstrap
+requires Python 3.9+; the first preparation downloads hash-pinned archives and
+needs network access. The generated `.deps/office-xml041/` tree is ignored and
+verification is offline. A valid tree is reused; a missing tree can be safely
+recreated with `prepare`, while a mismatched tree fails closed. For a confirmed
+corrupt generated tree, remove only `.deps/office-xml041/` before preparing
+again; do not remove `.deps/` or Cargo caches. Do not edit generated files by
+hand. Source identities and license/hash metadata are
+documented in [`tools/deps/office-xml041/PROVENANCE.md`](../tools/deps/office-xml041/PROVENANCE.md).
 
 The executable is `target/release/mineru`. Rendering does not depend on PDFium or another local/native PDF runtime.
 
@@ -68,7 +81,7 @@ export MINERU_VL_MODEL_NAME="<model-id>"
 
 ## Canonical `mineru` command (PDF / images / Office)
 
-`mineru` is the canonical product binary, supporting PDF, image, and Office input and an optional `--api-url` remote API server mode. `--backend=local` is a project-private AnyDoc native-Markdown lane for supported legacy formats and conservative clean text PDFs, isolated in the bundled Rust `mineru-office-convert` helper; it is not a local ML model, `llama-server`, or the official `hybrid-engine`. The helper invokes no Python, Microsoft Office/LibreOffice, model, or network. Direct `hybrid-http-client` now uses a separate Python worker boundary for official MinerU 4.0.4; it never enters the 3.4.5 VLM or Office routes.
+`mineru` is the canonical product binary, supporting PDF, image, and Office input and an optional `--api-url` remote API server mode. `--backend=local` is a project-private AnyDoc native-Markdown lane for supported legacy formats and conservative clean text PDFs, isolated in the bundled Rust `mineru-office-convert` helper; it is not a local ML model, `llama-server`, or the official `hybrid-engine`. The helper invokes no Python, Microsoft Office/LibreOffice, model, or network. Direct `hybrid-http-client` now uses a separate Python worker boundary for official MinerU 4.0.10; it never enters the 3.4.5 VLM or Office routes.
 
 OOXML conversion requires the `mineru-office-convert` helper. Local legacy and native-PDF extraction also uses this bundled Rust helper; those routes invoke no Python, Microsoft Office/LibreOffice, model, or network. Capabilities depend on two optional features:
 
@@ -99,11 +112,11 @@ Native macOS APIs have no reliable process RSS/address-space hard limit that doe
 
 Without `--api-url`, `mineru` calls the external VLM service directly. The service address and model are supplied by the `MINERU_VL_SERVER`, `MINERU_VL_MODEL_NAME`, and `MINERU_VL_API_KEY` environment variables or overridden by `--url`.
 
-### Direct official Hybrid 4.0.4
+### Direct official Hybrid 4.0.10
 
 Direct `-b hybrid-http-client` requires an installed Python environment containing
-exactly `mineru==4.0.4` (release tag `v4.0.4`; upstream requires Python >=3.10,<3.15,
-with dependencies including `mineru-vl-utils>=2.0.5,<3` and `docvortex`). The Rust
+exactly `mineru==4.0.10` (release tag `mineru-4.0.10-released`; upstream requires Python >=3.10,<3.15,
+with dependencies including `docvortex>=0.5.4,<1` and `mineru-vl-utils>=2.0.5,<3`). The Rust
 binary embeds its narrow adapter shim; it does
 not bundle Python, MinerU, or model assets. When no worker mode is specified, selection
 is automatic after input preflight: one runnable document uses `per-document`, while
@@ -135,16 +148,19 @@ tier `standard`, and `high`/`xhigh` map to tier `advanced`; `--tier` wins when
 both are given. `--url` / `MINERU_VL_SERVER` are accepted at every
 tier/effort and feed `VlmConfig.server_url`; `--api-key` / model name feed
 `VlmConfig`. Without a URL, upstream uses its local VLM engine. The worker
-calls the official `mineru.parser.parse_async(path, *, tier, ocr_mode,
-image_analysis, page_range, vlm_config)`. `--method auto|txt|ocr` maps
+calls the official `mineru.parser.parse_async` entrypoint with the arguments
+used by this project: `path`, `tier`, `ocr_mode`, `image_analysis`,
+`page_range`, and `vlm_config`; this is not the complete upstream signature.
+`--method auto|txt|ocr` maps
 directly to the upstream `ocr_mode` parameter. Page ranges apply to PDF input
 only and are sent in upstream grammar (`3-r1` for an open-ended range, where
 `r1` is the last page, and `3-5` style bounds); supplying `--start`/`--end`
 for an image fails fast. A malformed VLM URL (embedded credentials, query,
 fragment, whitespace, or bad port) is rejected up front.
-Model-root and config paths are user-supplied: upstream 4.0.4
-removed `model.stack`/`MINERU_MODEL_STACK` in favor of `model.small_backend` +
-`model.vlm.engine` configured via `MINERU_CONFIG`, so non-default
+Model-root and config paths are user-supplied: `model.stack`/
+`MINERU_MODEL_STACK` was removed before 4.0.10, and the current version does not
+support it. Configure `model.small_backend` + `model.vlm.engine` via
+`MINERU_CONFIG`, so non-default
 `--model-stack` is rejected; `--official-model-dir` /
 `MINERU_MODEL_BASE_DIR` supply the model root injected into the worker as
 `MINERU_MODEL_BASE_DIR`, while `MINERU_HOME` is a MinerU home directory, not
@@ -234,10 +250,10 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `-o, --output <directory>` | Required | Output directory. |
 | `--api-url <URL>` | None | Remote API server address; without it, direct VLM mode is used. |
 | `-m, --method <auto\|txt\|ocr>` | `auto` | Parsing method; ignored by direct `vlm-http-client`. In official direct Hybrid it maps directly to the upstream `ocr_mode` parameter. |
-| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.0.4 worker; API Hybrid remains unsupported. |
+| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.0.10 worker; API Hybrid remains unsupported. |
 | `--tier <flash\|basic\|standard\|advanced>` | None | Official direct Hybrid tier, mapped 1:1 to the upstream tier. Rejected on other backends and in API mode. `--effort` is a compatibility alias (`medium`→`standard`, `high`/`xhigh`→`advanced`); `--tier` wins when both are given. Other direct backends accept only `medium`/`high` effort. |
 | `--effort <medium\|high\|xhigh>` | `medium` | Compatibility alias for `--tier`: `medium`→`standard`, `high`/`xhigh`→`advanced`. Ignored when `--tier` is set. Other direct backends accept only `medium`/`high`. |
-| `--model-stack <auto\|light\|full>` | `auto` | Official direct Hybrid model stack. Upstream 4.0.4 removed `model.stack`/`MINERU_MODEL_STACK` (replaced by `model.small_backend` + `model.vlm.engine` via `MINERU_CONFIG`), so non-default values, including `auto`, are rejected. |
+| `--model-stack <auto\|light\|full>` | `auto` | Official direct Hybrid model stack. `model.stack`/`MINERU_MODEL_STACK` was removed before 4.0.10; the current version does not support it. Configure `model.small_backend` + `model.vlm.engine` via `MINERU_CONFIG`, so non-default values, including `auto`, are rejected. |
 | `--official-worker-mode <per-document\|persistent>` | automatic (by runnable document count) | Official Hybrid worker lifecycle. One runnable document uses `per-document`; multiple runnable documents use `persistent`. |
 | `--official-python <absolute-path>` | Python `python3`/`python` | Official direct Hybrid interpreter. Overrides `MINERU_OFFICIAL_PYTHON`; the executable is not bundled. |
 | `--official-model-dir <absolute-path>` | None | Official direct Hybrid model root; overrides `MINERU_MODEL_BASE_DIR`. |
@@ -309,9 +325,10 @@ The published Rust API image is `ghcr.io/agentsyaml/mineru-cli`. It listens on
 container port `8000`, serves `GET /health`, writes task output below
 `/app/output`, and runs its default command as a non-root user. The release
 binaries include the `office,legacy-office` feature set, but the image bundles
-Rust binaries only: it contains no Python, `mineru==4.0.4`, or model assets.
-Use an explicit version tag in commands, such as the current `:0.3.0`; releases
-do not publish or update the mutable `latest` tag.
+Rust binaries only: it contains no Python, `mineru==4.0.10`, or model assets.
+Use an explicit version tag from a completed publication. The command below
+uses the previously published `:0.3.0`; this checkout targets `0.3.1`, which
+this version-only change does not publish. Releases do not update `latest`.
 
 The image starts `mineru-api` with `--host 0.0.0.0` and sets
 `MINERU_API_PUBLIC_BIND_EXPOSED=true` so Docker can reach the container port.
@@ -430,11 +447,11 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | Page-pipeline concurrency cap (any positive value), bounding only the number of simultaneously running page pipelines; request-level concurrency is governed by `MINERU_VLM_HTTP_CONCURRENCY`. |
 | `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | Concurrency model, one of `classic\|two-phase`. `classic`: the long-standing single-encoder pipeline (default); `two-phase`: splits each page's semantic work into an encode-all → request-all two-stage flow, removing the CPU-encode serialization bottleneck in front of request dispatch (opt-in). |
-| `MINERU_MODEL_STACK` | None | Removed upstream 4.0.4. Any set value, including `auto`, fails the run on every lane; whether the failure happens before lane dispatch is not configurable. Configure `model.small_backend` / `model.vlm.engine` via `MINERU_CONFIG` instead. |
-| `MINERU_OFFICIAL_WORKER_MODE` | None | Removed. Any set value fails the run with `MINERU_OFFICIAL_WORKER_MODE was removed in MinerU 4.0.4; use --official-worker-mode`. |
+| `MINERU_MODEL_STACK` | None | Removed before MinerU 4.0.10; the current version does not support it. Any set value, including `auto`, fails the run on every lane; whether the failure happens before lane dispatch is not configurable. Configure `model.small_backend` / `model.vlm.engine` via `MINERU_CONFIG` instead. |
+| `MINERU_OFFICIAL_WORKER_MODE` | None | No longer supported by the project. Any set value fails the run with `MINERU_OFFICIAL_WORKER_MODE is no longer supported; use --official-worker-mode`. |
 | `MINERU_OFFICIAL_PYTHON` | Python `python3`/`python` | Absolute official Hybrid interpreter path. |
 | `MINERU_MODEL_BASE_DIR` | None | Absolute official Hybrid model root; injected into the worker as `MINERU_MODEL_BASE_DIR` (upstream `model.base_dir`). `MINERU_HOME` is a MinerU home directory, not the model root. |
-| `MINERU_CONFIG` | None | Absolute official Hybrid config path. |
+| `MINERU_CONFIG` | None | Absolute path to the official upstream YAML config. |
 | `MINERU_PDF_RENDER_THREADS` | `min(cpu, 8)` | Number of rendering workers. |
 | `MINERU_PDF_RENDER_TIMEOUT` | `300` | Timeout in seconds for a single render. |
 | `MINERU_FORMULA_ENABLE` | On | Default for formula recognition (strict `true`/`false`, case-insensitive). |
@@ -600,14 +617,22 @@ public fields on `RunOptions` (`api_url`, `api_key`) before calling `run`.
 ## Python and Node.js bindings
 
 The `mineru-rs` Python package and the `@alexsun-top/mineru` Node.js package
-wrap the same parser. Both expose a `parse()` that returns markdown in memory,
-and a `run()` that writes the full output tree.
+retain their legacy `parse()` (Markdown and warnings) and `run()` (full output
+tree) APIs. An additive rich SDK for the official MinerU worker is documented
+in the [official SDK guide](official-sdk.md); it has separate parser/result
+types and does not change those legacy methods. Build the Python wheel and Node
+native binding from the matching checkout before using the new API; the current
+published `0.3.0` packages are not guaranteed to include it.
+The separate opt-in official-v1 upload/job interface is covered in the
+[official HTTP API guide](official-http.md). Concentrated build and test checks
+have run; independent review remains pending, and this is not release approval.
 
-> The binding packages do not bundle the `mineru-office-convert` helper and do
-> not yet support Office-format (`.docx`/`.pptx`/`.xlsx`) input conversion;
-> passing an Office document fails with "office conversion is unavailable".
-> PDF and image input are unaffected. For Office conversion, use the
-> `cargo install mineru --features office` CLI or the `mineru-api` server.
+> The legacy binding `run()`/`parse()` flow does not bundle the
+> `mineru-office-convert` helper and does not perform Office-to-PDF conversion;
+> passing an Office document there fails with "office conversion is
+> unavailable". The separate rich SDK can parse the formats supported by the
+> pinned official worker, as described in [its input table](official-sdk.md#parse-inputs-and-options).
+> It requires a separately installed official Python environment.
 
 ### Python
 

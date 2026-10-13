@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "archive_name": "office2pdf-0.6.5.crate",
+      "archive_root": "office2pdf-0.6.5",
+      "identity_fragments": [
+        "name = \"office2pdf\"",
+        "version = \"0.6.5\"",
+        "license = \"Apache-2.0\""
+      ],
+      "license": "Apache-2.0",
+      "license_files": [],
+      "package": "office2pdf",
+      "patched_fragments": [
+        "name = \"office2pdf\"",
+        "version = \"0.6.5\"",
+        "license = \"Apache-2.0\"",
+        "version = \"0.41\""
+      ],
+      "sha256": "103138077535e6e1db8c5f73ca2d2a75b9dc027288d8a94abf034a72f8dfd2a6",
+      "url": "https://static.crates.io/crates/office2pdf/office2pdf-0.6.5.crate",
+      "version": "0.6.5"
+    },
+    {
+      "archive_name": "citationberg-0.6.1.crate",
+      "archive_root": "citationberg-0.6.1",
+      "identity_fragments": [
+        "name = \"citationberg\"",
+        "version = \"0.6.1\"",
+        "license = \"MIT OR Apache-2.0\""
+      ],
+      "license": "MIT OR Apache-2.0",
+      "license_files": [
+        "LICENSE-MIT",
+        "LICENSE-APACHE"
+      ],
+      "package": "citationberg",
+      "patched_fragments": [
+        "name = \"citationberg\"",
+        "version = \"0.6.1\"",
+        "license = \"MIT OR Apache-2.0\"",
+        "version = \"0.41.0\"",
+        "\"serialize\"",
+        "\"overlapped-lists\""
+      ],
+      "sha256": "1f6597e8bdbca37f1f56e5a80d15857b0932aead21a78d20de49e99e74933046",
+      "url": "https://static.crates.io/crates/citationberg/citationberg-0.6.1.crate",
+      "version": "0.6.1"
+    },
+    {
+      "archive_name": "umya-spreadsheet-3e001dcb.tar.gz",
+      "archive_root": "umya-spreadsheet-3e001dcbdbf2c490e93724af6f502560a3d7d766",
+      "identity_fragments": [
+        "name = \"umya-spreadsheet\"",
+        "version = \"2.3.3\"",
+        "license = \"MIT\""
+      ],
+      "license": "MIT",
+      "license_files": [
+        "LICENSE"
+      ],
+      "package": "umya-spreadsheet",
+      "patched_fragments": [
+        "name = \"umya-spreadsheet\"",
+        "version = \"2.3.3\"",
+        "license = \"MIT\"",
+        "quick-xml = { version = \"0.41\", features = [\"serialize\"] }"
+      ],
+      "sha256": "a9fc92e72c55d8245ab90a2efb55b7d1e677a909dce55be21500acaa21946006",
+      "url": "https://codeload.github.com/developer0hye/umya-spreadsheet/tar.gz/3e001dcbdbf2c490e93724af6f502560a3d7d766",
+      "version": "2.3.3"
+    }
+  ],
+  "tree_sha256": "1bbbe07e99a97c6e86de87f93b220f82ffffd2fcee8d59e967fd1c3259fc6df1"
+}

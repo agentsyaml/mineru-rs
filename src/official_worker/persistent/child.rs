@@ -314,7 +314,7 @@ impl PersistentChild {
                     || frame.package_version != config.package_version
                     || frame.schema_version != config.schema_version
                     || frame.max_in_flight != 1
-                    || frame.capabilities != super::protocol::persistent_capabilities()
+                    || frame.capabilities != super::protocol::persistent_capabilities(config)
                 {
                     return Err(persistent_error_text(
                         "official persistent handshake mismatch".into(),

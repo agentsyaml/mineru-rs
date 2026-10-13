@@ -1,0 +1,382 @@
+{
+  "files": {
+    "citationberg/Cargo.toml": [
+      "ae2b0aef5f445457ce11219f5cb13640f08152d4beb89b8f3727a25a16e901f2",
+      "6b5747fdf01ec85b50b06e4399f5876e4e2a6ce6231e2f4d8d23b8dd3750817b",
+      [
+        [
+          "version = \"0.38.1\"",
+          "version = \"0.41.0\"",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/Cargo.toml": [
+      "f120108769778039c1240b7d2e1f697553bc9c43f5931d8fbe2f48bc24903e7f",
+      "f31929dc2feff5cb1f6b9f63391205b9e70b24b75a0283fb271ee81e241ea474",
+      [
+        [
+          "version = \"0.38\"",
+          "version = \"0.41\"",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/chart.rs": [
+      "5f69c781b8112999003f7a6ba940fed4459f39f4851501d0eb1add03d3b286e8",
+      "20ea590c3131b59187f9b95c041c4af37e80a00e2b52601e7a47aec84bcdef6c",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          2
+        ],
+        [
+          ".xml_content()",
+          ".xml_content(quick_xml::XmlVersion::Implicit1_0)",
+          4
+        ],
+        [
+          "attr.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx.rs": [
+      "6c888f5950e6f9195b156565aaa0859d967c4ccd74ce943d21163bb33478ddc1",
+      "2e94467d4a622b9ee77976df59212826d58ff9d534670e7d07b9210232aa9f4e",
+      [
+        [
+          "attribute.unescape_value()",
+          "attribute.decode_and_unescape_value(reader.decoder())",
+          1
+        ],
+        [
+          "attribute.decode_and_unescape_value(reader.decoder())",
+          "crate::parser::xml_util::decode_unescape_attribute(&attribute, reader.decoder())",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_context_columns.rs": [
+      "321d27500ffee3b7213be6b1cd504b5adca52996049241b89aa23d454e961531",
+      "a5458ec4fb417ffc1c0c360dfb6d0ab03b1a6284316d62a860874b0062de55b3",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          4
+        ],
+        [
+          "attribute.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attribute)",
+          4
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_context_notes.rs": [
+      "c2f79ca488956b1467b422c6d2a80092f70c85e265491cad251ac8883db9da9f",
+      "cac23c84b8a7c517829b6f985bfb9cd2ec57b583bd81ba49b0d467ead9d96a8a",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          2
+        ],
+        [
+          ".xml_content()",
+          ".xml_content(quick_xml::XmlVersion::Implicit1_0)",
+          1
+        ],
+        [
+          "attribute.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attribute)",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_context_paragraph_shading.rs": [
+      "7ebd2a204c693bc44277d4f7057b8fee87c6f2334d0a262ea0ac348a550721df",
+      "89583367ea371bf843cb6d22a809e8dace4f66f0eb6bcbbade41a07f497c2dca",
+      [
+        [
+          "attribute\n                .decode_and_unescape_value(reader.decoder())",
+          "crate::parser::xml_util::decode_unescape_attribute(&attribute, reader.decoder())",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_context_shape.rs": [
+      "e08f4dc304d078a33b2e331c84d10ec1b0ef7df936460ed868c64e3b85ad9a6e",
+      "636928447bba8cca9bd638591d39558f8c1f544f65d9ff5d677d57cd05c03c06",
+      [
+        [
+          ".xml_content()",
+          ".xml_content(quick_xml::XmlVersion::Implicit1_0)",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_context_vml.rs": [
+      "8d08bff62fe4559e7562e630a0b2487d388d0e10a8551058fdbd0596addb0f8a",
+      "54d9ddc63d3ca1e5b4e10f8a09df54ff47acd2a2ff2b4e3a90d0d289ac1a3ab9",
+      [
+        [
+          ".xml_content()",
+          ".xml_content(quick_xml::XmlVersion::Implicit1_0)",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_context_wrap.rs": [
+      "1439364726bec17b18990fd760b5a2a7fffd01dad5bd449796273ac580f03289",
+      "334a5b4ae894c3060030679c2315b80f7cf41229977632a84765db7f5af2ae00",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          1
+        ],
+        [
+          "attribute.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attribute)",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_sections.rs": [
+      "dcec5fc43948282a16e29de4b5032e399fb54b39f0c5d0a3d1e3ca28e9b2213c",
+      "f1f651cccd3df10371ac5e8d688888e4a329ad745e693bcd8e8d548c9a14e16b",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          2
+        ],
+        [
+          "attribute.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attribute)",
+          1
+        ],
+        [
+          "    let instruction = element\n        .attributes()\n        .flatten()\n        .find(|attribute| attribute.key.local_name().as_ref() == b\"instr\")?\n        .decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())\n        .ok()?;",
+          "    let attribute = element\n        .attributes()\n        .flatten()\n        .find(|attribute| attribute.key.local_name().as_ref() == b\"instr\")?;\n    let instruction = crate::parser::xml_util::unescape_attribute_utf8(&attribute).ok()?;",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_styles.rs": [
+      "0562b5a4ab8453726da20e018aa0b627886e0cdf16cd70d459781ceaf5b79bdf",
+      "a5f6e22ccd26fad67e806f1e8fc693c3dec54bbe4e47b72ffa1dd3458841a08c",
+      [
+        [
+          "attribute\n                        .decode_and_unescape_value(reader.decoder())",
+          "crate::parser::xml_util::decode_unescape_attribute(&attribute, reader.decoder())",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_text.rs": [
+      "4b0a2ab3f6ac4784b9612c43463d0716661afa0c0933d72b27c3eb921ae4a264",
+      "84e69def4eeb8bf0540f3dcff6e3ad06719cce22335369377e373d0e45f41173",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          1
+        ],
+        [
+          "attr.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/metadata.rs": [
+      "9d6b2e1db74826f6291fc5e2fd27f47f8c3c5ca61bfb3969fa3ef1d4d4e465bd",
+      "90024d03d2fc3723aae20875786b1a1b810232288d94d770bad98257c8b7a0df",
+      [
+        [
+          ".xml_content()",
+          ".xml_content(quick_xml::XmlVersion::Implicit1_0)",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/omml/mod.rs": [
+      "ebebef85ac5f4498b84fe7f24ed99170dfbeb661becac5bbbb79a5eefad9e2c0",
+      "eb2f75a5499e38835fc8d5fa6b939b113b1b910c8215e579ab8ada3664496d71",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          9
+        ],
+        [
+          ".xml_content()",
+          ".xml_content(quick_xml::XmlVersion::Implicit1_0)",
+          2
+        ],
+        [
+          "attr.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          9
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_slides.rs": [
+      "6bffe9231a202905391e6d43ccbe221eddbf810102c3c54a68f4306479963263",
+      "f2fc91cde59fedede1ea4c2c4f9eae08328917e62bc0bcd6b80ff88b6005c9b9",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          1
+        ],
+        [
+          "attr.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_theme.rs": [
+      "86fe2665e8eb499e9408b1d825fbf7ff93024531f92e58dfd140ce8bd822a28d",
+      "3eb6ce20ac01a08eca04995ce08a974134e20748056ffdad5c0454df7cf1c483",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          1
+        ],
+        [
+          "attr.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/smartart.rs": [
+      "0ff1de0baf5c65faa98469af32aab10a5e4a15bd4a8796724d51a8a83d75267e",
+      "aa8e90298cb3400095d5b68596c0ebbb4d496566440bea09f2340bde971fe02b",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          7
+        ],
+        [
+          ".xml_content()",
+          ".xml_content(quick_xml::XmlVersion::Implicit1_0)",
+          1
+        ],
+        [
+          "attr.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          7
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/xlsx_cond_fmt_raw.rs": [
+      "70f5f716f4a022445539a4e8931a454beaeaeab04db66372e6b9995b6b564e87",
+      "7766d589180f12e3e9e929a773654ca390988b241eb51719b62f8a9294008bf5",
+      [
+        [
+          "attribute\n                .decode_and_unescape_value(reader.decoder())",
+          "crate::parser::xml_util::decode_unescape_attribute(&attribute, reader.decoder())",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/xlsx_drawing.rs": [
+      "5904c51153a4e4e70bffc72b4fcf767929090a50f58d94afb02ad126133245a7",
+      "4803819784e8f6020ab993a209866d480245049d5fed765fa4865f6fa2c9a694",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          15
+        ],
+        [
+          ".xml_content()",
+          ".xml_content(quick_xml::XmlVersion::Implicit1_0)",
+          4
+        ],
+        [
+          "attr.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          13
+        ],
+        [
+          "attr\n                            .decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          1
+        ],
+        [
+          "attr\n                                .decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/xml_util.rs": [
+      "0476e8c52f2d83750416ddfb43ac3cfc2cfd687fec11c4a6dd9be4dfe4959145",
+      "7c89ef0bd6f1bc9d796efc1e794b619eeb8287a10860494a890fe6eddf5532c1",
+      [
+        [
+          ".unescape_value()",
+          ".decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          1
+        ],
+        [
+          "attr.decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
+          "unescape_attribute_utf8(&attr)",
+          1
+        ],
+        [
+          ".ok().map(|v| v.to_string());",
+          ".ok().map(|value| value.into_owned());",
+          1
+        ],
+        [
+          "use quick_xml::Reader;\nuse quick_xml::events::Event;\n\nuse crate::ir::Color;\n",
+          "use quick_xml::events::Event;\nuse quick_xml::{Decoder, Reader};\nuse std::borrow::Cow;\n\nuse crate::ir::Color;\n\npub(crate) fn unescape_attribute_utf8<'a>(\n    attribute: &quick_xml::events::attributes::Attribute<'a>,\n) -> quick_xml::Result<Cow<'a, str>> {\n    use quick_xml::encoding::EncodingError;\n    use std::str::from_utf8;\n\n    let decoded = match &attribute.value {\n        Cow::Borrowed(bytes) => Cow::Borrowed(from_utf8(bytes).map_err(EncodingError::Utf8)?),\n        Cow::Owned(bytes) => Cow::Owned(from_utf8(bytes).map_err(EncodingError::Utf8)?.to_owned()),\n    };\n    unescape_decoded_attribute(decoded)\n}\n\npub(crate) fn decode_unescape_attribute<'a>(\n    attribute: &quick_xml::events::attributes::Attribute<'a>,\n    decoder: Decoder,\n) -> quick_xml::Result<Cow<'a, str>> {\n    let decoded = match &attribute.value {\n        Cow::Borrowed(bytes) => decoder.decode(bytes)?,\n        Cow::Owned(bytes) => Cow::Owned(decoder.decode(bytes)?.into_owned()),\n    };\n    unescape_decoded_attribute(decoded)\n}\n\nfn unescape_decoded_attribute<'a>(decoded: Cow<'a, str>) -> quick_xml::Result<Cow<'a, str>> {\n    match quick_xml::escape::unescape(&decoded)? {\n        Cow::Borrowed(_) => Ok(decoded),\n        Cow::Owned(value) => Ok(Cow::Owned(value)),\n    }\n}\n",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/xml_util_tests.rs": [
+      "6bc50b9162456ac69fe94fd70e603aab553bcdfad0eb040a145d145043b88a32",
+      "67dc2bbcc64dab4ad92150da72fdf2fb3d08c24d8e46dcd72c8eafd7cde17cdb",
+      [
+        [
+          "fn parse_rels_id_target_last_duplicate_wins() {\n    let xml = r#\"<Relationships>\n  <Relationship Id=\"rId1\" Target=\"first.xml\"/>\n  <Relationship Id=\"rId1\" Target=\"second.xml\"/>\n</Relationships>\"#;\n    let map = parse_rels_id_target(xml);\n    assert_eq!(map.get(\"rId1\").map(String::as_str), Some(\"second.xml\"));\n}\n",
+          "fn parse_rels_id_target_last_duplicate_wins() {\n    let xml = r#\"<Relationships>\n  <Relationship Id=\"rId1\" Target=\"first.xml\"/>\n  <Relationship Id=\"rId1\" Target=\"second.xml\"/>\n</Relationships>\"#;\n    let map = parse_rels_id_target(xml);\n    assert_eq!(map.get(\"rId1\").map(String::as_str), Some(\"second.xml\"));\n}\n\nfn attribute_value(xml: &str, key: &[u8]) -> String {\n    let mut reader = quick_xml::Reader::from_str(xml);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else {\n        panic!(\"expected empty element\");\n    };\n    let attribute = element\n        .attributes()\n        .flatten()\n        .find(|attribute| attribute.key.as_ref() == key)\n        .unwrap();\n    unescape_attribute_utf8(&attribute).unwrap().into_owned()\n}\n\n#[test]\n",
+          1
+        ],
+        [
+          "\nfn attribute_value(xml: &str, key: &[u8]) -> String {\n    let mut reader = quick_xml::Reader::from_str(xml);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else {\n        panic!(\"expected empty element\");\n    };\n    let attribute = element\n        .attributes()\n        .flatten()\n        .find(|attribute| attribute.key.as_ref() == key)\n        .unwrap();\n    unescape_attribute_utf8(&attribute).unwrap().into_owned()\n}\n\n#[test]\n",
+          "\nfn attribute_value(xml: &str, key: &[u8]) -> String {\n    let mut reader = quick_xml::Reader::from_str(xml);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else {\n        panic!(\"expected empty element\");\n    };\n    let attribute = element\n        .attributes()\n        .flatten()\n        .find(|attribute| attribute.key.as_ref() == key)\n        .unwrap();\n    unescape_attribute_utf8(&attribute).unwrap().into_owned()\n}\n\n#[test]\nfn utf8_attributes_preserve_legacy_unescape_semantics() {\n    assert_eq!(attribute_value(r#\"<x v=\"R&amp;D&#xE9;\"/>\"#, b\"v\"), \"R&D\u00e9\");\n    assert_eq!(\n        attribute_value(\"<x v=\\\"a\\tb\\nc\\rd&#9;&#10;&#13;\\\"/>\", b\"v\"),\n        \"a\\tb\\nc\\rd\\t\\n\\r\"\n    );\n    assert_eq!(\n        attribute_value(\"<x xmlns:r=\\\"urn:test\\\" r:id=\\\"r&amp;\u00e9\\\"/>\", b\"r:id\"),\n        \"r&\u00e9\"\n    );\n}\n\n#[test]\n",
+          1
+        ],
+        [
+          "fn utf8_attributes_preserve_legacy_unescape_semantics() {\n    assert_eq!(attribute_value(r#\"<x v=\"R&amp;D&#xE9;\"/>\"#, b\"v\"), \"R&D\u00e9\");\n    assert_eq!(\n        attribute_value(\"<x v=\\\"a\\tb\\nc\\rd&#9;&#10;&#13;\\\"/>\", b\"v\"),\n        \"a\\tb\\nc\\rd\\t\\n\\r\"\n    );\n    assert_eq!(\n        attribute_value(\"<x xmlns:r=\\\"urn:test\\\" r:id=\\\"r&amp;\u00e9\\\"/>\", b\"r:id\"),\n        \"r&\u00e9\"\n    );\n}\n\n#[test]\n",
+          "fn utf8_attributes_preserve_legacy_unescape_semantics() {\n    assert_eq!(attribute_value(r#\"<x v=\"R&amp;D&#xE9;\"/>\"#, b\"v\"), \"R&D\u00e9\");\n    assert_eq!(\n        attribute_value(\"<x v=\\\"a\\tb\\nc\\rd&#9;&#10;&#13;\\\"/>\", b\"v\"),\n        \"a\\tb\\nc\\rd\\t\\n\\r\"\n    );\n    assert_eq!(\n        attribute_value(\"<x xmlns:r=\\\"urn:test\\\" r:id=\\\"r&amp;\u00e9\\\"/>\", b\"r:id\"),\n        \"r&\u00e9\"\n    );\n}\n\n#[test]\nfn decoder_aware_attributes_preserve_non_utf8_values() {\n    let xml = b\"<?xml version=\\\"1.0\\\" encoding=\\\"windows-1252\\\"?><x v=\\\"caf\\xe9&amp;&#x9;\\\"/>\";\n    let mut reader = quick_xml::Reader::from_reader(&xml[..]);\n    let mut buffer = Vec::new();\n    reader.read_event_into(&mut buffer).unwrap();\n    buffer.clear();\n    let decoder = reader.decoder();\n    let quick_xml::events::Event::Empty(element) = reader.read_event_into(&mut buffer).unwrap() else {\n        panic!(\"expected empty element\");\n    };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert_eq!(\n        decode_unescape_attribute(&attribute, decoder).unwrap(),\n        \"caf\u00e9&\\t\"\n    );\n}\n\n#[test]\n",
+          1
+        ],
+        [
+          "fn decoder_aware_attributes_preserve_non_utf8_values() {\n    let xml = b\"<?xml version=\\\"1.0\\\" encoding=\\\"windows-1252\\\"?><x v=\\\"caf\\xe9&amp;&#x9;\\\"/>\";\n    let mut reader = quick_xml::Reader::from_reader(&xml[..]);\n    let mut buffer = Vec::new();\n    reader.read_event_into(&mut buffer).unwrap();\n    buffer.clear();\n    let decoder = reader.decoder();\n    let quick_xml::events::Event::Empty(element) = reader.read_event_into(&mut buffer).unwrap() else {\n        panic!(\"expected empty element\");\n    };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert_eq!(\n        decode_unescape_attribute(&attribute, decoder).unwrap(),\n        \"caf\u00e9&\\t\"\n    );\n}\n\n#[test]\n",
+          "fn decoder_aware_attributes_preserve_non_utf8_values() {\n    let xml = b\"<?xml version=\\\"1.0\\\" encoding=\\\"windows-1252\\\"?><x v=\\\"caf\\xe9&amp;&#x9;\\\"/>\";\n    let mut reader = quick_xml::Reader::from_reader(&xml[..]);\n    let mut buffer = Vec::new();\n    reader.read_event_into(&mut buffer).unwrap();\n    buffer.clear();\n    let decoder = reader.decoder();\n    let quick_xml::events::Event::Empty(element) = reader.read_event_into(&mut buffer).unwrap() else {\n        panic!(\"expected empty element\");\n    };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert_eq!(\n        decode_unescape_attribute(&attribute, decoder).unwrap(),\n        \"caf\u00e9&\\t\"\n    );\n}\n\n#[test]\nfn cow() {\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"plain\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert!(matches!(unescape_attribute_utf8(&attribute), Ok(Cow::Borrowed(\"plain\"))));\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"&unknown;\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    assert!(unescape_attribute_utf8(&element.attributes().next().unwrap().unwrap()).is_err());\n}\n\n#[test]\n",
+          1
+        ],
+        [
+          "fn cow() {\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"plain\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert!(matches!(unescape_attribute_utf8(&attribute), Ok(Cow::Borrowed(\"plain\"))));\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"&unknown;\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    assert!(unescape_attribute_utf8(&element.attributes().next().unwrap().unwrap()).is_err());\n}\n\n#[test]\n",
+          "fn cow() {\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"plain\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert!(matches!(unescape_attribute_utf8(&attribute), Ok(Cow::Borrowed(\"plain\"))));\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"&unknown;\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    assert!(unescape_attribute_utf8(&element.attributes().next().unwrap().unwrap()).is_err());\n}\n\n#[test]\nfn invalid_utf8_attribute_is_rejected() {\n    let xml = b\"<x v=\\\"\\xff\\\"/>\";\n    let mut reader = quick_xml::Reader::from_reader(&xml[..]);\n    let mut buffer = Vec::new();\n    let quick_xml::events::Event::Empty(element) = reader.read_event_into(&mut buffer).unwrap() else {\n        panic!(\"expected empty element\");\n    };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert!(decode_unescape_attribute(&attribute, reader.decoder()).is_err());\n}\n",
+          1
+        ]
+      ]
+    ]
+  },
+  "schema_version": 1
+}

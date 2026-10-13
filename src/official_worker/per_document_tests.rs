@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use super::{OfficialRequest, OfficialWorker};
 use super::{
-    PYTHON_SHIM, PythonShim, STDERR_CAP, process::with_truncated_diagnostic, read_diagnostic,
+    PYTHON_SHIM, PYTHON_WORKER_FILES, PythonShim, STDERR_CAP, process::with_truncated_diagnostic,
+    read_diagnostic,
 };
 
 #[cfg(unix)]
@@ -36,6 +37,12 @@ fn python_shim_materializes_and_cleans_up() {
     let directory = path.parent().unwrap().to_owned();
 
     assert_eq!(std::fs::read(&path).unwrap(), PYTHON_SHIM.as_bytes());
+    for (name, source) in PYTHON_WORKER_FILES {
+        assert_eq!(
+            std::fs::read(directory.join(name)).unwrap(),
+            source.as_bytes()
+        );
+    }
     assert!(path.is_file());
     assert!(directory.is_dir());
 
@@ -98,7 +105,7 @@ async fn verbose_stderr_does_not_reject_a_valid_response() {
 request=$(cat)
 request_id=$(printf '%s' "$request" | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_id"])')
 python3 -c 'import sys; sys.stderr.buffer.write(b"x" * 65537 + bytes([255]))'
-printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.4","schema_version":"2.0","bundle_name":"hybrid-v4","error":null}\n' "$request_id"
+printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.10","schema_version":"2.0","bundle_name":"hybrid-v4","error":null}\n' "$request_id"
 "#,
     );
     let worker = OfficialWorker::new(Some(script)).unwrap();
@@ -142,7 +149,7 @@ async fn caller_abort_kills_and_reaps_worker_descendants() {
                 b"input",
                 "pdf",
                 test_request(),
-                Instant::now() + Duration::from_secs(60),
+                Instant::now() + Duration::from_secs(120),
             )
             .await
     });
@@ -151,6 +158,7 @@ async fn caller_abort_kills_and_reaps_worker_descendants() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let pids = std::fs::read_to_string(&pid_file).expect("worker did not start");
+    assert!(!task.is_finished(), "request timed out before caller abort");
     task.abort();
     let join = task.await;
     assert!(matches!(join, Err(error) if error.is_cancelled()));
@@ -159,7 +167,7 @@ async fn caller_abort_kills_and_reaps_worker_descendants() {
         .split_whitespace()
         .map(|pid| pid.parse::<libc::pid_t>().unwrap())
         .collect::<Vec<_>>();
-    let reap_deadline = Instant::now() + Duration::from_secs(60);
+    let reap_deadline = Instant::now() + Duration::from_secs(10);
     while pids.iter().any(|pid| unsafe { libc::kill(*pid, 0) == 0 })
         && Instant::now() < reap_deadline
     {

@@ -110,7 +110,11 @@ CRATE_FIXTURES = {
 }
 CRATE_PYTHON_FILES = {
     "python/mineru_official_worker.py",
+    "python/mineru_official_worker_contract.py",
     "python/mineru_official_worker_protocol.py",
+    "python/mineru_official_worker_bundle.py",
+    "python/mineru_official_worker_operations.py",
+    "python/mineru_official_worker_render.py",
 }
 BINARY_TARGETS = {
     "x86_64-unknown-linux-gnu": ("linux", 62),
@@ -703,6 +707,8 @@ def expected_crate_files(source: Path) -> set[str]:
         "LICENSE-APACHE",
         "docs/usage.md",
         "docs/compatibility.md",
+        "docs/official-sdk.md",
+        "docs/official-http.md",
     }
     # Cargo emits this generated file only when the source has a VCS revision.
     has_revision = subprocess.run(
@@ -736,7 +742,8 @@ def validate_crate_manifest(files: dict[str, bytes], version: str) -> None:
     if set(package.get("include", [])) != {
         "Cargo.toml", "Cargo.lock", "src/**", "/README.md", "README.zh-CN.md",
         "LICENSE-MIT", "LICENSE-APACHE",
-        "docs/usage.md", "docs/compatibility.md", "!tests/fixtures/input/README.md", *CRATE_FIXTURES, *CRATE_PYTHON_FILES,
+        "docs/usage.md", "docs/compatibility.md", "docs/official-sdk.md", "docs/official-http.md",
+        "!tests/fixtures/input/README.md", *CRATE_FIXTURES, *CRATE_PYTHON_FILES,
     }:
         fail("normalized Cargo.toml include policy differs")
 
@@ -853,6 +860,8 @@ def validate_wheel(path: Path, version: str) -> str:
         "mineru_rs/__init__.pyi",
         "mineru_rs/_cli.py",
         "mineru_rs/_native.pyi",
+        "mineru_rs/official.py",
+        "mineru_rs/official.pyi",
         *native,
     }
     if len(native) != 1 or package_files != expected_package:
@@ -1433,7 +1442,12 @@ def self_test(_: argparse.Namespace) -> None:
                 return
             raise AssertionError(message)
 
-        def write_wheel(path: Path, entry_point: bytes = WHEEL_ENTRY_POINTS) -> None:
+        def write_wheel(
+            path: Path,
+            entry_point: bytes = WHEEL_ENTRY_POINTS,
+            unexpected_package_file: bool = False,
+            cache_file: bool = False,
+        ) -> None:
             dist = "mineru_rs-1.2.3.dist-info"
             contents = {
                 "mineru_rs/__init__.py": b"",
@@ -1441,12 +1455,18 @@ def self_test(_: argparse.Namespace) -> None:
                 "mineru_rs/_cli.py": b"",
                 "mineru_rs/_native.abi3.so": b"native",
                 "mineru_rs/_native.pyi": b"",
+                "mineru_rs/official.py": b"",
+                "mineru_rs/official.pyi": b"",
                 f"{dist}/METADATA": b"Name: mineru-rs\nVersion: 1.2.3\n",
                 f"{dist}/WHEEL": b"Wheel-Version: 1.0\nTag: cp39-abi3-macosx_11_0_arm64\n",
                 f"{dist}/entry_points.txt": entry_point,
                 f"{dist}/RECORD": b"",
                 f"{dist}/sboms/mineru-python.cyclonedx.json": b"{}",
             }
+            if unexpected_package_file:
+                contents["mineru_rs/unexpected.py"] = b""
+            if cache_file:
+                contents["mineru_rs/__pycache__/__init__.cpython-314.pyc"] = b"cache"
             with zipfile.ZipFile(path, "w") as archive:
                 for name, data in contents.items():
                     member = zipfile.ZipInfo(name)
@@ -1542,11 +1562,17 @@ def self_test(_: argparse.Namespace) -> None:
 
         assert CRATE_PYTHON_FILES == {
             "python/mineru_official_worker.py",
+            "python/mineru_official_worker_contract.py",
             "python/mineru_official_worker_protocol.py",
+            "python/mineru_official_worker_bundle.py",
+            "python/mineru_official_worker_operations.py",
+            "python/mineru_official_worker_render.py",
         }
         crate_include = {
             "Cargo.toml", "Cargo.lock", "src/**", "/README.md", "README.zh-CN.md",
             "LICENSE-MIT", "LICENSE-APACHE", "docs/usage.md", "docs/compatibility.md",
+            "docs/official-sdk.md",
+            "docs/official-http.md",
             "!tests/fixtures/input/README.md", *CRATE_FIXTURES, *CRATE_PYTHON_FILES,
         }
 
@@ -1745,6 +1771,16 @@ def self_test(_: argparse.Namespace) -> None:
         wheel_path = Path(tmp) / "mineru_rs-1.2.3-cp39-abi3-macosx_11_0_arm64.whl"
         write_wheel(wheel_path)
         assert validate_wheel(wheel_path, "1.2.3") == "macosx_11_0_arm64"
+        write_wheel(wheel_path, unexpected_package_file=True)
+        must_fail(
+            lambda: validate_wheel(wheel_path, "1.2.3"),
+            "wheel with unexpected package file was accepted",
+        )
+        write_wheel(wheel_path, cache_file=True)
+        must_fail(
+            lambda: validate_wheel(wheel_path, "1.2.3"),
+            "wheel with compiled Python cache was accepted",
+        )
         for alias, target in PYTHON_SCRIPTS.items():
             write_wheel(wheel_path, entry_point=WHEEL_ENTRY_POINTS.replace(f"{alias}={target}\n".encode(), b""))
             must_fail(

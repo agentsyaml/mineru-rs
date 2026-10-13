@@ -24,3 +24,4 @@ module-name = "mineru_rs._native"
 python-source = "python"
 features = ["pyo3/extension-module"]
 include = ["python/mineru_rs/*.pyi"]
+exclude = ["python/mineru_rs/__pycache__/**", "python/mineru_rs/**/*.pyc"]

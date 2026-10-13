@@ -19,7 +19,7 @@ pub(super) fn set_attach_failure_for_test(force: bool) {
     FORCE_ATTACH_FAILURE.store(force, Ordering::SeqCst);
 }
 
-pub(super) fn official_executable(executable: Option<PathBuf>) -> Result<PathBuf, String> {
+pub(crate) fn official_executable(executable: Option<PathBuf>) -> Result<PathBuf, String> {
     if let Some(path) = &executable
         && !path.is_absolute()
     {

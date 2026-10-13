@@ -4,6 +4,7 @@ mod protocol;
 mod tests;
 
 use std::{
+    fmt,
     io::Write,
     path::{Path, PathBuf},
     sync::{
@@ -23,7 +24,14 @@ use super::{OfficialBundle, OfficialRequest, PACKAGE_VERSION, SCHEMA_VERSION};
 use child::{PersistentChild, persistent_error_text, persistent_stderr_text};
 use protocol::validate_persistent_request;
 
-#[derive(Clone, Debug)]
+const LEGACY_INPUT_FORMATS: &[&str] = super::PERSISTENT_INPUT_FORMATS;
+const SDK_INPUT_FORMATS: &[&str] = &[
+    "pdf", "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "jp2", "doc", "docx", "ppt", "pptx",
+    "xls", "xlsx", "rtf", "odt", "ods", "odp", "html", "htm", "shtml", "mhtml", "mht", "csv",
+    "tsv", "epub", "ofd",
+];
+
+#[derive(Clone)]
 pub(crate) struct OfficialSessionConfig {
     package_version: &'static str,
     schema_version: &'static str,
@@ -31,6 +39,27 @@ pub(crate) struct OfficialSessionConfig {
     config: Option<PathBuf>,
     vlm_api_key: Option<String>,
     vlm_model: Option<String>,
+    per_request_vlm: bool,
+    input_formats: &'static [&'static str],
+}
+impl fmt::Debug for OfficialSessionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OfficialSessionConfig")
+            .field("package_version", &self.package_version)
+            .field("schema_version", &self.schema_version)
+            .field(
+                "model_base_dir",
+                &self.model_base_dir.as_ref().map(|_| "[configured]"),
+            )
+            .field("config", &self.config.as_ref().map(|_| "[configured]"))
+            .field(
+                "vlm_api_key",
+                &self.vlm_api_key.as_ref().map(|_| "[redacted]"),
+            )
+            .field("vlm_model", &self.vlm_model)
+            .field("per_request_vlm", &self.per_request_vlm)
+            .finish()
+    }
 }
 
 impl OfficialSessionConfig {
@@ -47,14 +76,26 @@ impl OfficialSessionConfig {
             config,
             vlm_api_key,
             vlm_model,
+            per_request_vlm: false,
+            input_formats: LEGACY_INPUT_FORMATS,
         })
+    }
+
+    pub(crate) fn for_official_sdk(
+        model_base_dir: Option<PathBuf>,
+        config: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let mut session = Self::new(model_base_dir, config, None, None)?;
+        session.per_request_vlm = true;
+        session.input_formats = SDK_INPUT_FORMATS;
+        Ok(session)
     }
 
     fn matches_request(&self, request: &OfficialRequest) -> Result<(), String> {
         if request.model_base_dir != self.model_base_dir
             || request.config != self.config
-            || request.vlm_api_key != self.vlm_api_key
-            || request.vlm_model != self.vlm_model
+            || (!self.per_request_vlm
+                && (request.vlm_api_key != self.vlm_api_key || request.vlm_model != self.vlm_model))
         {
             return Err("official persistent request does not match its session config".into());
         }

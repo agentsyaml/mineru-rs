@@ -22,14 +22,14 @@ pub struct ScanLimits {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(super) enum ScanError {
+pub(crate) enum ScanError {
     Fallback,
     Limit,
 }
 impl ScanLimits {
     /// Compiled-safe default scan policy. The entry count follows the caller's value exactly;
     /// `ENTRY_CAP` is only the compiled default, never a hidden ceiling on operator values.
-    pub(super) fn production(max_entries: u64) -> Self {
+    pub(crate) fn production(max_entries: u64) -> Self {
         Self {
             max_entries: max_entries.min(ENTRY_CAP),
             central_cap: CENTRAL_CAP,
@@ -79,12 +79,12 @@ impl ScanLimits {
 }
 
 #[derive(Debug)]
-pub(super) struct ScanResult {
-    pub(super) count: u64,
+pub(crate) struct ScanResult {
+    pub(crate) count: u64,
     pub(super) central_start: u64,
 }
 
-pub(super) fn scan<R: Read + Seek>(
+pub(crate) fn scan<R: Read + Seek>(
     reader: &mut R,
     limits: ScanLimits,
 ) -> Result<ScanResult, ScanError> {

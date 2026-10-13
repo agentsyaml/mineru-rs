@@ -44,7 +44,7 @@ if [ "$MODE" = bad-handshake ]; then
     printf '%s\n' '{"type":"handshake","protocol":"wrong"}'
     exit 0
 fi
-printf '%s\n' '{"type":"handshake","protocol":"mineru-rs-official-worker/2","status":"ready","package_version":"4.0.4","schema_version":"2.0","max_in_flight":1,"capabilities":{"tiers":["flash","basic","standard","advanced"],"ocr_modes":["auto","txt","ocr"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}'
+printf '%s\n' '{"type":"handshake","protocol":"mineru-rs-official-worker/2","status":"ready","package_version":"4.0.10","schema_version":"2.0","max_in_flight":1,"capabilities":{"tiers":["flash","basic","standard","advanced"],"ocr_modes":["auto","txt","ocr"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}'
 
 requests=0
 while IFS= read -r request; do
@@ -75,12 +75,12 @@ while IFS= read -r request; do
     fi
     if [ "$MODE" = stderr-error-once ] && [ "$requests" -eq 1 ]; then
         printf '%s\n' 'first-request-stderr' >&2
-        printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"error\",\"package_version\":\"4.0.4\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\",\"error\":\"document failed\"}"
+        printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"error\",\"package_version\":\"4.0.10\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\",\"error\":\"document failed\"}"
         continue
     fi
     mkdir -p "$bundle"
     printf 'request-%s\n' "$sequence" > "$bundle/markdown.md"
-    printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"ok\",\"package_version\":\"4.0.4\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\"}"
+    printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"ok\",\"package_version\":\"4.0.10\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\"}"
 done
 "##
         .replace("__MODE__", &shell_quote(Path::new(mode)))
@@ -215,7 +215,7 @@ async fn persistent_worker_reuses_one_pid_and_keeps_bundles_independent() {
     );
     assert_eq!(startup["vlm_api_key"], "test-key");
     assert_eq!(startup["vlm_model"], "test-model");
-    assert_eq!(startup["capabilities"], persistent_capabilities());
+    assert_eq!(startup["capabilities"], persistent_capabilities(&config));
     assert_eq!(std::fs::read_to_string(starts).unwrap(), "1");
     let entries = std::fs::read_to_string(log).unwrap();
     let entries = entries.lines().collect::<Vec<_>>();
@@ -289,11 +289,12 @@ async fn persistent_worker_cancellation_kills_group_and_allows_new_session() {
                 b"first",
                 "pdf",
                 request,
-                Instant::now() + Duration::from_secs(30),
+                Instant::now() + Duration::from_secs(120),
             )
             .await
     });
     wait_for_file(&pids).await;
+    assert!(!task.is_finished(), "request timed out before caller abort");
     task.abort();
     assert!(
         matches!(task.await, Err(error) if error.is_cancelled()),
@@ -393,11 +394,15 @@ async fn persistent_worker_shutdown_reaps_an_active_owner() {
                 b"input",
                 "pdf",
                 persistent_request(Path::new("unused"), &config, "shutdown", "standard"),
-                Instant::now() + Duration::from_secs(30),
+                Instant::now() + Duration::from_secs(120),
             )
             .await
     });
     wait_for_file(&pids).await;
+    assert!(
+        !task.is_finished(),
+        "request timed out before worker shutdown"
+    );
     worker.shutdown().await.unwrap();
     assert!(task.await.unwrap().is_err());
     assert_pids_dead(&pids).await;
@@ -422,4 +427,78 @@ async fn persistent_worker_drop_reaps_an_idle_owner() {
     drop(bundle);
     drop(worker);
     assert_pids_dead(&pids).await;
+}
+
+#[test]
+fn sdk_persistent_frames_keep_startup_and_request_vlm_values_separate() {
+    use super::protocol::{
+        persistent_capabilities, persistent_request_frame, persistent_start_frame,
+    };
+    let config = OfficialSessionConfig::new(
+        None,
+        None,
+        Some("startup-key".into()),
+        Some("startup-model".into()),
+    )
+    .unwrap();
+    let request = OfficialRequest::new(
+        "flash".into(),
+        "auto".into(),
+        true,
+        Some("1,3-5,9".into()),
+        Some("https://request/v1".into()),
+        Some("startup-key".into()),
+        Some("startup-model".into()),
+        None,
+        None,
+        1024,
+        PathBuf::from("input.csv"),
+        PathBuf::from("bundle"),
+    );
+    assert!(config.matches_request(&request).is_ok());
+    let startup = persistent_start_frame(&config);
+    let request_frame = persistent_request_frame(&request, &config, 1);
+    assert_eq!(startup["vlm_api_key"], "startup-key");
+    assert_eq!(startup["vlm_model"], "startup-model");
+    assert_eq!(request_frame["vlm_api_key"], "startup-key");
+    assert_eq!(request_frame["vlm_model"], "startup-model");
+    assert_eq!(request_frame["vlm_server_url"], "https://request/v1");
+    assert_eq!(request_frame["page_range"], "1,3-5,9");
+    assert_eq!(startup["capabilities"], persistent_capabilities(&config));
+
+    let sdk = OfficialSessionConfig::for_official_sdk(None, None).unwrap();
+    let mut sdk_request = OfficialRequest::new(
+        "flash".into(),
+        "auto".into(),
+        true,
+        None,
+        None,
+        Some("request-key".into()),
+        Some("request-model".into()),
+        None,
+        None,
+        1024,
+        PathBuf::from("input.csv"),
+        PathBuf::from("bundle"),
+    );
+    sdk_request.official_vlm_config = Some(
+        serde_json::json!({"engine":"auto","server_url":"","api_key":"request-key","model":"request-model","http_timeout":600,"max_concurrency":100}),
+    );
+    sdk_request.source_context = Some(
+        serde_json::json!({"source_uri":null,"local_resource_root":null,"transport_encoding":null}),
+    );
+    assert!(sdk.matches_request(&sdk_request).is_ok());
+    let sdk_start = persistent_start_frame(&sdk);
+    let sdk_frame = persistent_request_frame(&sdk_request, &sdk, 1);
+    assert!(sdk_start["vlm_api_key"].is_null());
+    assert_eq!(sdk_frame["vlm_api_key"], "request-key");
+    assert_eq!(sdk_frame["official_vlm_config"]["max_concurrency"], 100);
+    assert!(sdk_frame["source_context"]["local_resource_root"].is_null());
+    let formats = serde_json::json!([
+        "pdf", "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "jp2", "doc", "docx", "ppt",
+        "pptx", "xls", "xlsx", "rtf", "odt", "ods", "odp", "html", "htm", "shtml", "mhtml", "mht",
+        "csv", "tsv", "epub", "ofd"
+    ]);
+    assert_eq!(persistent_capabilities(&sdk)["input_formats"], formats);
+    assert_eq!(sdk_start["capabilities"]["input_formats"], formats);
 }

@@ -5,6 +5,8 @@ use mineru::command::service::{self, ServiceOverrides};
 use mineru::vlm_api::ServiceConfig;
 use mineru::{DocumentLimitOverrides, DocumentLimitPolicy};
 use std::sync::Arc;
+#[path = "mineru-api/official.rs"]
+mod official;
 use std::{
     ffi::OsString,
     future::{Future, pending},
@@ -17,6 +19,8 @@ use std::{
 #[derive(Parser)]
 #[command(about = "MinerU mixed vlm-http-client task service")]
 struct Args {
+    #[command(flatten)]
+    official: official::OfficialArgs,
     #[arg(long, default_value = "127.0.0.1")]
     host: IpAddr,
     #[arg(long, default_value_t = 8000)]
@@ -144,6 +148,7 @@ fn main() -> ExitCode {
         if !args.host.is_loopback() && !env.public_bind_exposed {
             return Err("--host must be a loopback IP address".into());
         }
+        let official_runtime = args.official.runtime()?;
         let config = ServiceConfig::new(
             env.concurrency,
             env.output_root,
@@ -164,9 +169,18 @@ fn main() -> ExitCode {
         )?
         .service_policy(env.service)
         .progress_callback(sink.callback());
+        let shutdown = shutdown(env.shutdown_on_stdin_eof);
         Ok(tokio::runtime::Runtime::new()?.block_on(async move {
             let listener = tokio::net::TcpListener::bind((args.host, args.port)).await?;
-            mineru::vlm_api::serve(listener, config, shutdown(env.shutdown_on_stdin_eof)).await
+            match official_runtime {
+                Some(runtime) => {
+                    mineru::vlm_api::ServiceBuilder::new(config)
+                        .with_official_runtime(runtime)
+                        .serve(listener, shutdown)
+                        .await
+                }
+                None => mineru::vlm_api::serve(listener, config, shutdown).await,
+            }
         })?)
     })();
     if let Err(error) = &result {

@@ -6,15 +6,15 @@ use tokio::{
 };
 
 use super::super::{
-    OfficialRequest, OfficialSessionConfig, PERSISTENT_INPUT_FORMATS, PERSISTENT_OCR_MODES,
-    PERSISTENT_PROTOCOL, PERSISTENT_TIERS, REQUEST_CAP,
+    OfficialRequest, OfficialSessionConfig, PERSISTENT_OCR_MODES, PERSISTENT_PROTOCOL,
+    PERSISTENT_TIERS, REQUEST_CAP,
 };
 
-pub(super) fn persistent_capabilities() -> Value {
+pub(super) fn persistent_capabilities(config: &OfficialSessionConfig) -> Value {
     json!({
         "tiers": PERSISTENT_TIERS,
         "ocr_modes": PERSISTENT_OCR_MODES,
-        "input_formats": PERSISTENT_INPUT_FORMATS,
+        "input_formats": config.input_formats,
         "bundle_name": crate::hybrid_v4_output::BUNDLE_NAME,
         "cancellation": "process-terminate",
     })
@@ -62,7 +62,7 @@ pub(super) fn persistent_start_frame(config: &OfficialSessionConfig) -> Value {
         "config": config.config,
         "vlm_api_key": config.vlm_api_key,
         "vlm_model": config.vlm_model,
-        "capabilities": persistent_capabilities(),
+        "capabilities": persistent_capabilities(config),
     })
 }
 
@@ -82,8 +82,8 @@ pub(super) fn persistent_request_frame(
         "ocr_mode": request.ocr_mode,
         "image_analysis": request.image_analysis,
         "vlm_server_url": request.vlm_server_url,
-        "vlm_api_key": config.vlm_api_key,
-        "vlm_model": config.vlm_model,
+        "vlm_api_key": request.vlm_api_key,
+        "vlm_model": request.vlm_model,
         "model_base_dir": config.model_base_dir,
         "config": config.config,
         "bundle_name": crate::hybrid_v4_output::BUNDLE_NAME,
@@ -95,6 +95,12 @@ pub(super) fn persistent_request_frame(
     // absent key for page-range-less documents.
     if let Some(page_range) = &request.page_range {
         frame["page_range"] = Value::String(page_range.clone());
+    }
+    if let Some(source_context) = &request.source_context {
+        frame["source_context"] = source_context.clone();
+    }
+    if let Some(config) = &request.official_vlm_config {
+        frame["official_vlm_config"] = config.clone();
     }
     frame
 }
@@ -325,7 +331,7 @@ mod tests {
             "type": "handshake",
             "protocol": "mineru-rs-official-worker/2",
             "status": "ready",
-            "package_version": "4.0.4",
+            "package_version": "4.0.10",
             "schema_version": "2.0",
             "max_in_flight": 1,
             "capabilities": {"bundle_name": "hybrid-v4"},
@@ -339,7 +345,7 @@ mod tests {
             "request_id": "request-1",
             "sequence": 1,
             "status": "ok",
-            "package_version": "4.0.4",
+            "package_version": "4.0.10",
             "schema_version": "2.0",
             "bundle_name": "hybrid-v4",
         })
@@ -350,7 +356,7 @@ mod tests {
             "type": "error",
             "protocol": "mineru-rs-official-worker/2",
             "status": "error",
-            "package_version": "4.0.4",
+            "package_version": "4.0.10",
             "schema_version": "2.0",
             "bundle_name": "hybrid-v4",
             "error": "startup failed",

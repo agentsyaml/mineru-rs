@@ -17,6 +17,8 @@ pub mod mineru_api;
 #[cfg(feature = "legacy-office")]
 mod native_pdf;
 mod office_workers;
+pub mod official;
+pub mod official_api;
 mod official_builders;
 mod official_output;
 mod official_route;
@@ -35,6 +37,7 @@ mod vlm_types;
 
 #[doc(hidden)]
 pub mod vlm_api;
+mod vlm_api_official;
 
 pub use command::{RunContext, RunError, RunOptions, RunReport, run, run_with_context};
 pub use config::Limits;

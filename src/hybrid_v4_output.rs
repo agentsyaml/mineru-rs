@@ -1,4 +1,4 @@
-//! Validation and atomic publication for official MinerU 4.0.4 Hybrid output bundles.
+//! Validation and atomic publication for official MinerU 4.0.10 Hybrid output bundles.
 pub(crate) const BUNDLE_NAME: &str = "hybrid-v4";
 const SCHEMA_VERSION: &str = "2.0";
 
@@ -10,6 +10,8 @@ use cap_std::fs::{Dir, File as CapFile, OpenOptions};
 use std::path::Path;
 use transaction::{cleanup_failure, cleanup_transaction, finish_transaction};
 use tree::{copy_bundle, validate_staged};
+
+pub(crate) use tree::read_bundle_file_nofollow;
 
 pub(crate) fn validate_and_publish(
     bundle: &Path,

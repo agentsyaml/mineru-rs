@@ -16,12 +16,18 @@ include = [
     "src/**",
     "python/mineru_official_worker.py",
     "python/mineru_official_worker_protocol.py",
+    "python/mineru_official_worker_contract.py",
+    "python/mineru_official_worker_bundle.py",
+    "python/mineru_official_worker_operations.py",
+    "python/mineru_official_worker_render.py",
     "/README.md",
     "README.zh-CN.md",
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "docs/usage.md",
     "docs/compatibility.md",
+    "docs/official-sdk.md",
+    "docs/official-http.md",
     "tests/fixtures/pdf/minimal.pdf",
     "tests/fixtures/vlm/layout.txt",
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",
@@ -108,14 +114,24 @@ libc = "0.2"
 # default features/dependencies stay empty and unchanged.
 [workspace]
 members = [".", "bindings/python", "bindings/node"]
+exclude = [
+    ".deps/office-xml041/office2pdf",
+    ".deps/office-xml041/umya-spreadsheet",
+    ".deps/office-xml041/citationberg",
+]
 resolver = "3"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/agentsyaml/mineru-rs"
+
+[patch.crates-io]
+office2pdf = { path = ".deps/office-xml041/office2pdf" }
+umya-spreadsheet = { path = ".deps/office-xml041/umya-spreadsheet" }
+citationberg = { path = ".deps/office-xml041/citationberg" }
 
 # Dev-experience: dependencies rarely recompile, so optimize them even in dev
 # builds (one-time cost, cached), and lightly optimize the test profile so the

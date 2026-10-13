@@ -1,0 +1,10 @@
+[package]
+name = "office-xml-parity"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+
+[dependencies]
+quick-xml = { version = "=0.41.0", default-features = false, features = ["encoding"] }
+
+[workspace]
