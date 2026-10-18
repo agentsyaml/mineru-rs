@@ -1850,13 +1850,18 @@ mod tests {
                 .unwrap();
             writer.write_all(b"new").unwrap();
             writer
-                .start_file("bad", SimpleFileOptions::default().unix_permissions(mode))
+                .start_file(
+                    "bad",
+                    SimpleFileOptions::default()
+                        .system(zip::System::Unix)
+                        .external_attributes(mode << 16),
+                )
                 .unwrap();
             writer.write_all(b"bad").unwrap();
             writer.finish().unwrap();
-            let mut bytes = std::fs::read(temp.path()).unwrap();
-            patch_u32(&mut bytes, b"PK\x01\x02", 38, mode << 16);
-            std::fs::write(temp.path(), bytes).unwrap();
+            let mut zip = ZipArchive::new(temp.reopen().unwrap()).unwrap();
+            assert_eq!(zip.by_name("bad").unwrap().unix_mode().unwrap(), mode);
+            drop(zip);
             let output = sentinel_output();
             assert_sentinel_unchanged(&DownloadedZip(temp), &output);
         }
