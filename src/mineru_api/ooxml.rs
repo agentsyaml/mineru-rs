@@ -158,7 +158,10 @@ fn detect_reader<R: Read + std::io::Seek>(
             Ok(v) => v,
             Err(_) => return Ok(None),
         };
-        let name = entry.name().to_owned();
+        let name = match entry.name() {
+            Ok(name) => name.into_owned(),
+            Err(_) => return Ok(None),
+        };
         if !names.insert(entry_name_key(&name)) {
             return Err("OOXML archive contains duplicate entry names".into());
         }

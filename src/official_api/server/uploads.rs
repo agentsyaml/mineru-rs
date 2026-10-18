@@ -150,10 +150,13 @@ pub(super) async fn get(
         .map_err(|_| WireError::bad("request", "Request could not be processed."))?;
     match entries.get(&id) {
         Some(Entry::Upload(u)) if u.expires > OfficialFileStore::now() => {
-            let file = u.file_id.as_ref().and_then(|fid| match entries.get(fid) {
-                Some(Entry::File(f)) => Some(f.object.clone()),
-                _ => None,
-            });
+            let file = match &u.file_id {
+                Some(fid) => Some(match entries.get(fid) {
+                    Some(Entry::File(f)) => f.object.clone(),
+                    _ => return Err(not_found()),
+                }),
+                None => None,
+            };
             Ok(Json(upload_response(
                 id, &u.request, u.created, u.expires, file,
             )))
@@ -413,3 +416,7 @@ fn internal() -> WireError {
         param: None,
     }
 }
+
+#[cfg(test)]
+#[path = "uploads/tests.rs"]
+mod tests;

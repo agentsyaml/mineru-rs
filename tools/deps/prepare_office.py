@@ -35,9 +35,10 @@ from archive_safe import (
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / ".deps" / "office-xml041"
 LOCK = ROOT / ".deps" / ".office-xml041.prepare.lock"
-SOURCE_PIN = "a89283b679b4fed25a6f0d43b6990954e3735a091f47e4a946ddfafd674cb43a"
-RECIPE_PIN = "23f030e0872b6d3f6882968b2a513caa90569cf7380c447e8a3a111b598dc049"
+SOURCE_PIN = "b6e63b9d41687cfe2a735fcc955bc4a6743fc82bf0f0f3049bedd4082d8e16e5"
+RECIPE_PIN = "966dbe9bdd58a5e22d3a8f8a4f35fef3a93091847693b3e1e7f85294b7dcad6a"
 ALLOWED_HOSTS = {"static.crates.io", "codeload.github.com"}
+PACKAGES = {"office2pdf", "umya-spreadsheet", "citationberg", "anydoc", "calamine", "docx-rs"}
 TIMEOUT_SECONDS = 30
 MAX_DOWNLOAD_SECONDS = 120
 
@@ -250,7 +251,7 @@ def _check_fragments(path, fragments):
 
 
 def _apply_recipes(stage, recipe_data):
-    parents = {"office2pdf", "umya-spreadsheet", "citationberg"}
+    parents = PACKAGES
     seen = set()
     for name, item in recipe_data.get("files", {}).items():
         relative = _safe_relative(name)
@@ -380,7 +381,7 @@ def _load_metadata():
     recipes = _read_pinned(ROOT / "tools/deps/office-xml041/edit_recipes.json", RECIPE_PIN)
     if (sources.get("schema_version") != 1 or recipes.get("schema_version") != 1
             or not re.fullmatch(r"[0-9a-f]{64}", sources.get("tree_sha256", ""))
-            or len(sources.get("sources", [])) != 3):
+            or len(sources.get("sources", [])) != len(PACKAGES)):
         raise PreparationError("pinned source metadata is incomplete")
     return sources, recipes
 
@@ -417,7 +418,7 @@ def prepare():
         for source in sources["sources"]:
             package = source["package"]
             archive_name = source.get("archive_name", "")
-            if (package not in {"office2pdf", "umya-spreadsheet", "citationberg"}
+            if (package not in PACKAGES
                     or package in names or not re.fullmatch(r"[A-Za-z0-9_.-]+", archive_name)
                     or archive_name in (".", "..")
                     or not re.fullmatch(r"[0-9a-f]{64}", source.get("sha256", ""))):
@@ -437,7 +438,7 @@ def prepare():
             _check_fragments(manifest, source["identity_fragments"])
             for license_file in source["license_files"]:
                 _file_at(stage, package + "/" + license_file)
-        if names != {"office2pdf", "umya-spreadsheet", "citationberg"}:
+        if names != PACKAGES:
             raise PreparationError("pinned source package set is incomplete")
         _apply_recipes(stage, recipes)
         for source in sources["sources"]:

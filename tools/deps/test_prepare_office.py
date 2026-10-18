@@ -102,6 +102,9 @@ class Fixture:
             "office2pdf": ('name = "office2pdf"\nversion = "0.6.5"\nlicense = "Apache-2.0"\nversion = "0.38"\n', "0.6.5", "Apache-2.0"),
             "citationberg": ('name = "citationberg"\nversion = "0.6.1"\nlicense = "MIT OR Apache-2.0"\nversion = "0.38.1"\nfeatures = ["serialize", "overlapped-lists"]\n', "0.6.1", "MIT OR Apache-2.0"),
             "umya-spreadsheet": ('name = "umya-spreadsheet"\nversion = "2.3.3"\nlicense = "MIT"\nquick-xml = { version = "0.41", features = ["serialize"] }\n', "2.3.3", "MIT"),
+            "anydoc": ('name = "anydoc"\nversion = "0.1.9"\nlicense = "MIT"\nzip = { version = "8.6.0" }\n', "0.1.9", "MIT"),
+            "calamine": ('name = "calamine"\nversion = "0.36.1"\nlicense = "MIT"\nzip = { version = "8.6" }\n', "0.36.1", "MIT"),
+            "docx-rs": ('name = "docx-rs"\nversion = "0.4.22"\nlicense = "MIT"\nzip = { version = "8.6.0" }\n', "0.4.22", "MIT"),
         }
         self.archives = {}
         self.sources = []
@@ -123,6 +126,8 @@ class Fixture:
             })
         self.sources[0]["patched_fragments"].append('version = "0.41"')
         self.sources[1]["patched_fragments"].extend(['version = "0.41.0"', '"serialize"', '"overlapped-lists"'])
+        for source in self.sources[3:]:
+            source["patched_fragments"].append('version = "9.0.5"')
         self._write_metadata()
 
     def _write_metadata(self):
@@ -134,6 +139,10 @@ class Fixture:
             "citationberg/Cargo.toml": [digest(self.packages["citationberg"][0].encode()), digest(self.packages["citationberg"][0].replace('version = "0.38.1"', 'version = "0.41.0"').encode()), [["version = \"0.38.1\"", "version = \"0.41.0\"", 1]]],
             "office2pdf/src/lib.rs": [digest(original), digest(updated), replacements],
         }
+        for name in ("anydoc", "calamine", "docx-rs"):
+            manifest = self.packages[name][0]
+            changed = manifest.replace('version = "8.6.0"', 'version = "9.0.5"').replace('version = "8.6"', 'version = "9.0.5"')
+            files[name + "/Cargo.toml"] = [digest(manifest.encode()), digest(changed.encode()), [[manifest[manifest.index('version = "8.6'):manifest.index('version = "8.6') + len('version = "8.6.0"' if '8.6.0' in manifest else 'version = "8.6"')], 'version = "9.0.5"', 1]]]
         recipe = {"schema_version": 1, "files": files}
         recipe_bytes = (json.dumps(recipe, sort_keys=True, indent=2) + "\n").encode()
         (self.bundle / "edit_recipes.json").write_bytes(recipe_bytes)
@@ -145,6 +154,8 @@ class Fixture:
                 manifest = manifest.replace('version = "0.38"', 'version = "0.41"')
             elif package == "citationberg":
                 manifest = manifest.replace('version = "0.38.1"', 'version = "0.41.0"')
+            elif package in ("anydoc", "calamine", "docx-rs"):
+                manifest = manifest.replace('version = "8.6.0"', 'version = "9.0.5"').replace('version = "8.6"', 'version = "9.0.5"')
             # Byte-exact: text-mode writes would translate \n to \r\n on Windows
             # and diverge from the LF archives and recipe hashes.
             assert "\r" not in manifest
@@ -186,7 +197,6 @@ class PrepareOfficeTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
-
     def opener(self, before_open=None):
         owner = self
 
@@ -200,18 +210,16 @@ class PrepareOfficeTests(unittest.TestCase):
 
     def patch_network(self, before_open=None):
         return mock.patch("urllib.request.build_opener", return_value=self.opener(before_open))
-
     def test_fresh_prepare_is_noop_and_verify_is_offline(self):
         calls = []
         with self.patch_network(calls.append):
             self.module["prepare"]()
             self.module["prepare"]()
             self.module["verify"]()
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 6)
         self.assertTrue(self.module["OUTPUT"].is_dir())
         self.assertFalse(self.module["LOCK"].exists())
         self.assertFalse(any(self.module["OUTPUT"].parent.glob(".office-xml041-stage-*")))
-
     def test_archive_and_recipe_tampering_fail_before_publish(self):
         url = self.fixture.sources[0]["url"]
         original = self.fixture.archives[url]
@@ -220,7 +228,6 @@ class PrepareOfficeTests(unittest.TestCase):
             self.module["prepare"]()
         self.assertFalse(self.module["OUTPUT"].exists())
         self.assertFalse(self.module["LOCK"].exists())
-
         self.fixture.archives[url] = original
         recipes_path = self.fixture.bundle / "edit_recipes.json"
         recipes = json.loads(recipes_path.read_text(encoding="utf-8"))
@@ -241,7 +248,6 @@ class PrepareOfficeTests(unittest.TestCase):
         with self.patch_network(), self.assertRaises(self.module["PreparationError"]):
             self.module["prepare"]()
         self.assertEqual(victim.read_bytes(), b"tampered\n")
-
     def test_concurrent_prepare_is_rejected(self):
         entered = threading.Event()
         release = threading.Event()
@@ -269,7 +275,6 @@ class PrepareOfficeTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(failure, [])
         self.assertTrue(self.module["OUTPUT"].is_dir())
-
     def test_interruption_cleans_only_owned_staging_and_lock(self):
         class InterruptingOpener:
             def open(self, request, timeout):
@@ -281,7 +286,6 @@ class PrepareOfficeTests(unittest.TestCase):
         self.assertFalse(self.module["LOCK"].exists())
         self.assertFalse(self.module["OUTPUT"].exists())
         self.assertFalse(any(self.module["OUTPUT"].parent.glob(".office-xml041-stage-*")))
-
     def test_malicious_tar_paths_links_collisions_and_conflicts_are_rejected(self):
         hostile = [
             [("../escape", b"x", "file")],
@@ -485,11 +489,7 @@ class PrepareOfficeTests(unittest.TestCase):
             handler.https_open(request)
         self.assertEqual(captured["args"][0], "static.crates.io")
         self.assertIn("context", captured["kwargs"])
-        self.assertNotIn(
-            "check_hostname",
-            captured["kwargs"],
-            "stale do_open kwarg rejected by Python >= 3.12",
-        )
+        self.assertNotIn("check_hostname", captured["kwargs"], "stale do_open kwarg rejected by Python >= 3.12")
 
     def test_https_open_forwards_only_context_to_the_connection(self):
         # http.client.HTTPSConnection lost the check_hostname kwarg in

@@ -1,13 +1,17 @@
 use super::{service::ServiceInner, store::Entry};
-use crate::official_api::wire::{ListResponse, WireError};
+use crate::official_api::wire::{ApiError, ApiErrorBody};
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{
+    sync::{Arc, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub(super) fn router(state: Arc<ServiceInner>) -> Router {
     Router::new()
@@ -21,29 +25,62 @@ pub(super) fn router(state: Arc<ServiceInner>) -> Router {
 async fn health() -> Json<crate::official_api::wire::Health> {
     Json(crate::official_api::wire::Health::default())
 }
-async fn tiers() -> Json<ListResponse<Value>> {
-    let data = ["flash", "basic", "standard", "advanced"].into_iter().map(|id| json!({
-        "id":id,"description":"Supported by the configured local parser.","current_model":null
-    })).collect();
-    Json(ListResponse {
-        object: "list",
-        first_id: Some("flash".into()),
-        last_id: Some("advanced".into()),
-        has_more: false,
-        data,
+async fn tiers() -> Json<Value> {
+    let current_model = virtual_model_id();
+    let data: Vec<Value> = [
+        ("flash", "Fast local text extraction."),
+        ("basic", "Basic parsing with local lightweight models."),
+        ("standard", "Standard parsing for most documents."),
+        ("advanced", "Advanced parsing for difficult documents."),
+    ]
+    .into_iter()
+    .map(|(id, description)| {
+        json!({"id":id,"description":description,"current_model":current_model})
+    })
+    .collect();
+    Json(json!({"object":"list","data":data}))
+}
+async fn models() -> Json<Value> {
+    let id = virtual_model_id();
+    Json(json!({"object":"list","data":[model_info(&id)]}))
+}
+async fn model(Path(id): Path<String>) -> Response {
+    if id == virtual_model_id() {
+        return Json(model_info(&id)).into_response();
+    }
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiError {
+            error: ApiErrorBody {
+                error_type: "invalid_request_error".into(),
+                code: "model_not_found".into(),
+                message: format!("Model '{id}' not found"),
+                param: None,
+            },
+        }),
+    )
+        .into_response()
+}
+/// The single virtual model advertised by `/v1/models`. Its id tracks the
+/// pinned MinerU package version; quality is chosen per request through `tier`.
+fn virtual_model_id() -> String {
+    format!("mineru-{}", crate::official_worker::PACKAGE_VERSION)
+}
+/// Stable per-process registration timestamp, matching upstream's virtual model.
+fn model_registered_at() -> i64 {
+    static REGISTERED_AT: OnceLock<i64> = OnceLock::new();
+    *REGISTERED_AT.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default()
     })
 }
-async fn models() -> Json<ListResponse<Value>> {
-    Json(ListResponse {
-        object: "list",
-        data: Vec::new(),
-        first_id: None,
-        last_id: None,
-        has_more: false,
+fn model_info(id: &str) -> Value {
+    json!({
+        "id":id,"object":"model","created":model_registered_at(),"owned_by":"mineru",
+        "description":"MinerU virtual model. Quality is selected per request via tier (flash|basic|standard|advanced); this id identifies the server version, not a specific engine."
     })
-}
-async fn model(Path(_id): Path<String>) -> Result<Json<Value>, WireError> {
-    Err(not_found())
 }
 async fn usage(State(s): State<Arc<ServiceInner>>) -> Json<Value> {
     let jobs = s.jobs_created.load(std::sync::atomic::Ordering::Acquire);
@@ -62,12 +99,4 @@ async fn usage(State(s): State<Arc<ServiceInner>>) -> Json<Value> {
         "counters":{"visible_files":files,"input_bytes":s.store.inner.used.load(std::sync::atomic::Ordering::Acquire),
             "artifact_bytes":s.store.inner.artifact_used.load(std::sync::atomic::Ordering::Acquire)}}),
     )
-}
-fn not_found() -> WireError {
-    WireError {
-        status: StatusCode::NOT_FOUND,
-        code: "not_found",
-        message: "The requested model was not found.",
-        param: Some("model"),
-    }
 }

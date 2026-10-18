@@ -9,7 +9,7 @@ from pathlib import Path
 class LimitError(RuntimeError):
     pass
 
-PACKAGE_VERSION = "4.0.10"
+PACKAGE_VERSION = "4.0.12"
 SCHEMA_VERSION = "2.0"
 BUNDLE_NAME = "hybrid-v4"
 PROTOCOL = "mineru-rs-official-worker/1"

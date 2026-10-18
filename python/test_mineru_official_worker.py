@@ -248,7 +248,7 @@ class OfficialOperationSerializationTests(unittest.TestCase):
             worker_render.validate_render_options("pdf", {"standalone": False})
 
     def test_version_pin_in_both_worker_modes(self) -> None:
-        self.assertEqual(worker.PACKAGE_VERSION, "4.0.10")
+        self.assertEqual(worker.PACKAGE_VERSION, "4.0.12")
         request = {
             "protocol": worker.PROTOCOL, "request_id": "version-test",
             "tier": "standard", "ocr_mode": "auto", "image_analysis": False,
@@ -262,7 +262,7 @@ class OfficialOperationSerializationTests(unittest.TestCase):
             "config": None, "vlm_api_key": None, "vlm_model": None,
             "capabilities": protocol.PERSISTENT_CAPABILITIES,
         }
-        for version, accepted in (("4.0.10", True), ("4.0.4", False)):
+        for version, accepted in (("4.0.12", True), ("4.0.4", False)):
             for persistent in (False, True):
                 output = _BinaryOutput()
                 stdin = _BinaryInput(json.dumps(request).encode())
@@ -286,7 +286,7 @@ class OfficialOperationSerializationTests(unittest.TestCase):
                 failed = response["type"] == "error" if persistent else response["status"] == "error"
                 self.assertEqual(failed, not accepted)
                 if not accepted:
-                    self.assertIn("4.0.10", response["error"])
+                    self.assertIn("4.0.12", response["error"])
 
 
 class RequestValidationTests(unittest.TestCase):

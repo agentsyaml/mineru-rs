@@ -64,7 +64,7 @@ mod tests {
     fn health_and_error_envelope_are_official_v1() {
         let health = serde_json::to_value(Health::default()).unwrap();
         assert_eq!(health["status"], "ok");
-        assert_eq!(health["version"], "4.0.10");
+        assert_eq!(health["version"], "4.0.12");
         assert!(health.get("schema_version").is_none());
         let response = WireError::too_large().into_response();
         assert_eq!(response.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);

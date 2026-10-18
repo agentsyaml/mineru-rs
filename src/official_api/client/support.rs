@@ -135,7 +135,10 @@ fn validate_zip_with_limits(
         let mut entry = archive
             .by_index(index)
             .map_err(|_| OfficialApiError::Protocol("invalid ZIP entry".into()))?;
-        let name = entry.name();
+        let name = entry
+            .name()
+            .map_err(|_| OfficialApiError::Protocol("invalid ZIP entry name".into()))?;
+        let name = name.as_ref();
         let path = name.strip_suffix('/').unwrap_or(name);
         let components: Vec<_> = path.split('/').collect();
         if name.contains('\\')

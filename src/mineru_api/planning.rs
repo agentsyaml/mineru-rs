@@ -11,7 +11,7 @@ pub fn selected_pages_for_path(
     if !is_pdf {
         return Ok(1);
     }
-    let document = lopdf::Document::load(path).map_err(|_| "cannot read PDF")?;
+    let document = load_pdf_with_limit(path, crate::Limits::default().max_pdf_bytes as u64)?;
     if document.is_encrypted() {
         return Err("PDF is encrypted".into());
     }
@@ -64,7 +64,17 @@ fn load_pdf_with_limit(path: &Path, max_input_bytes: u64) -> Result<lopdf::Docum
         }
         bytes.extend_from_slice(&buffer[..read]);
     }
-    lopdf::Document::load_mem(&bytes).map_err(|_| "cannot read PDF".into())
+    crate::pdf_load::load_bounded(
+        &bytes,
+        usize::try_from(max_input_bytes).map_err(|_| "cannot read PDF")?,
+    )
+    .map_err(|error| {
+        if matches!(error, lopdf::Error::InvalidPassword) {
+            "PDF is encrypted".into()
+        } else {
+            "cannot read PDF".into()
+        }
+    })
 }
 pub(crate) fn selected_pages(count: usize, start: u64, end: Option<u64>) -> Result<usize, String> {
     let count = u64::try_from(count).map_err(|_| "PDF page count is too large")?;

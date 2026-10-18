@@ -25,6 +25,7 @@ mod official_route;
 mod official_worker;
 mod output;
 mod pdf;
+mod pdf_load;
 mod preview;
 mod progress_events;
 mod types;

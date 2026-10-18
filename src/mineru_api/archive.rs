@@ -188,7 +188,8 @@ impl DownloadedZip {
             if !raw_names.insert(file.name_raw().to_vec()) {
                 return Err("result archive has duplicate paths".into());
             }
-            let path = archive_path(file.name())?;
+            let name = file.name().map_err(|_| "invalid result archive")?;
+            let path = archive_path(&name)?;
             let directory = file.is_dir();
             if let Some(mode) = file.unix_mode() {
                 let kind = mode & 0o170000;

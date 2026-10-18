@@ -4,7 +4,7 @@ use std::{path::PathBuf, time::Duration};
 
 #[derive(Args, Default)]
 pub(super) struct OfficialArgs {
-    /// Enable the official MinerU4.0.10 upload/jobs API.
+    /// Enable the official MinerU4.0.12 upload/jobs API.
     #[arg(long)]
     official_api: bool,
     /// Trusted Python executable (absolute path to an existing file).

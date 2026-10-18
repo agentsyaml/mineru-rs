@@ -13,11 +13,16 @@
     ],
     "office2pdf/Cargo.toml": [
       "f120108769778039c1240b7d2e1f697553bc9c43f5931d8fbe2f48bc24903e7f",
-      "f31929dc2feff5cb1f6b9f63391205b9e70b24b75a0283fb271ee81e241ea474",
+      "3530e874cd24dfb41b66a8bbf4b8e066c25f4072b48055501aa38cfad6160fc7",
       [
         [
           "version = \"0.38\"",
           "version = \"0.41\"",
+          1
+        ],
+        [
+          "version = \"0.6\"",
+          "version = \"9.0.5\"",
           1
         ]
       ]
@@ -291,7 +296,7 @@
     ],
     "office2pdf/src/parser/xlsx_drawing.rs": [
       "5904c51153a4e4e70bffc72b4fcf767929090a50f58d94afb02ad126133245a7",
-      "4803819784e8f6020ab993a209866d480245049d5fed765fa4865f6fa2c9a694",
+      "de4113f15ce4b516d427b90c314c2057fae18765414769f17be5f2bacacfe449",
       [
         [
           ".unescape_value()",
@@ -316,6 +321,11 @@
         [
           "attr\n                                .decode_and_unescape_value(quick_xml::Reader::from_str(\"\").decoder())",
           "crate::parser::xml_util::unescape_attribute_utf8(&attr)",
+          1
+        ],
+        [
+          "            let name = entry.name().to_string();",
+          "            let name = entry.name().ok()?.into_owned();",
           1
         ]
       ]
@@ -373,6 +383,363 @@
         [
           "fn cow() {\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"plain\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert!(matches!(unescape_attribute_utf8(&attribute), Ok(Cow::Borrowed(\"plain\"))));\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"&unknown;\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    assert!(unescape_attribute_utf8(&element.attributes().next().unwrap().unwrap()).is_err());\n}\n\n#[test]\n",
           "fn cow() {\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"plain\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert!(matches!(unescape_attribute_utf8(&attribute), Ok(Cow::Borrowed(\"plain\"))));\n    let mut reader = quick_xml::Reader::from_str(r#\"<x v=\"&unknown;\"/>\"#);\n    let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else { panic!() };\n    assert!(unescape_attribute_utf8(&element.attributes().next().unwrap().unwrap()).is_err());\n}\n\n#[test]\nfn invalid_utf8_attribute_is_rejected() {\n    let xml = b\"<x v=\\\"\\xff\\\"/>\";\n    let mut reader = quick_xml::Reader::from_reader(&xml[..]);\n    let mut buffer = Vec::new();\n    let quick_xml::events::Event::Empty(element) = reader.read_event_into(&mut buffer).unwrap() else {\n        panic!(\"expected empty element\");\n    };\n    let attribute = element.attributes().next().unwrap().unwrap();\n    assert!(decode_unescape_attribute(&attribute, reader.decoder()).is_err());\n}\n",
+          1
+        ]
+      ]
+    ],
+    "anydoc/Cargo.toml": [
+      "1728ef5755647733bec2e65bcabac639628274bbb589ac34c58fb0cfd6ea1c8a",
+      "511ad7545f2809caf6901de24b61892280f395af8b82ea6f96dade0ae6f56fd6",
+      [
+        [
+          "version = \"8.6.0\"",
+          "version = \"9.0.5\"",
+          1
+        ]
+      ]
+    ],
+    "calamine/Cargo.toml": [
+      "94fedede2ae64ea59b9fd64754b5a8989d4cd97899222cc831e52a178924931f",
+      "56e1196860383495399e5aaa5fa1d69c0c1e61fb3ee54f6a7358913f729303ff",
+      [
+        [
+          "version = \"8.6\"",
+          "version = \"9.0.5\"",
+          1
+        ]
+      ]
+    ],
+    "docx-rs/Cargo.toml": [
+      "88745039196f4227c4d34e2538689b903ef516756206cf8b3b22ecfb14a67591",
+      "cc70449997df4c75b75c8467e813f6e1c0e7598549e46c2b2d81bbeba7aff6f4",
+      [
+        [
+          "version = \"8.6.0\"",
+          "version = \"9.0.5\"",
+          1
+        ]
+      ]
+    ],
+    "calamine/src/utils.rs": [
+      "407012efe8f39bc2636089064fe921ffbb4418342104bcde43133550a0ac487f",
+      "9af0570acb66db984c9373e655313026a05642e85bef7d8571deeb7bb4f47c80",
+      [
+        [
+          "    for zip_path in zip.file_names() {\n        let normalized = zip_path.replace('\\\\', \"/\").to_ascii_lowercase();\n        cache.insert(normalized, zip_path.to_string());\n",
+          "    for zip_path in zip.file_names().flatten() {\n        let normalized = zip_path.replace('\\\\', \"/\").to_ascii_lowercase();\n        cache.insert(normalized, zip_path.to_string());\n",
+          1
+        ]
+      ]
+    ],
+    "umya-spreadsheet/Cargo.toml": [
+      "dc8ff064cea8906b7b29abfee37b979e025bfe178e33f56fcf725edd2294fdf0",
+      "b74df3771a8d9e90e79fde9dcad1daf4cfa0df35f8ed18c51028a144d14ba5a1",
+      [
+        [
+          "zip = { version = \"2.2.1\"",
+          "zip = { version = \"9.0.5\"",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/benches/conversion.rs": [
+      "6c93ff0b28ddb40064ba98eabf47e71d218ce3d0e06c2842125d966cbaa8bd9a",
+      "7606b054b7e327a27872308a9a1018f6617ada10b41f4b0a32416fca1ed3cee6",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/lib_robustness_tests.rs": [
+      "9bf6d0578b73553ff2327aa32f0707d0ce459ea333ec3840f5f1de3f57389c5b",
+      "a9f51684f25caafdc9882970ef88dccfeabe01b2e51efe23bb4ad15a4ea65c71",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/lib_test_support.rs": [
+      "127c7711fe51d3ad968bd4621ccf1d6338d2f01eaffd090b3a45d9648d9732a8",
+      "4286a818ab85b9c14bbfb50429a124467664775df21da7256e33293b6a206f07",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_image_tests.rs": [
+      "6dc3303015e6c64d64c609f94c5693bf2dcd8e6e0c79dd342bfde53f71f1100d",
+      "309af66d0c9db51db12242c7e0082e8d0f81f427e09dc6a3f99ca7f271946b74",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          3
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_math_chart_metadata_tests.rs": [
+      "1e94b7baa9be1932b0e275eb7e82db2309bc877e85579ff88e1c24be902e0e15",
+      "77f6dd80616273842b30934f1d050dacf64c704caa7009cc5c76e8ec0001aa61",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_notes_toc_tests.rs": [
+      "578ebfe0bddc2d183fe54d2fad887e96079114a325deed7c52264309d04f8a58",
+      "fe33b62dc966fd5c8f3b7298bc1f5e4dd82131d98ec47ae5ff39844c5798bd0a",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_page_feature_tests.rs": [
+      "0951ba8ee4dfc162f7cddc450226cde42e843f860aaab41e3c26ef4ba68eee7f",
+      "b71a8bc00f0124545bccea2e353df1c4a0033c38455e22da3251a97006b0e90f",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/docx_tests.rs": [
+      "8d19f0b78f22568f96ed411677fcfeb64aa4d1863814db649350c9bd6bc43d8f",
+      "a99cc4f27c28a1354dc948bac24ea3550d88de0c0c63b7c9ea67a3d2138f7441",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/embedded_fonts_tests.rs": [
+      "769e2b03814a7c4c92c42e408a3276561df12768041869b45667726d9659804d",
+      "4fbc2a2df4e9c08c220e64bb58d4837394dce9616edbba1de45f712c3798b879",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          5
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/metadata_tests.rs": [
+      "b876be182305fcaf398ba978978f9e78cb2304230504c6662c6692a497b1a48e",
+      "2e0f371210089589a8c37404344ccc6133556cee3cfb1d1aadcbf9873a96ae65",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/mod.rs": [
+      "0cc0f6b31cca71fb80b8b6d68f7ad450855fdf2098556eaac2ea63d62f069cc3",
+      "c07d12f3dac4dd0c923c586d85ed85d96e44fba2c0171120bf297798b89c5f70",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_background_image_tests.rs": [
+      "344a5f33e0a3340af21241bc876817cf93b2d2fdd6435175d89c0c236e4fcb76",
+      "41e7195280bfe23d43c253f2eb0afdcdab011abb44ba3bf88bb068428403181e",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_chart_tests.rs": [
+      "ddac810c6530a3704ddda6b1b70bef1aeb9091f99a0b01cf6ec004cd08cf9f18",
+      "9b915886e313a0c28b8371bd25b127608eca660e5ac396332c6bfab386b82493",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_image_tests.rs": [
+      "3d423dd8dd599b5073e28d5de2bab663354a9c3a7ee11f3a1cf9017733023557",
+      "c83836384eb186d60e8666e35cab6c590265e205a39d08421dbb852c9e92f03c",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_metadata_tests.rs": [
+      "d28498fbb345db42f39d94579759620ca0541677c77a07f29902b0518fcadd6a",
+      "9d23bc2508c5421acafc6ecd94cc0576e724bc9ad155c6a816b32604bd884821",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_placeholder_geometry_tests.rs": [
+      "96df9ee5540a3132d2898f1ed6621263aff1e9ea2317c1b54ab4832943a9a2e8",
+      "9b43fd71f3855c8d49335862502777a7dc6bd0524ccc47a49498086511f79481",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_smartart_tests.rs": [
+      "d068183f16443e50c477bea3b66fd66e428d95e07e718bc3f5f75149216f2ce6",
+      "a7b04cea2b59c4341dcff3130710110fdedb3834697a4d43e3cc564976ee107c",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_table_style_tests.rs": [
+      "9ab5c2d9f69cceb0cc6b92005f0b90ff4a84120eed3a2dfeecf0441d60477751",
+      "f145f7321736eaea636f05e46f02cf1540c56135d3aed972beaf1b7b891ec812",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_tests.rs": [
+      "af33ce5bd33df6966baa2b39f3593ff1b1e994a4cfba4df2099354307996dfef",
+      "6cde620b76bf807eb21517f01b8cf585a731ff2e5c1d441911fb9b9450518666",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          2
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/pptx_theme_tests.rs": [
+      "13abb8474d7c097af440b21a52d257cfe594bf2f7838dea19b4a140ad040d806",
+      "eece2dd17196db356415162752ecf3e0456c9a7d1b9b732f512a3b291e8864f7",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          4
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/xlsx_chart_tests.rs": [
+      "75d1b80ace9f4eef11b1414f57003146ec78cb12c4e3f1760e9d5dc6d9040da5",
+      "748ff28e7312c957da61ca64110867a30eb23a04dcf7f0215608fa8d6f27537b",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          6
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/xlsx_condfmt_tests.rs": [
+      "2136315df148bfc7f35b9481a2120a583095feca68ce5b554f2264635e74b24b",
+      "1e8d7fd9230c8bdb82c0eab26ef1a286ca64cd36606e5529ea3c211db108ef54",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/parser/xlsx_tests.rs": [
+      "5ac6ec214172e9f790ae6a5f3350de1e0a1771ffa483a0a50ad9a34f972709a2",
+      "c2438d66a7faff280d5fada2a8e85ec04823d01c38796218c9d60dc8b077178b",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/wasm.rs": [
+      "8f4664d49049cfdd2044aabd85580e723291cf5d62d92caf8515edf1ca82fe67",
+      "fc3142a0f66735332ddbb186513ffc526fb19ab97e1bba69ee69c575d77c0526",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/src/wasm_tests.rs": [
+      "760dceee203b2d18858bcb1414c858c6835d82c0a4f0b36e4470d5cb3e0a598c",
+      "08179bbb0d92a72d2b06986a1a9f1803c4b059455eab11d75ba0d5a79bf8aa3f",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          1
+        ]
+      ]
+    ],
+    "office2pdf/tests/perf_validation.rs": [
+      "f2f3318b659a2a13cbbf83cd9ab4b08c6ac0071636562c2cf0fdb626075723ef",
+      "686384203fc0f90f4e40e5cefcf1e8d7525babc36ab43f9dce83d6d22a6389d2",
+      [
+        [
+          "FileOptions",
+          "SimpleFileOptions",
+          4
+        ]
+      ]
+    ],
+    "umya-spreadsheet/src/reader/driver.rs": [
+      "073445b5c4dd789915f271a2084db118002629285d3ccb489900b89eb9cf525b",
+      "b908dd6db3cd1c1ceaba9d43e4ac6a31587c5d85590e6d4f2e0eaac50cd7abb0",
+      [
+        [
+          "ZipFile<'a>",
+          "ZipFile<'a, R>",
+          1
+        ],
+        [
+          "            Ok(f) => f.name().to_owned(),",
+          "            Ok(f) => match f.name() {\n                Ok(name) => name.into_owned(),\n                Err(_) => continue,\n            },",
           1
         ]
       ]

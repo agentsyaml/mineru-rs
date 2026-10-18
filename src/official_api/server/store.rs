@@ -91,10 +91,10 @@ impl MetadataReservation {
     }
     pub(crate) fn shrink_to(&self, count: usize) {
         let old = self.count.swap(count, Ordering::AcqRel);
-        if count < old {
-            if let Some(inner) = self.inner.upgrade() {
-                inner.meta_used.fetch_sub(old - count, Ordering::AcqRel);
-            }
+        if count < old
+            && let Some(inner) = self.inner.upgrade()
+        {
+            inner.meta_used.fetch_sub(old - count, Ordering::AcqRel);
         }
     }
 }

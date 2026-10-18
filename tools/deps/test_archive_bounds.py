@@ -1,9 +1,11 @@
 import io
+import gzip
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import archive_safe
 
@@ -37,12 +39,31 @@ def fake_archive(stream, *, members=(), extra_members=0, extra_bytes=0, expanded
         extra_members=extra_members,
         extra_bytes=extra_bytes,
         expanded_bytes=expanded,
+        metadata_depth=0,
     )
 
 
+def metadata_archive(kinds, name="root/file", content=b"x"):
+    def member_bytes(member, payload=b""):
+        member.size = len(payload)
+        padded = payload.ljust((len(payload) + 511) // 512 * 512, b"\0")
+        return member.tobuf(format=tarfile.GNU_FORMAT) + padded
+
+    root = tarfile.TarInfo("root/")
+    root.type = tarfile.DIRTYPE
+    data = member_bytes(root)
+    for index, kind in enumerate(kinds):
+        member = tarfile.TarInfo("PaxHeaders/metadata" if kind == tarfile.XHDTYPE else "././@LongLink")
+        member.type = kind
+        payload = pax_record(b"path", name.encode()) if kind == tarfile.XHDTYPE else name.encode() + b"\0"
+        data += member_bytes(member, payload)
+    data += member_bytes(tarfile.TarInfo(name), content)
+    return gzip.compress(data + b"\0" * 1024)
+
+
 class ArchiveBoundTests(unittest.TestCase):
-    def test_gnu_longname_longlink_and_sparse_reject_before_payload_reads(self):
-        for kind in (tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK, tarfile.GNUTYPE_SPARSE):
+    def test_gnu_longlink_and_sparse_reject_before_payload_reads(self):
+        for kind in (tarfile.GNUTYPE_LONGLINK, tarfile.GNUTYPE_SPARSE):
             stream = ReadSpy(b"untrusted payload")
             member = archive_safe._BoundedTarInfo()
             member.type = kind
@@ -50,6 +71,50 @@ class ArchiveBoundTests(unittest.TestCase):
             with self.assertRaises(archive_safe.ArchiveError):
                 member._proc_member(fake_archive(stream))
             self.assertEqual(stream.read_sizes, [])
+
+    def test_gnu_longname_is_bounded_and_path_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "gnu.tar.gz"
+            output = Path(directory) / "out"
+            with tarfile.open(archive_path, "w:gz", format=tarfile.GNU_FORMAT) as archive:
+                root = tarfile.TarInfo("root/")
+                root.type = tarfile.DIRTYPE
+                archive.addfile(root)
+                name = "root/" + "a" * 120
+                member = tarfile.TarInfo(name)
+                member.size = 1
+                archive.addfile(member, io.BytesIO(b"x"))
+            archive_safe.extract_tar_gz(archive_path, output, "root")
+            self.assertEqual((output / ("a" * 120)).read_bytes(), b"x")
+
+    def test_gnu_longname_charges_metadata_to_expansion_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "gnu-budget.tar.gz"
+            output = Path(directory) / "out"
+            archive.write_bytes(metadata_archive([tarfile.GNUTYPE_LONGNAME], content=b"x" * 8))
+            with mock.patch.object(archive_safe, "MAX_EXPANDED", 10):
+                with self.assertRaises(archive_safe.ArchiveError):
+                    archive_safe.extract_tar_gz(archive, output, "root")
+
+    def test_gnu_and_pax_metadata_nesting_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for index, kinds in enumerate((
+                [tarfile.GNUTYPE_LONGNAME] * 33,
+                [tarfile.GNUTYPE_LONGNAME, tarfile.XHDTYPE] * 17,
+            )):
+                archive = Path(directory) / "nested-{}.tar.gz".format(index)
+                output = Path(directory) / "out-{}".format(index)
+                archive.write_bytes(metadata_archive(kinds))
+                with self.assertRaises(archive_safe.ArchiveError):
+                    archive_safe.extract_tar_gz(archive, output, "root")
+
+    def test_gnu_longname_traversal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "gnu-traversal.tar.gz"
+            output = Path(directory) / "out"
+            archive.write_bytes(metadata_archive([tarfile.GNUTYPE_LONGNAME], "root/../escape"))
+            with self.assertRaises(archive_safe.ArchiveError):
+                archive_safe.extract_tar_gz(archive, output, "root")
 
     def test_pax_member_budget_rejects_before_read(self):
         stream = ReadSpy(b"5 x=\n")

@@ -89,28 +89,23 @@ pub(super) async fn delete(
     Path(id): Path<String>,
 ) -> Result<Json<FileDeletion>, WireError> {
     store.cleanup_expired();
-    let entry = store
-        .inner
-        .entries
-        .lock()
-        .map_err(|_| internal())?
-        .remove(&id)
-        .ok_or_else(not_found)?;
-    match entry {
-        Entry::File(_) => Ok(Json(FileDeletion {
-            id,
-            object: "file",
-            deleted: true,
-        })),
-        other => {
-            store
-                .inner
-                .entries
-                .lock()
-                .map_err(|_| internal())?
-                .insert(id, other);
-            Err(not_found())
+    let entry = {
+        let mut entries = store.inner.entries.lock().map_err(|_| internal())?;
+        if !matches!(entries.get(&id), Some(Entry::File(_))) {
+            return Err(not_found());
         }
+        entries.remove(&id).ok_or_else(not_found)?
+    };
+    match entry {
+        Entry::File(file) => {
+            drop(file);
+            Ok(Json(FileDeletion {
+                id,
+                object: "file",
+                deleted: true,
+            }))
+        }
+        Entry::Upload(_) => unreachable!("entry type checked while holding the lock"),
     }
 }
 pub(super) async fn content(

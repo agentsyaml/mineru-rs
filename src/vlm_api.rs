@@ -788,7 +788,7 @@ async fn serve_inner(
 async fn official_v1_health() -> Json<crate::official_api::Health> {
     Json(crate::official_api::Health {
         status: "ok",
-        version: "4.0.10",
+        version: crate::official_worker::PACKAGE_VERSION,
         features: crate::official_api::HealthFeatures {
             webhook: false,
             output_formats: Vec::new(),
@@ -806,7 +806,12 @@ fn public_http_client_allowed(app: &App) -> bool {
 }
 
 fn official_submission_route(method: &axum::http::Method, path: &str) -> bool {
-    if method == axum::http::Method::POST && matches!(path, "/v1/uploads" | "/v1/parse/jobs") {
+    if method == axum::http::Method::POST
+        && matches!(
+            path,
+            "/v1/uploads" | "/v1/parse/jobs" | "/v1/tasks" | "/v1/file_parse"
+        )
+    {
         return true;
     }
     let parts: Vec<_> = path.split('/').collect();
@@ -2023,7 +2028,15 @@ fn compact_pdf(
         if metadata.len() > u64::try_from(cap)? {
             return Err("PDF exceeds size limit".into());
         }
-        let mut doc = lopdf::Document::load_from(input)?;
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len())?);
+        input
+            .take(u64::try_from(cap)?.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > cap {
+            return Err("PDF exceeds size limit".into());
+        }
+        let mut doc = crate::pdf_load::load_bounded(&bytes, cap)?;
+        drop(bytes);
         check_deadline(deadline)?;
         if doc.is_encrypted() {
             return Err("encrypted PDF".into());
@@ -2068,6 +2081,7 @@ fn compact_pdf(
         let mut writer = Capped(std::fs::File::create(&partial)?, 0, cap, deadline);
         check_deadline(deadline)?;
         doc.save_to(&mut writer)?;
+        drop(doc);
         check_deadline(deadline)?;
         check_deadline(deadline)?;
         writer.flush()?;
@@ -2076,7 +2090,9 @@ fn compact_pdf(
         writer.0.sync_all()?;
         check_deadline(deadline)?;
         check_deadline(deadline)?;
-        let check = lopdf::Document::load(&partial)?;
+        let check_bytes = std::fs::read(&partial)?;
+        let check = crate::pdf_load::load_bounded(&check_bytes, cap)?;
+        drop(check_bytes);
         check_deadline(deadline)?;
         if check.get_pages().len() != end - start + 1 {
             return Err("PDF selection validation".into());
@@ -2145,7 +2161,8 @@ fn zip_result_capped(
         let mut zip = zip::ZipWriter::new(CappedFile::new(&temporary, cap, deadline)?);
         for Artifact {
             name,
-            mut file,
+            file,
+            image_source,
             len,
         } in package_files(task_root, stem, kind, selectors, deadline)?
         {
@@ -2156,6 +2173,11 @@ fn zip_result_capped(
                     .compression_method(zip::CompressionMethod::Deflated),
             )?;
             check_deadline(deadline)?;
+            let mut file = match (file, image_source) {
+                (Some(file), None) => file,
+                (None, Some((dir, name))) => open_regular(&dir, &name)?,
+                _ => return Err("invalid artifact source".into()),
+            };
             copy_snapshot(&mut file, len, &mut zip, deadline)?;
             check_deadline(deadline)?;
         }
@@ -2277,6 +2299,7 @@ fn json_result(
         for Artifact {
             name,
             mut file,
+            image_source,
             len,
         } in files
         {
@@ -2292,13 +2315,16 @@ fn json_result(
                     x if x.ends_with("_model.json") => "model_output",
                     _ => "content_list",
                 };
-                let text =
-                    String::from_utf8(read_snapshot(&mut file, usize::try_from(len)?, deadline)?)?;
+                let text = String::from_utf8(read_snapshot(
+                    file.as_mut().ok_or("missing artifact file")?,
+                    usize::try_from(len)?,
+                    deadline,
+                )?)?;
                 serde_json::to_writer(&mut out, key)?;
                 write!(out, ":")?;
                 serde_json::to_writer(&mut out, &text)?;
             } else {
-                images.push((name, file, len));
+                images.push((name, image_source.ok_or("missing image capability")?, len));
             }
         }
         if selectors.images {
@@ -2307,7 +2333,7 @@ fn json_result(
             }
             serde_json::to_writer(&mut out, "images")?;
             write!(out, ":{{")?;
-            for (i, (image, mut input, len)) in images.into_iter().enumerate() {
+            for (i, (image, (dir, name), len)) in images.into_iter().enumerate() {
                 check_deadline(deadline)?;
                 if i != 0 {
                     write!(out, ",")?;
@@ -2315,6 +2341,7 @@ fn json_result(
                 let mime = image_mime(&image).ok_or("unsupported image MIME")?;
                 serde_json::to_writer(&mut out, image.trim_start_matches("images/"))?;
                 write!(out, ":\"data:{mime};base64,")?;
+                let mut input = open_regular(&dir, &name)?;
                 {
                     let mut encoder = base64::write::EncoderWriter::new(
                         &mut out,
@@ -2383,7 +2410,8 @@ fn open_regular(
 }
 struct Artifact {
     name: String,
-    file: cap_std::fs::File,
+    file: Option<cap_std::fs::File>,
+    image_source: Option<(std::sync::Arc<Dir>, std::ffi::OsString)>,
     len: u64,
 }
 fn package_files(
@@ -2412,7 +2440,12 @@ fn package_files(
             check_deadline(deadline)?;
             let file = open_regular(&vlm, name.as_ref())?;
             let len = file.metadata()?.len();
-            out.push(Artifact { name, file, len });
+            out.push(Artifact {
+                name,
+                file: Some(file),
+                image_source: None,
+                len,
+            });
             check_deadline(deadline)?;
         }
     }
@@ -2438,14 +2471,17 @@ fn package_files(
             }
             names.sort();
             check_deadline(deadline)?;
+            let images = std::sync::Arc::new(images);
             for name in names {
                 check_deadline(deadline)?;
                 let shown = format!("images/{}", name.to_str().ok_or("image name is not UTF-8")?);
                 let file = open_regular(&images, &name)?;
                 let len = file.metadata()?.len();
+                drop(file);
                 out.push(Artifact {
                     name: shown,
-                    file,
+                    file: None,
+                    image_source: Some((images.clone(), name)),
                     len,
                 });
                 check_deadline(deadline)?;
@@ -2711,7 +2747,7 @@ mod tests {
     async fn disabled_official_health_advertises_no_capabilities() {
         let Json(health) = official_v1_health().await;
         assert_eq!(health.status, "ok");
-        assert_eq!(health.version, "4.0.10");
+        assert_eq!(health.version, "4.0.12");
         assert!(health.features.output_formats.is_empty());
         assert!(health.features.sources.is_empty());
     }
@@ -3582,7 +3618,7 @@ mod tests {
         assert_eq!(first, second);
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(first)).unwrap();
         let mut names = (0..zip.len())
-            .map(|i| zip.by_index(i).unwrap().name().to_owned())
+            .map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned())
             .collect::<Vec<_>>();
         names.sort();
         assert_eq!(
@@ -4192,6 +4228,38 @@ mod tests {
         let error = compact_pdf(&input, &output, 0, 0, 8, far_deadline()).unwrap_err();
         assert!(error.to_string().contains("PDF exceeds size limit"));
         assert!(!output.exists() && !output.with_extension("pdf.partial").exists());
+    }
+
+    #[test]
+    fn compact_pdf_rejects_oversized_object_stream_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("bomb.pdf");
+        let output = dir.path().join("selected.pdf");
+        let mut document = lopdf::Document::load_mem(&nested_fixture()).unwrap();
+        let stream = document.add_object(Object::String(
+            vec![b' '; 64 * 1024],
+            lopdf::StringFormat::Literal,
+        ));
+        let root = document
+            .trailer
+            .get(b"Root")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        document
+            .get_object_mut(root)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Extra", stream);
+        let mut bytes = Vec::new();
+        document.save_modern(&mut bytes).unwrap();
+        assert!(bytes.len() < 8 * 1024);
+        std::fs::write(&input, bytes).unwrap();
+        std::fs::write(&output, b"sentinel").unwrap();
+        assert!(compact_pdf(&input, &output, 0, 99_999, 8 * 1024, far_deadline()).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"sentinel");
+        assert!(!output.with_extension("pdf.partial").exists());
     }
 
     #[test]
@@ -4913,6 +4981,7 @@ mod tests {
                             .by_index(index)
                             .unwrap()
                             .name()
+                            .unwrap()
                             .starts_with(&format!("{stem}/{target}/"))
                     }));
                     assert!(
@@ -5152,6 +5221,7 @@ mod tests {
             }
             assert!(
                 zip.file_names()
+                    .filter_map(Result::ok)
                     .any(|name| name.starts_with(&format!("{stem}/{target}/")))
             );
         }
@@ -6102,7 +6172,7 @@ mod tests {
         .unwrap();
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
         let names: Vec<_> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_owned())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert_eq!(
             names,
@@ -6180,7 +6250,14 @@ mod tests {
                     .is_ok()
             );
             if target == "office" {
-                assert!((0..zip.len()).all(|i| !zip.by_index(i).unwrap().name().contains("/vlm/")));
+                assert!(
+                    (0..zip.len()).all(|i| !zip
+                        .by_index(i)
+                        .unwrap()
+                        .name()
+                        .unwrap()
+                        .contains("/vlm/"))
+                );
             }
         }
     }
@@ -6373,6 +6450,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn packaging_keeps_image_descriptors_closed_until_consumed() {
+        let (root, stem, _) = package_fixture();
+        let images = root.path().join(&stem).join("vlm/images");
+        for index in 0..256 {
+            std::fs::write(images.join(format!("{index:03}.png")), b"x").unwrap();
+        }
+        let mut only_images = selected(false);
+        only_images.md = false;
+        only_images.middle = false;
+        only_images.model = false;
+        only_images.content = false;
+        let files = package_files(
+            root.path(),
+            &stem,
+            DocumentKind::Pdf,
+            &only_images,
+            far_deadline(),
+        )
+        .unwrap();
+        assert_eq!(files.len(), 258);
+        assert!(files.iter().all(|artifact| artifact.file.is_none()));
+        assert!(files.iter().all(|artifact| artifact.image_source.is_some()));
     }
 
     #[cfg(unix)]

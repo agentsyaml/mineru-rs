@@ -37,7 +37,7 @@ class NativeResult:
     pages = '[{"n":1}]'
     assets = [("images/a.png", b"asset")]
     warnings = ["warning"]
-    version_metadata = ("4.0.10", "2.0", "hybrid-v4")
+    version_metadata = ("4.0.12", "2.0", "hybrid-v4")
     def export_pages(self): return self.pages
     async def to_dict(self, skip_defaults=False): return '{"pages":[{"n":1}]}'
     async def to_json(self, skip_defaults=False): return '{"pages":[{"n":1}]}'

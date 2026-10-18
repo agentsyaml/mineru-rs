@@ -230,7 +230,7 @@ impl OfficialResult {
             assets,
             warnings: Vec::new(),
             metadata: OfficialVersionMetadata {
-                mineru_package: "4.0.10".into(),
+                mineru_package: "4.0.12".into(),
                 schema_version: "2.0".into(),
                 bundle_name: "hybrid-v4".into(),
             },

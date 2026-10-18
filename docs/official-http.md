@@ -1,11 +1,11 @@
 # Opt-in official-v1 HTTP API
 
-This guide describes the opt-in MinerU 4.0.10 upload/job API in `mineru-api`.
+This guide describes the opt-in MinerU 4.0.12 upload/job API in `mineru-api`.
 The [compatibility matrix](compatibility.md#route-and-format-matrix) compares it
 with the CLI and SDK. This API returns requested artifacts, not an in-memory
 SDK `OfficialResult`.
 
-Jobs use the separately installed MinerU 4.0.10 / DocVortex 0.5.4 Python worker
+Jobs use the separately installed MinerU 4.0.12 / DocVortex 0.5.16 Python worker
 (Python 3.10–3.14); the server does not perform local model inference. Existing
 routes remain available alongside `/v1`.
 
@@ -17,7 +17,7 @@ select its listener. Example, using actual startup flags:
 
 ```sh
 mineru-api --host 127.0.0.1 --port 8000 --official-api \
-  --official-python /opt/mineru-4.0.10/bin/python \
+  --official-python /opt/mineru-4.0.12/bin/python \
   --official-worker-mode persistent --official-timeout-secs 600
 ```
 
@@ -35,8 +35,14 @@ When disabled, the legacy server remains available and `/v1/health` advertises
 empty source and output-format capabilities. When enabled, the official router
 is merged alongside the existing routes. Its operational discovery endpoints
 include `GET /v1/health`, `/v1/tiers`, `/v1/models`, `/v1/models/{id}`, and
-`/v1/usage`. `/v1/models` is intentionally empty and a model-id lookup returns
-not found; these endpoints do not promise cloud model discovery or availability.
+`/v1/usage`. `/v1/models` advertises the single versioned virtual model id
+`mineru-4.0.12` and `/v1/tiers` reports it as `current_model` (quality is chosen
+per-request via `tier`); `/v1/models/{id}` returns that model or a `404`
+`model_not_found`. The 4.0.12 convenience endpoints `/v1/tasks` and
+`/v1/file_parse` wrap the same job pipeline, and a synchronous wait timeout
+returns HTTP `202` with a task reference while processing continues. Retained
+resources still expire on this project's configured schedule; see the
+`MINERU_API_TASK_RETENTION_SECONDS` table in the [usage guide](usage.md).
 
 ## Endpoints and upload flow
 
@@ -51,6 +57,10 @@ not found; these endpoints do not promise cloud model discovery or availability.
 | `DELETE /v1/parse/jobs/{id}` | Cancel a queued/running job. |
 | `GET /v1/files`, `GET /v1/files/{id}`, `DELETE /v1/files/{id}` | List, inspect, or delete retained file metadata/content records. |
 | `GET /v1/files/{id}/content` | Download an output artifact. Source-file content is forbidden. |
+| `POST /v1/tasks` | 4.0.12 convenience submission over the same jobs: `application/json`, `multipart/form-data` (`files` fields), or `application/octet-stream`; returns `202` and a task payload. |
+| `GET /v1/tasks/{id}`, `DELETE /v1/tasks/{id}` | Poll or cancel a task; the payload renames `job_id` to `task_id` and adds `status_url`/`result_url`. |
+| `GET /v1/tasks/{id}/result?response_format=json\|zip` | Inlined results (`markdown` text, `middle_json`/`structured_content` JSON) or the requested ZIP; `202` while non-terminal, `409` for failed/canceled. |
+| `POST /v1/file_parse?response_format=json\|zip&wait_timeout=1..3600` | Synchronous wrapper: returns the result, or `202` plus the task payload when `wait_timeout` elapses; the background job keeps running. Zip output is added automatically. |
 
 Create upload JSON has strict fields `filename`, positive `bytes`, required
 `mime_type`, optional `purpose` (defaults to `parse`; allowed values are

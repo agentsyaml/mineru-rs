@@ -834,7 +834,7 @@ fn request_tier(options: &DirectOptions) -> &str {
     effort_tier(&options.effort)
 }
 
-/// Maps the CLI effort knob onto the MinerU 4.0.10 parse tier: "medium" maps to
+/// Maps the CLI effort knob onto the MinerU 4.0.12 parse tier: "medium" maps to
 /// "standard"; "high"/"xhigh" map to "advanced".
 fn effort_tier(effort: &str) -> &'static str {
     match effort {
@@ -1180,7 +1180,7 @@ fn resolve_official_hybrid(
     // through MINERU_CONFIG (model.small_backend / model.vlm.engine).
     if options.model_stack_explicit || options.model_stack != "auto" {
         return Err(err(
-            "model_stack is not supported by MinerU 4.0.10; configure model.small_backend / model.vlm.engine via MINERU_CONFIG",
+            "model_stack is not supported by MinerU 4.0.12; configure model.small_backend / model.vlm.engine via MINERU_CONFIG",
         ));
     }
     // Removed environment knobs (MINERU_MODEL_STACK, MINERU_OFFICIAL_WORKER_MODE)
@@ -2156,7 +2156,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("model_stack is not supported by MinerU 4.0.10"),
+            error.contains("model_stack is not supported by MinerU 4.0.12"),
             "{error}"
         );
         // The removed environment knobs (MINERU_MODEL_STACK,

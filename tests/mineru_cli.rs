@@ -125,7 +125,7 @@ mkdir -p "$bundle"
 printf 'tier=%s page=%s\n' "$tier" "$page" > "$bundle/markdown.md"
 printf '%s' '{{"schema":"docvortex.middle","schema_version":"2.0","pages":[{{}}],"is_full_document":true}}' > "$bundle/middle_json.json"
 printf '%s' '{{}}' > "$bundle/structured_content.json"
-printf '{{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.10","schema_version":"2.0","bundle_name":"hybrid-v4"}}\n' "$id"
+printf '{{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.12","schema_version":"2.0","bundle_name":"hybrid-v4"}}\n' "$id"
 "##,
             background = background,
             pid_file = root.join("official-worker-pids").display()
@@ -143,11 +143,11 @@ fn fake_official_failure(root: &std::path::Path, mode: &str) -> std::path::PathB
     use std::os::unix::fs::PermissionsExt;
     let script = root.join(format!("fake-official-{mode}"));
     let (protocol, request_id, package, schema) = match mode {
-        "protocol" => ("wrong", "$id", "4.0.10", "2.0"),
-        "request" => ("mineru-rs-official-worker/1", "wrong", "4.0.10", "2.0"),
+        "protocol" => ("wrong", "$id", "4.0.12", "2.0"),
+        "request" => ("mineru-rs-official-worker/1", "wrong", "4.0.12", "2.0"),
         "package" => ("mineru-rs-official-worker/1", "$id", "3.4.5", "2.0"),
-        "schema" => ("mineru-rs-official-worker/1", "$id", "4.0.10", "1.0"),
-        _ => ("mineru-rs-official-worker/1", "$id", "4.0.10", "2.0"),
+        "schema" => ("mineru-rs-official-worker/1", "$id", "4.0.12", "1.0"),
+        _ => ("mineru-rs-official-worker/1", "$id", "4.0.12", "2.0"),
     };
     let body = if mode == "stdout" {
         "dd if=/dev/zero bs=65536 count=2 2>/dev/null".to_owned()
@@ -192,7 +192,7 @@ fn fake_official_shim_python(
 
 #[cfg(unix)]
 fn fake_official_asset_shim_python(root: &std::path::Path, asset_path: &str) -> std::path::PathBuf {
-    fake_official_shim_python_with_asset(root, "4.0.10", false, Some(asset_path))
+    fake_official_shim_python_with_asset(root, "4.0.12", false, Some(asset_path))
 }
 
 #[cfg(unix)]
@@ -332,7 +332,7 @@ async def parse_async(path, **kwargs):
 
 #[cfg(unix)]
 fn fake_persistent_python(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    let python = fake_official_shim_python(root, "4.0.10", false);
+    let python = fake_official_shim_python(root, "4.0.12", false);
     let package = root.join("fake-mineru-package/mineru");
     let record = root.join("persistent-record.json");
     let record_literal = serde_json::to_string(&record.to_string_lossy().to_string()).unwrap();
@@ -449,7 +449,7 @@ fn fake_persistent_bad_handshake(root: &std::path::Path) -> std::path::PathBuf {
             r##"#!/bin/sh
 read -r startup || exit 3
 printf '%s\n' "$$" >> "{}"
-printf '%s\n' '{{"type":"handshake","protocol":"wrong","status":"ready","package_version":"4.0.10","schema_version":"2.0","max_in_flight":1,"capabilities":{{"tiers":["standard","advanced"],"ocr_modes":["auto"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}}}'
+printf '%s\n' '{{"type":"handshake","protocol":"wrong","status":"ready","package_version":"4.0.12","schema_version":"2.0","max_in_flight":1,"capabilities":{{"tiers":["standard","advanced"],"ocr_modes":["auto"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}}}'
 "##,
             pids.display()
         ),
@@ -477,7 +477,7 @@ fn persistent_start(root: &std::path::Path, capabilities: Value) -> Value {
     json!({
         "type": "start",
         "protocol": "mineru-rs-official-worker/2",
-        "package_version": "4.0.10",
+        "package_version": "4.0.12",
         "schema_version": "2.0",
         "model_base_dir": root.join("models").to_str().unwrap(),
         "config": root.join("config.toml").to_str().unwrap(),
@@ -500,7 +500,7 @@ fn persistent_request(
         "protocol": "mineru-rs-official-worker/2",
         "request_id": request_id,
         "sequence": sequence,
-        "package_version": "4.0.10",
+        "package_version": "4.0.12",
         "schema_version": "2.0",
         "tier": tier,
         "ocr_mode": "auto",
@@ -1997,7 +1997,7 @@ async fn direct_hybrid_accepts_and_forwards_a_vlm_url_at_any_tier() {
         let pdf = input(&dir);
         multipage_pdf(&pdf, 1);
         let output = dir.path().join("out");
-        let python = fake_official_shim_python(dir.path(), "4.0.10", false);
+        let python = fake_official_shim_python(dir.path(), "4.0.12", false);
         let mut cmd = mineru();
         cmd.args(["-p"])
             .arg(&pdf)
@@ -2413,7 +2413,7 @@ async fn official_shim_propagates_exact_kwargs_and_environment() {
         let pdf = input(&dir);
         multipage_pdf(&pdf, 3);
         let output = dir.path().join("out");
-        let python = fake_official_shim_python(dir.path(), "4.0.10", false);
+        let python = fake_official_shim_python(dir.path(), "4.0.12", false);
         let model_dir = dir.path().join("models");
         let config = dir.path().join("mineru.toml");
         let mut cmd = mineru();
@@ -2499,7 +2499,7 @@ async fn direct_hybrid_tier_flag_and_ocr_mode_reach_the_shim() {
         let pdf = input(&dir);
         multipage_pdf(&pdf, 1);
         let output = dir.path().join("out");
-        let python = fake_official_shim_python(dir.path(), "4.0.10", false);
+        let python = fake_official_shim_python(dir.path(), "4.0.12", false);
         let mut cmd = mineru();
         cmd.args(["-p"])
             .arg(pdf)
@@ -2678,7 +2678,7 @@ async fn official_shim_enforces_package_pin_and_save_cap() {
     assert!(
         unstamped(&bad_result.stderr)
             .join("\n")
-            .contains("package version is not 4.0.10")
+            .contains("package version is not 4.0.12")
     );
     assert!(!bad_dir.path().join("fake-mineru-record.json").exists());
     assert!(!bad_output.exists());
@@ -2686,7 +2686,7 @@ async fn official_shim_enforces_package_pin_and_save_cap() {
     let cap_dir = tempfile::tempdir().unwrap();
     let cap_pdf = input(&cap_dir);
     let cap_output = cap_dir.path().join("out");
-    let cap_python = fake_official_shim_python(cap_dir.path(), "4.0.10", true);
+    let cap_python = fake_official_shim_python(cap_dir.path(), "4.0.12", true);
     let mut cap_cmd = mineru();
     cap_cmd
         .args(["-p"])
@@ -2714,7 +2714,7 @@ async fn direct_hybrid_default_official_options_reach_the_shim() {
     let dir = tempfile::tempdir().unwrap();
     let pdf = input(&dir);
     let output = dir.path().join("out");
-    let python = fake_official_shim_python(dir.path(), "4.0.10", false);
+    let python = fake_official_shim_python(dir.path(), "4.0.12", false);
     let mut cmd = mineru();
     cmd.args(["-p"])
         .arg(pdf)
@@ -2757,7 +2757,7 @@ fn persistent_c2a_handshake_and_two_requests_are_hermetic() {
     assert_eq!(frames[0]["type"], "handshake");
     assert_eq!(frames[0]["protocol"], "mineru-rs-official-worker/2");
     assert_eq!(frames[0]["status"], "ready");
-    assert_eq!(frames[0]["package_version"], "4.0.10");
+    assert_eq!(frames[0]["package_version"], "4.0.12");
     assert_eq!(frames[0]["schema_version"], "2.0");
     assert_eq!(frames[0]["max_in_flight"], 1);
     assert_eq!(frames[0]["capabilities"], persistent_capabilities());
@@ -2773,7 +2773,7 @@ fn persistent_c2a_handshake_and_two_requests_are_hermetic() {
         assert_eq!(frame["status"], "ok");
         assert_eq!(frame["request_id"], request_id);
         assert_eq!(frame["sequence"], sequence);
-        assert_eq!(frame["package_version"], "4.0.10");
+        assert_eq!(frame["package_version"], "4.0.12");
         assert_eq!(frame["schema_version"], "2.0");
         assert_eq!(frame["bundle_name"], "hybrid-v4");
         assert!(

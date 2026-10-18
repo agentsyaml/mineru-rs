@@ -6,14 +6,14 @@ Parse PDF, image, and Office documents into Markdown with a Rust library, CLI,
 and HTTP API server. PDF rendering is implemented in Rust. The legacy CLI/API
 and Python/Node `run`/`parse` paths use a remote MinerU-compatible VLM
 (MinerU 3.4.5 protocol baseline); the richer official SDK uses a separate,
-user-prepared MinerU 4.0.10 / DocVortex 0.5.4 Python worker.
+user-prepared MinerU 4.0.12 / DocVortex 0.5.16 Python worker.
 
 Choose a route:
 
 - **Python or Node**: install the published package and use `parse()` for
   Markdown or `run()` for the complete output tree. See the language examples.
 - **Rich official SDK**: use the Rust, Python, or Node SDK with a separately
-  prepared Python 3.10–3.14 worker (`mineru==4.0.10`, `docvortex==0.5.4`);
+  prepared Python 3.10–3.14 worker (`mineru==4.0.12`, `docvortex==0.5.16`);
   it supports native formats. See the [SDK guide](docs/official-sdk.md).
 - **Rust CLI / API server**: build from a prepared checkout. The crate is not
   available from crates.io because root workspace patches do not reach consumers.

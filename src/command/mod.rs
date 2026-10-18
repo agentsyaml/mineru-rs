@@ -193,7 +193,7 @@ pub struct RunOptions {
     pub tier: Option<String>,
     pub effort: String,
     pub model_stack: String,
-    /// Whether `model_stack` was explicitly supplied by the caller. The official MinerU 4.0.10
+    /// Whether `model_stack` was explicitly supplied by the caller. The official MinerU 4.0.12
     /// lane rejects any non-default value; the legacy 3.4.5 builders still honor it.
     pub model_stack_explicit: bool,
     pub official_worker_mode: Option<OfficialWorkerMode>,
@@ -497,7 +497,7 @@ async fn run_core(
         ));
     }
     let direct_hybrid = options.api_url.is_none() && options.backend == "hybrid-http-client";
-    // --tier is the upstream 4.0.10 vocabulary for the official lane only; every
+    // --tier is the upstream 4.0.12 vocabulary for the official lane only; every
     // other lane would otherwise accept and ignore it.
     if let Some(tier) = options.tier.as_deref()
         && !direct_hybrid
@@ -634,7 +634,7 @@ async fn run_core(
             "backend=local is only supported in direct CLI mode; the API backend choices are unchanged",
         ));
     }
-    // Hybrid tiers: medium -> standard, high/xhigh -> advanced (MinerU 4.0.10 parse tiers).
+    // Hybrid tiers: medium -> standard, high/xhigh -> advanced (MinerU 4.0.12 parse tiers).
     let supported_effort = if options.backend == "hybrid-http-client" {
         matches!(options.effort.as_str(), "medium" | "high" | "xhigh")
     } else {
@@ -1407,7 +1407,7 @@ fn has_pdf_input(path: &Path) -> bool {
 
 #[derive(Parser, Debug)]
 #[command(
-    about = "Parse PDF, image, and Office documents with VLM-HTTP backends, use the official MinerU 4.0.10 Hybrid worker directly, or parse AnyDoc-supported inputs through the bundled Rust helper with backend=local.",
+    about = "Parse PDF, image, and Office documents with VLM-HTTP backends, use the official MinerU 4.0.12 Hybrid worker directly, or parse AnyDoc-supported inputs through the bundled Rust helper with backend=local.",
     version,
     disable_version_flag = true,
     after_help = "Environment:\n  MINERU_VL_SERVER              MinerU VLM service base URL, e.g. https://host/v1\n  MINERU_VL_MODEL_NAME          model id served by that endpoint\n  MINERU_VL_API_KEY             Bearer token; preferred over --api-key\n\nFull reference: docs/usage.md"
@@ -1438,7 +1438,7 @@ pub struct Cli {
     #[arg(
         long,
         value_parser = ["auto", "light", "full"],
-        help = "Legacy 3.4.5 model stack; rejected by the official MinerU 4.0.10 hybrid lane"
+        help = "Legacy 3.4.5 model stack; rejected by the official MinerU 4.0.12 hybrid lane"
     )]
     model_stack: Option<String>,
     #[arg(long, value_parser = ["per-document", "persistent"])]

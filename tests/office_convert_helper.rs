@@ -85,7 +85,7 @@ fn pptx_with_chart(
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for index in 0..source.len() {
         let mut entry = source.by_index(index).unwrap();
-        let mut name = entry.name().to_owned();
+        let mut name = entry.name().unwrap().into_owned();
         let mut contents = Vec::new();
         entry.read_to_end(&mut contents).unwrap();
         if mixed_case {
@@ -143,7 +143,7 @@ fn rebuilt_fixture(
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for index in 0..source.len() {
         let mut entry = source.by_index(index).unwrap();
-        let name = entry.name().to_owned();
+        let name = entry.name().unwrap().into_owned();
         let mut contents = Vec::new();
         entry.read_to_end(&mut contents).unwrap();
         if let Some((_, replacement)) = replacements.iter().find(|(path, _)| *path == name) {

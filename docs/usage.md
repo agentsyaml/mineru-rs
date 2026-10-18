@@ -138,7 +138,7 @@ Without `--api-url`, `mineru` calls the external VLM service directly. The servi
 
 ### Official Hybrid backend
 
-Select `--backend hybrid-http-client` to run the official MinerU 4.0.10 worker
+Select `--backend hybrid-http-client` to run the official MinerU 4.0.12 worker
 directly. It requires a separately installed Python 3.10–3.14 environment and
 model assets; the Rust binary does not bundle them. This backend accepts PDF and
 image inputs, and cannot be used with `--api-url`. See the
@@ -208,7 +208,7 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `-o, --output <directory>` | Required | Output directory. |
 | `--api-url <URL>` | None | Remote API server address; without it, direct VLM mode is used. |
 | `-m, --method <auto\|txt\|ocr>` | `auto` | Parsing method; ignored by direct `vlm-http-client`. In official direct Hybrid it maps directly to the upstream `ocr_mode` parameter. |
-| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.0.10 worker; API Hybrid remains unsupported. |
+| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.0.12 worker; API Hybrid remains unsupported. |
 | `--tier <flash\|basic\|standard\|advanced>` | None | Official direct Hybrid tier, mapped 1:1 to the upstream tier. Rejected on other backends and in API mode. `--effort` is a compatibility alias (`medium`→`standard`, `high`/`xhigh`→`advanced`); `--tier` wins when both are given. Other direct backends accept only `medium`/`high` effort. |
 | `--effort <medium\|high\|xhigh>` | `medium` | Compatibility alias for `--tier`: `medium`→`standard`, `high`/`xhigh`→`advanced`. Ignored when `--tier` is set. Other direct backends accept only `medium`/`high`. |
 | `--model-stack <auto\|light\|full>` | `auto` | Official direct Hybrid model stack. `model.stack`/`MINERU_MODEL_STACK` was removed before 4.0.10; the current version does not support it. Configure `model.small_backend` + `model.vlm.engine` via `MINERU_CONFIG`, so non-default values, including `auto`, are rejected. |
@@ -304,7 +304,7 @@ The Rust API image is `ghcr.io/agentsyaml/mineru-cli`. It listens on
 container port `8000`, serves `GET /health`, writes task output below
 `/app/output`, and runs its default command as a non-root user. The release
 binaries include the `office,legacy-office` feature set, but the image bundles
-Rust binaries only: it contains no Python, `mineru==4.0.10`, or model assets.
+Rust binaries only: it contains no Python, `mineru==4.0.12`, or model assets.
 Verify the requested tag exists in GHCR before pulling it. The example uses
 `:0.3.0`; see the [release guide](releasing.md#current-release-boundary) for
 publication checks. Releases do not update
@@ -427,7 +427,7 @@ server started: http://127.0.0.1:8000: health=http://127.0.0.1:8000/health
 | `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Page processing window. |
 | `MINERU_OFFICIAL_PAGE_CONCURRENCY` | `64` | Page-pipeline concurrency cap (any positive value), bounding only the number of simultaneously running page pipelines; request-level concurrency is governed by `MINERU_VLM_HTTP_CONCURRENCY`. |
 | `MINERU_OFFICIAL_CONCURRENCY_MODEL` | `classic` | Concurrency model, one of `classic\|two-phase`. `classic`: the long-standing single-encoder pipeline (default); `two-phase`: splits each page's semantic work into an encode-all → request-all two-stage flow, removing the CPU-encode serialization bottleneck in front of request dispatch (opt-in). |
-| `MINERU_MODEL_STACK` | None | Removed before MinerU 4.0.10; the current version does not support it. Any set value, including `auto`, fails the run on every lane; whether the failure happens before lane dispatch is not configurable. Configure `model.small_backend` / `model.vlm.engine` via `MINERU_CONFIG` instead. |
+| `MINERU_MODEL_STACK` | None | Removed before MinerU 4.0.12; the current version does not support it. Any set value, including `auto`, fails the run on every lane; whether the failure happens before lane dispatch is not configurable. Configure `model.small_backend` / `model.vlm.engine` via `MINERU_CONFIG` instead. |
 | `MINERU_OFFICIAL_WORKER_MODE` | None | No longer supported by the project. Any set value fails the run with `MINERU_OFFICIAL_WORKER_MODE is no longer supported; use --official-worker-mode`. |
 | `MINERU_OFFICIAL_PYTHON` | Python `python3`/`python` | Absolute official Hybrid interpreter path. |
 | `MINERU_MODEL_BASE_DIR` | None | Absolute official Hybrid model root; injected into the worker as `MINERU_MODEL_BASE_DIR` (upstream `model.base_dir`). `MINERU_HOME` is a MinerU home directory, not the model root. |

@@ -40,7 +40,7 @@ with patch.object(importlib.metadata, "version", return_value="3.4.5"), \
 response = json.loads(out.getvalue())
 assert response["status"] == "error"
 assert response["package_version"] == "3.4.5"
-assert "package version is not 4.0.10" in response["error"]
+assert "package version is not 4.0.12" in response["error"]
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
 

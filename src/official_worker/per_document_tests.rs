@@ -105,7 +105,7 @@ async fn verbose_stderr_does_not_reject_a_valid_response() {
 request=$(cat)
 request_id=$(printf '%s' "$request" | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_id"])')
 python3 -c 'import sys; sys.stderr.buffer.write(b"x" * 65537 + bytes([255]))'
-printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.10","schema_version":"2.0","bundle_name":"hybrid-v4","error":null}\n' "$request_id"
+printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.12","schema_version":"2.0","bundle_name":"hybrid-v4","error":null}\n' "$request_id"
 "#,
     );
     let worker = OfficialWorker::new(Some(script)).unwrap();

@@ -1,4 +1,4 @@
-//! Validation and atomic publication for official MinerU 4.0.10 Hybrid output bundles.
+//! Validation and atomic publication for official MinerU 4.0.12 Hybrid output bundles.
 pub(crate) const BUNDLE_NAME: &str = "hybrid-v4";
 const SCHEMA_VERSION: &str = "2.0";
 

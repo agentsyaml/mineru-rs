@@ -21,7 +21,7 @@ function mhtml() {
   ].join('\r\n')
 }
 
-test('native rich Node SDK lifecycle with external MinerU 4.0.10', { skip: !python }, async (t) => {
+test('native rich Node SDK lifecycle with external MinerU 4.0.12', { skip: !python }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mineru-node-official-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const csv = path.join(root, 'sample.csv')

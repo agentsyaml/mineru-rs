@@ -238,7 +238,7 @@ impl Default for Health {
     fn default() -> Self {
         Self {
             status: "ok",
-            version: "4.0.10",
+            version: crate::official_worker::PACKAGE_VERSION,
             features: HealthFeatures {
                 webhook: false,
                 output_formats: OUTPUT_FORMATS.to_vec(),
@@ -436,7 +436,7 @@ fn page_endpoint(value: &str) -> Result<(bool, u32), WireError> {
             .map_err(|_| WireError::bad("page_range", "Invalid page range."))?,
     ))
 }
-fn validate_inline_base64(data: &str) -> Result<(), WireError> {
+pub(crate) fn validate_inline_base64(data: &str) -> Result<(), WireError> {
     if data.len() > INLINE_MAX_BYTES.div_ceil(3) * 4 {
         return Err(WireError::too_large());
     }

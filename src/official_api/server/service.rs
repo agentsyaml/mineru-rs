@@ -114,6 +114,7 @@ impl OfficialService {
                 self.inner.store.clone(),
             ))
             .merge(job_routes)
+            .merge(super::tasks::router(self.inner.clone()))
             .merge(super::discovery::router(self.inner.clone()))
             .layer(axum::extract::DefaultBodyLimit::max(body_cap))
     }
@@ -172,10 +173,10 @@ impl OfficialService {
         }
         if let Ok(jobs) = self.inner.jobs.lock() {
             for job in jobs.values() {
-                if let Ok(record) = job.try_lock() {
-                    if matches!(record.response.status.as_str(), "queued" | "running") {
-                        record.cancel.store(true, Ordering::Release);
-                    }
+                if let Ok(record) = job.try_lock()
+                    && matches!(record.response.status.as_str(), "queued" | "running")
+                {
+                    record.cancel.store(true, Ordering::Release);
                 }
             }
         }

@@ -70,7 +70,74 @@
       "sha256": "a9fc92e72c55d8245ab90a2efb55b7d1e677a909dce55be21500acaa21946006",
       "url": "https://codeload.github.com/developer0hye/umya-spreadsheet/tar.gz/3e001dcbdbf2c490e93724af6f502560a3d7d766",
       "version": "2.3.3"
+    },
+    {
+      "archive_name": "anydoc-0.1.9.crate",
+      "archive_root": "anydoc-0.1.9",
+      "identity_fragments": [
+        "name = \"anydoc\"",
+        "version = \"0.1.9\"",
+        "license = \"MIT\""
+      ],
+      "license": "MIT",
+      "license_files": [
+        "LICENSE"
+      ],
+      "package": "anydoc",
+      "patched_fragments": [
+        "name = \"anydoc\"",
+        "version = \"0.1.9\"",
+        "license = \"MIT\"",
+        "version = \"9.0.5\""
+      ],
+      "sha256": "93a8b0dbecf79be9329111093b493d256db2a573ed3f1cc827c96bdbbe32a936",
+      "url": "https://static.crates.io/crates/anydoc/anydoc-0.1.9.crate",
+      "version": "0.1.9"
+    },
+    {
+      "archive_name": "calamine-0.36.1.crate",
+      "archive_root": "calamine-0.36.1",
+      "identity_fragments": [
+        "name = \"calamine\"",
+        "version = \"0.36.1\"",
+        "license = \"MIT\""
+      ],
+      "license": "MIT",
+      "license_files": [
+        "LICENSE-MIT.md"
+      ],
+      "package": "calamine",
+      "patched_fragments": [
+        "name = \"calamine\"",
+        "version = \"0.36.1\"",
+        "license = \"MIT\"",
+        "version = \"9.0.5\""
+      ],
+      "sha256": "5fa68281b1a76b54a62156474adb06bb380a67e07dd60656e3217152b42183f3",
+      "url": "https://static.crates.io/crates/calamine/calamine-0.36.1.crate",
+      "version": "0.36.1"
+    },
+    {
+      "archive_name": "docx-rs-0.4.22.crate",
+      "archive_root": "docx-rs-0.4.22",
+      "identity_fragments": [
+        "name = \"docx-rs\"",
+        "version = \"0.4.22\"",
+        "license = \"MIT\""
+      ],
+      "license": "MIT",
+      "license_files": [],
+      "package": "docx-rs",
+      "patched_fragments": [
+        "name = \"docx-rs\"",
+        "version = \"0.4.22\"",
+        "license = \"MIT\"",
+        "version = \"9.0.5\""
+      ],
+      "sha256": "7fdf00e8af6d0b3e92d4bbf9b76f773d8b84ea80f310324ad16cbdc2e653e02c",
+      "url": "https://static.crates.io/crates/docx-rs/docx-rs-0.4.22.crate",
+      "version": "0.4.22"
     }
   ],
-  "tree_sha256": "1bbbe07e99a97c6e86de87f93b220f82ffffd2fcee8d59e967fd1c3259fc6df1"
+  "tree_sha256": "68b0eb89ae5d530a559c052b8176069b80d8aabeba256d2cd814ba558affb479"
 }

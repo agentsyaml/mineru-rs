@@ -13,7 +13,7 @@ Registry and release availability is covered by the [release guide](releasing.md
 
 ## Runtime and compatibility
 
-The worker requires `mineru==4.0.10` and `docvortex==0.5.4` with their upstream
+The worker requires `mineru==4.0.12` and `docvortex==0.5.16` with their upstream
 dependencies. Use Python 3.10–3.14: the worker uses PEP 604 union annotations
 and upstream MinerU requires `>=3.10,<3.15`. The Python facade itself supports
 Python 3.9+. Python and model assets are not bundled. Supply trusted absolute Python,
@@ -24,7 +24,7 @@ them. Rust/Python representations redact VLM credentials. Node options are
 ordinary caller-owned JavaScript objects, so avoid logging them. Parsed VLM
 credentials are not retained in rich result data.
 
-The rich SDK's 4.0.10 worker is separate from the legacy 3.4.5 `run`/`parse`
+The rich SDK's 4.0.12 worker is separate from the legacy 3.4.5 `run`/`parse`
 path.
 
 ## Parse inputs and options

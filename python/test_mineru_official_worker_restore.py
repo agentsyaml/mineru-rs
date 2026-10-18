@@ -23,7 +23,7 @@ class RichRestoreRebasingTests(unittest.TestCase):
             (assets / "sample.png").write_bytes(b"image")
             middle = MiddleJson.from_dict({
                 "schema": "docvortex.middle", "schema_version": "2.0", "is_full_document": True,
-                "metadata": {"file_suffix": "csv", "producer": {"name": "MinerU", "version": "4.0.10"},
+                "metadata": {"file_suffix": "csv", "producer": {"name": "MinerU", "version": "4.0.12"},
                              "document": {"title": "sample.png"}},
                 "extensions": {"audit": {"image_path": "ordinary-value", "label": "sample.png"},
                                "sample.png": "ordinary-key"},

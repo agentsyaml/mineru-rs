@@ -99,6 +99,8 @@ async fn official_ingress_uses_bound_listener_public_client_policy() {
         ("PUT", "/v1/uploads/pending/content"),
         ("POST", "/v1/uploads/pending/complete"),
         ("POST", "/v1/parse/jobs"),
+        ("POST", "/v1/tasks"),
+        ("POST", "/v1/file_parse"),
     ] {
         let response = raw_partial(public.address, method, path, 1_048_576).await;
         assert!(

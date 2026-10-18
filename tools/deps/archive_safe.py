@@ -7,6 +7,7 @@ import re
 import shutil
 import tarfile
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -16,6 +17,7 @@ MAX_MEMBERS = 20_000
 MAX_FILE = 32 * 1024 * 1024
 MAX_PATH = 1024
 MAX_COMPONENT = 255
+MAX_METADATA_DEPTH = 32
 _DEVICE = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$", re.I)
 
 
@@ -112,7 +114,19 @@ class _BoundedTarFile(tarfile.TarFile):
         self.extra_members = 0
         self.extra_bytes = 0
         self.expanded_bytes = 0
+        self.metadata_depth = 0
         super().__init__(*args, **kwargs)
+
+
+@contextmanager
+def _metadata_header(archive):
+    archive.metadata_depth += 1
+    try:
+        if archive.metadata_depth > MAX_METADATA_DEPTH:
+            raise ArchiveError("archive metadata nesting limit exceeded")
+        yield
+    finally:
+        archive.metadata_depth -= 1
 
 
 class _ReplayReader:
@@ -170,11 +184,19 @@ def _validate_pax_payload(payload, size):
 
 class _BoundedTarInfo(tarfile.TarInfo):
     def _proc_member(self, archive):
-        if self.type in (
-            tarfile.GNUTYPE_LONGNAME,
-            tarfile.GNUTYPE_LONGLINK,
-            tarfile.GNUTYPE_SPARSE,
-        ):
+        if self.type == tarfile.GNUTYPE_LONGNAME:
+            with _metadata_header(archive):
+                if self.size < 1 or self.size > MAX_PATH + 1:
+                    raise ArchiveError("GNU longname exceeds path limit")
+                archive.extra_members += 1
+                archive.extra_bytes += self.size
+                if (archive.extra_members > MAX_MEMBERS or archive.extra_bytes > MAX_EXPANDED
+                        or len(archive.members) + archive.extra_members + 1 > MAX_MEMBERS
+                        or archive.expanded_bytes + self.size > MAX_EXPANDED):
+                    raise ArchiveError("archive metadata limit exceeded")
+                archive.expanded_bytes += self.size
+                return self._proc_gnulong(archive)
+        if self.type in (tarfile.GNUTYPE_LONGLINK, tarfile.GNUTYPE_SPARSE):
             raise ArchiveError("GNU longname and sparse extensions are forbidden")
         if self.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE):
             return self._proc_pax(archive)
@@ -184,6 +206,10 @@ class _BoundedTarInfo(tarfile.TarInfo):
         return processor(self, archive)
 
     def _proc_pax(self, archive):
+        with _metadata_header(archive):
+            return self._proc_pax_bounded(archive)
+
+    def _proc_pax_bounded(self, archive):
         archive.extra_members += 1
         archive.extra_bytes += self.size
         if (self.size < 0 or self.size > MAX_FILE

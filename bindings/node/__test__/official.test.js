@@ -14,7 +14,7 @@ class MockResult {
   exportPages() { return JSON.stringify([]) }
   get assets() { return [{ path: 'images/a.png', data: Buffer.from([1, 2]) }] }
   get warnings() { return ['warning'] }
-  get versionMetadata() { return { mineruPackage: '4.0.10', schemaVersion: '2.0', bundleName: 'hybrid-v4' } }
+  get versionMetadata() { return { mineruPackage: '4.0.12', schemaVersion: '2.0', bundleName: 'hybrid-v4' } }
   async toDict(skip) { calls.skip = skip; return '{"pages":[]}' }
   async toJson(skip) { calls.skip = skip; return '{"pages":[]}' }
   async render(format, options) {

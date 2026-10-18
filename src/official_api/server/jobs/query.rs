@@ -1,3 +1,4 @@
+use super::super::tasks::result_helpers::{error, internal};
 use super::*;
 use axum::extract::{Path, Query, rejection::QueryRejection};
 use serde::Deserialize;
@@ -71,10 +72,10 @@ pub(in crate::official_api::server) async fn list(
     if matches!(query.order, Some(ListOrder::Desc)) {
         data.reverse();
     }
-    if let Some(after) = query.after {
-        if let Some(i) = data.iter().position(|v| v.job_id == after) {
-            data.drain(..=i);
-        }
+    if let Some(after) = query.after
+        && let Some(i) = data.iter().position(|v| v.job_id == after)
+    {
+        data.drain(..=i);
     }
     if let Some(after) = query.created_after {
         data.retain(|v| v.created_at >= after);

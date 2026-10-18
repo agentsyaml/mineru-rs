@@ -1,6 +1,8 @@
 use super::{
     service::{JobRecord, PreparedFile, ServiceInner},
     store::OfficialFileStore,
+    submission::{InputSource, Submission, decoded_size},
+    tasks::result_helpers::internal,
 };
 use crate::{
     official::{
@@ -30,6 +32,7 @@ pub(super) async fn create(
     State(s): State<Arc<ServiceInner>>,
     req: Result<Json<JobCreate>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobResponse>), WireError> {
+    // Shutdown precedence: an in-flight shutdown wins over body validation.
     if s.stopping.load(Ordering::Acquire) {
         return Err(error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -38,6 +41,23 @@ pub(super) async fn create(
         ));
     }
     let Json(req) = req.map_err(|_| WireError::bad("body", "Invalid job request."))?;
+    prepare_job(&s, Submission::from_create(req))
+}
+
+/// Shared admission pipeline for every submission route: stopping check,
+/// slot/metadata/artifact reservation, per-file input charging, validation,
+/// and record commit. Returns the stored `JobResponse`.
+pub(super) fn prepare_job(
+    s: &ServiceInner,
+    req: Submission,
+) -> Result<(StatusCode, Json<JobResponse>), WireError> {
+    if s.stopping.load(Ordering::Acquire) {
+        return Err(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_shutting_down",
+            "The server is shutting down.",
+        ));
+    }
     req.validate()?;
     let slot = s
         .store
@@ -71,7 +91,7 @@ pub(super) async fn create(
     let mut total = 0u64;
     for file in &req.files {
         let size = match &file.source {
-            JobSource::FileId { file_id } => {
+            InputSource::FileId { file_id } => {
                 let object = s.store.file(file_id).ok_or_else(not_found)?;
                 if object.purpose != "parse" {
                     return Err(WireError::bad("file_id", "File purpose is not parse."));
@@ -81,7 +101,7 @@ pub(super) async fn create(
                 }
                 object.bytes
             }
-            JobSource::Inline { data, .. } => {
+            InputSource::Inline { data, .. } => {
                 let decoded = decoded_size(data);
                 if decoded > crate::official_api::wire::INLINE_MAX_BYTES as u64
                     || decoded > s.store.file_cap()
@@ -89,6 +109,18 @@ pub(super) async fn create(
                     return Err(WireError::too_large());
                 }
                 decoded
+            }
+            InputSource::Raw { bytes, .. } => {
+                // Size limit comes from the configured store cap, not the
+                // upstream hardcoded 200 MiB literal.
+                if bytes.is_empty() || bytes.len() as u64 > s.store.file_cap() {
+                    return Err(if bytes.is_empty() {
+                        WireError::bad("files", "Empty files are not supported.")
+                    } else {
+                        WireError::too_large()
+                    });
+                }
+                bytes.len() as u64
             }
         };
         total = total
@@ -99,14 +131,14 @@ pub(super) async fn create(
     let mut files = Vec::with_capacity(req.files.len());
     for file in &req.files {
         let (id, name, bytes) = match &file.source {
-            JobSource::FileId { file_id } => {
+            InputSource::FileId { file_id } => {
                 let (object, bytes) = s.store.input_lease(file_id).ok_or_else(not_found)?;
                 if object.purpose != "parse" {
                     return Err(WireError::bad("file_id", "File purpose is not parse."));
                 }
                 (Some(file_id.clone()), object.filename, bytes)
             }
-            JobSource::Inline { name, data } => {
+            InputSource::Inline { name, data } => {
                 let decoded_size = (data.len() / 4 * 3).saturating_sub(
                     data.as_bytes()
                         .iter()
@@ -128,6 +160,23 @@ pub(super) async fn create(
                     .decode(data)
                     .map_err(|_| WireError::bad("data", "Expected valid base64 data."))?;
                 (None, name.clone(), s.store.charged(decoded, reservation))
+            }
+            InputSource::Raw { name, bytes } => {
+                let reservation =
+                    s.store
+                        .input_reservation(bytes.len() as u64)
+                        .ok_or_else(|| {
+                            error(
+                                StatusCode::TOO_MANY_REQUESTS,
+                                "capacity_exceeded",
+                                "Input storage capacity is exhausted.",
+                            )
+                        })?;
+                (
+                    None,
+                    name.clone(),
+                    s.store.charged(bytes.to_vec(), reservation),
+                )
             }
         };
         let tier = requested_tier(req.tier, &name);
@@ -203,7 +252,7 @@ pub(super) async fn create(
             OcrMode::Ocr => OfficialOcrMode::Ocr,
         },
     };
-    commit_job(&s, id, record)?;
+    commit_job(s, id, record)?;
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
@@ -231,16 +280,6 @@ fn commit_job(s: &ServiceInner, id: String, record: JobRecord) -> Result<(), Wir
     s.jobs_created.fetch_add(1, Ordering::Relaxed);
     s.notify.notify_one();
     Ok(())
-}
-
-fn decoded_size(data: &str) -> u64 {
-    (data.len() / 4 * 3).saturating_sub(
-        data.as_bytes()
-            .iter()
-            .rev()
-            .take_while(|b| **b == b'=')
-            .count(),
-    ) as u64
 }
 
 pub(super) async fn run_job(s: Arc<ServiceInner>, id: String) {
@@ -456,12 +495,5 @@ fn not_found() -> WireError {
         StatusCode::NOT_FOUND,
         "not_found",
         "The requested resource was not found.",
-    )
-}
-fn internal() -> WireError {
-    error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "server_error",
-        "The request could not be processed.",
     )
 }

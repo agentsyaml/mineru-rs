@@ -1,4 +1,4 @@
-//! Per-document subprocess boundary for the pinned MinerU 4.0.10 parser.
+//! Per-document subprocess boundary for the pinned MinerU 4.0.12 parser.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,7 +30,7 @@ use python_shim::PythonShim;
 pub(crate) use python_shim::{PYTHON_SHIM, PYTHON_WORKER_FILES};
 
 const PROTOCOL: &str = "mineru-rs-official-worker/1";
-const PACKAGE_VERSION: &str = "4.0.10";
+pub(crate) const PACKAGE_VERSION: &str = "4.0.12";
 const SCHEMA_VERSION: &str = "2.0";
 const PERSISTENT_PROTOCOL: &str = "mineru-rs-official-worker/2";
 const STDOUT_CAP: usize = 64 * 1024;

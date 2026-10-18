@@ -50,7 +50,7 @@ async fn official_v1_upload_job_outputs_and_leases_with_real_worker() {
         .json()
         .await
         .unwrap();
-    assert_eq!(health["version"], "4.0.10");
+    assert_eq!(health["version"], "4.0.12");
     reject_unsafe_job(&client, &base).await;
     let csv = b"name,score\nAda,99\n";
     let upload: Value = client.post(format!("{base}/v1/uploads"))

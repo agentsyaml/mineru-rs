@@ -1,6 +1,6 @@
 use super::*;
-use crate::official_api::wire::ListOrder;
-use axum::extract::Query;
+use crate::official_api::wire::{ListOrder, UploadCreate};
+use axum::{extract::Query, http::HeaderMap, response::IntoResponse};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
@@ -110,4 +110,53 @@ async fn tied_timestamp_cursor_survives_insert_between_pages_in_both_orders() {
             .count();
         assert_eq!(original_count, originals.len());
     }
+}
+
+#[tokio::test]
+async fn deleting_upload_id_does_not_remove_upload() {
+    let store = store(&[]);
+    let req = UploadCreate {
+        filename: "input.pdf".into(),
+        bytes: 3,
+        mime_type: "application/pdf".into(),
+        purpose: "parse".into(),
+        sha256sum: None,
+        expires_after: None,
+    };
+    let _ = super::super::uploads::commit_upload(
+        &store,
+        "upload_test".into(),
+        req,
+        OfficialFileStore::now(),
+        3600,
+        store.reserve_metadata(2).unwrap(),
+        store.input_reservation(3).unwrap(),
+    )
+    .unwrap();
+
+    let error = delete(State(store.clone()), Path("upload_test".into()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::NOT_FOUND);
+    assert!(matches!(
+        store.inner.entries.lock().unwrap().get("upload_test"),
+        Some(Entry::Upload(_))
+    ));
+    let put = super::super::uploads::put(
+        State(store.clone()),
+        Path("upload_test".into()),
+        HeaderMap::new(),
+        Body::from("pdf"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put.into_response().status(), StatusCode::OK);
+    assert_eq!(
+        super::super::uploads::complete(State(store), Path("upload_test".into()), Ok(None),)
+            .await
+            .unwrap()
+            .0
+            .status,
+        "completed"
+    );
 }

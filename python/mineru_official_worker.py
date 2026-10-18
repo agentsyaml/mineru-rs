@@ -1,4 +1,4 @@
-"""Project-owned adapter for the pinned MinerU 4.0.10 parser.
+"""Project-owned adapter for the pinned MinerU 4.0.12 parser.
 
 This is not an official MinerU worker protocol.  Rust supplies one JSON request
 on stdin and owns the process lifetime; this shim only imports MinerU, invokes

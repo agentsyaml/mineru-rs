@@ -44,7 +44,7 @@ if [ "$MODE" = bad-handshake ]; then
     printf '%s\n' '{"type":"handshake","protocol":"wrong"}'
     exit 0
 fi
-printf '%s\n' '{"type":"handshake","protocol":"mineru-rs-official-worker/2","status":"ready","package_version":"4.0.10","schema_version":"2.0","max_in_flight":1,"capabilities":{"tiers":["flash","basic","standard","advanced"],"ocr_modes":["auto","txt","ocr"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}'
+printf '%s\n' '{"type":"handshake","protocol":"mineru-rs-official-worker/2","status":"ready","package_version":"4.0.12","schema_version":"2.0","max_in_flight":1,"capabilities":{"tiers":["flash","basic","standard","advanced"],"ocr_modes":["auto","txt","ocr"],"input_formats":["pdf","png","jpeg","jpg","jp2","webp","gif","bmp","tiff"],"bundle_name":"hybrid-v4","cancellation":"process-terminate"}}'
 
 requests=0
 while IFS= read -r request; do
@@ -75,12 +75,12 @@ while IFS= read -r request; do
     fi
     if [ "$MODE" = stderr-error-once ] && [ "$requests" -eq 1 ]; then
         printf '%s\n' 'first-request-stderr' >&2
-        printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"error\",\"package_version\":\"4.0.10\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\",\"error\":\"document failed\"}"
+        printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"error\",\"package_version\":\"4.0.12\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\",\"error\":\"document failed\"}"
         continue
     fi
     mkdir -p "$bundle"
     printf 'request-%s\n' "$sequence" > "$bundle/markdown.md"
-    printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"ok\",\"package_version\":\"4.0.10\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\"}"
+    printf '%s\n' "{\"type\":\"result\",\"protocol\":\"mineru-rs-official-worker/2\",\"request_id\":\"$id\",\"sequence\":$sequence,\"status\":\"ok\",\"package_version\":\"4.0.12\",\"schema_version\":\"2.0\",\"bundle_name\":\"hybrid-v4\"}"
 done
 "##
         .replace("__MODE__", &shell_quote(Path::new(mode)))

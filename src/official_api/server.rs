@@ -4,6 +4,8 @@ mod files;
 mod jobs;
 mod service;
 mod store;
+mod submission;
+pub(super) mod tasks;
 mod uploads;
 
 use axum::{
