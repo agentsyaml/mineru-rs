@@ -5,7 +5,6 @@ use serde_json::Value;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
-    io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -23,11 +22,13 @@ mod per_document_tests;
 mod persistent;
 pub(crate) mod process;
 mod python_shim;
+mod staging;
 
 pub(crate) use persistent::{OfficialPersistentWorker, OfficialSessionConfig};
 use python_shim::PythonShim;
 #[cfg(test)]
 pub(crate) use python_shim::{PYTHON_SHIM, PYTHON_WORKER_FILES};
+use staging::stage_input;
 
 const PROTOCOL: &str = "mineru-rs-official-worker/1";
 pub(crate) const PACKAGE_VERSION: &str = "4.0.12";
@@ -158,7 +159,23 @@ impl OfficialWorker {
         request: OfficialRequest,
         deadline: Instant,
     ) -> Result<OfficialBundle, String> {
-        self.run_with_files(input, suffix, request, deadline, &[])
+        self.run_owned(
+            bytes::Bytes::copy_from_slice(input),
+            suffix,
+            request,
+            deadline,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_owned(
+        &self,
+        input: bytes::Bytes,
+        suffix: &str,
+        request: OfficialRequest,
+        deadline: Instant,
+    ) -> Result<OfficialBundle, String> {
+        self.run_with_files_owned(input, suffix, request, deadline, Vec::new())
             .await
     }
 
@@ -166,50 +183,44 @@ impl OfficialWorker {
         &self,
         input: &[u8],
         suffix: &str,
-        mut request: OfficialRequest,
+        request: OfficialRequest,
         deadline: Instant,
         files: &[(&str, &[u8])],
+    ) -> Result<OfficialBundle, String> {
+        let files = files
+            .iter()
+            .map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec()))
+            .collect();
+        self.run_with_files_owned(
+            bytes::Bytes::copy_from_slice(input),
+            suffix,
+            request,
+            deadline,
+            files,
+        )
+        .await
+    }
+
+    async fn run_with_files_owned(
+        &self,
+        input: bytes::Bytes,
+        suffix: &str,
+        mut request: OfficialRequest,
+        deadline: Instant,
+        files: Vec<(String, Vec<u8>)>,
     ) -> Result<OfficialBundle, String> {
         if input.is_empty() {
             return Err("official Hybrid input is empty".into());
         }
-        let temporary = tempfile::tempdir().map_err(|e| format!("official worker tempdir: {e}"))?;
-        let input_path = temporary.path().join(format!("input.{suffix}"));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&input_path)
-            .map_err(|e| format!("official worker input snapshot: {e}"))?;
-        file.write_all(input)
-            .and_then(|_| file.flush())
-            .map_err(|e| format!("official worker input snapshot: {e}"))?;
         if !files.is_empty() && request.operation.is_none() {
             return Err("private operation files require an operation".into());
         }
-        if request.operation.is_some() {
-            let operation_root = temporary.path().join("operation-assets");
-            std::fs::create_dir_all(&operation_root)
-                .map_err(|e| format!("operation asset directory: {e}"))?;
-            for (name, bytes) in files {
-                let relative = Path::new(name);
-                if relative.is_absolute()
-                    || relative
-                        .components()
-                        .any(|part| !matches!(part, std::path::Component::Normal(_)))
-                {
-                    return Err("unsafe private operation asset path".into());
-                }
-                let target = operation_root.join(relative);
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("operation asset directory: {e}"))?;
-                }
-                std::fs::write(target, bytes).map_err(|e| format!("operation asset write: {e}"))?;
-            }
-            request.operation_assets = Some(operation_root);
-        }
+        let stage =
+            stage_input(input, suffix, files, request.operation.is_some(), deadline).await?;
+        let temporary = stage.temporary;
+        request.operation_assets = stage.operation_assets;
         let bundle = temporary.path().join(crate::hybrid_v4_output::BUNDLE_NAME);
-        request.input_path = input_path;
+        request.input_path = stage.input_path;
         request.bundle_path = bundle.clone();
         let mut encoded = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
         encoded.push(b'\n');

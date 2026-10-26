@@ -308,9 +308,12 @@ async fn shutdown_barrier_preserves_accepted_commit_and_rejects_later_jobs() {
 
 #[tokio::test]
 async fn cancel_while_waiting_for_gate_finalizes_all_unfinished_files() {
-    let store = new_store();
-    let gate = store.shared_gate().clone();
-    let held = gate.try_acquire_owned().unwrap();
+    let store = crate::official_api::server::OfficialFileStore::new(
+        std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+        std::time::Duration::from_secs(3600),
+    )
+    .unwrap();
     let service = service(store.clone());
     let (_, response) = super::super::super::jobs::create(
         State(service.inner.clone()),
@@ -349,8 +352,10 @@ async fn cancel_while_waiting_for_gate_finalizes_all_unfinished_files() {
         .status,
         "canceled"
     );
-    drop(held);
-    runner.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), runner)
+        .await
+        .unwrap()
+        .unwrap();
     let jobs = service.inner.jobs.lock().unwrap();
     let record = jobs[&response.job_id].try_lock().unwrap();
     assert_eq!(record.response.status, "canceled");
@@ -359,5 +364,126 @@ async fn cancel_while_waiting_for_gate_finalizes_all_unfinished_files() {
     assert_eq!(
         store.inner.used.load(std::sync::atomic::Ordering::Acquire),
         0
+    );
+}
+
+#[tokio::test]
+async fn shutdown_while_waiting_for_gate_finishes_without_releasing_external_permit() {
+    let store = new_store();
+    let gate = store.shared_gate().clone();
+    let held: Vec<_> = (0..gate.available_permits())
+        .map(|_| gate.clone().try_acquire_owned().unwrap())
+        .collect();
+    assert!(!held.is_empty());
+    let service = service(store.clone());
+    let (_, response) = super::super::super::jobs::create(
+        State(service.inner.clone()),
+        Ok(Json(job_request(serde_json::json!([
+            {"source":{"type":"inline","name":"held.pdf","data":"YQ=="}}
+        ])))),
+    )
+    .await
+    .unwrap();
+    service.start().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let running = {
+                let jobs = service.inner.jobs.lock().unwrap();
+                jobs[&response.job_id].try_lock().unwrap().response.files[0].status == "running"
+            };
+            if running {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let jobs = service.inner.jobs.lock().unwrap();
+        let record = jobs[&response.job_id].try_lock().unwrap();
+        panic!(
+            "job never reached gate wait: {:?}",
+            record.response.files[0].status
+        );
+    });
+    let record = service.inner.jobs.lock().unwrap()[&response.job_id].clone();
+    tokio::time::timeout(std::time::Duration::from_secs(2), service.shutdown())
+        .await
+        .expect("shutdown must not wait for the external gate permit")
+        .unwrap();
+    let record = record.lock().await;
+    assert_eq!(record.response.status, "canceled");
+    assert!(
+        record
+            .response
+            .files
+            .iter()
+            .all(|file| file.status == "canceled")
+    );
+    assert_eq!(
+        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    drop(held);
+}
+
+#[tokio::test]
+async fn unrelated_queued_cancel_does_not_skip_gate_waiting_job_file() {
+    let store = new_store();
+    let gate = store.shared_gate().clone();
+    let held: Vec<_> = (0..gate.available_permits())
+        .map(|_| gate.clone().try_acquire_owned().unwrap())
+        .collect();
+    let service = service(store.clone());
+    let (_, active) = super::super::super::jobs::create(
+        State(service.inner.clone()),
+        Ok(Json(job_request(serde_json::json!([
+            {"source":{"type":"inline","name":"first.pdf","data":"YQ=="}},
+            {"source":{"type":"inline","name":"second.pdf","data":"Yg=="}}
+        ])))),
+    )
+    .await
+    .unwrap();
+    let (_, queued) = super::super::super::jobs::create(
+        State(service.inner.clone()),
+        Ok(Json(job_request(serde_json::json!([
+            {"source":{"type":"inline","name":"queued.pdf","data":"Yw=="}}
+        ])))),
+    )
+    .await
+    .unwrap();
+    let inner = service.inner.clone();
+    let id = active.job_id.clone();
+    let runner = tokio::spawn(async move { super::super::super::jobs::run_job(inner, id).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let running = {
+                let jobs = service.inner.jobs.lock().unwrap();
+                jobs[&active.job_id].try_lock().unwrap().response.files[0].status == "running"
+            };
+            if running {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let _ = super::super::super::jobs::cancel(
+        State(service.inner.clone()),
+        Path(queued.job_id.clone()),
+    )
+    .await
+    .unwrap();
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(5), runner)
+        .await
+        .unwrap()
+        .unwrap();
+    let jobs = service.inner.jobs.lock().unwrap();
+    let active = jobs[&active.job_id].try_lock().unwrap();
+    assert_eq!(
+        active.response.progress.completed + active.response.progress.failed,
+        2
     );
 }

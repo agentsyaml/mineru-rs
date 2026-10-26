@@ -3,6 +3,7 @@
 mod batch;
 mod error;
 mod input;
+mod native;
 mod options;
 mod parser;
 mod render;

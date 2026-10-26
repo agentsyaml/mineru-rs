@@ -4,11 +4,11 @@
 
 | Surface | Upstream/runtime | Inputs and behavior | Outputs |
 | --- | --- | --- | --- |
-| CLI `vlm-http-client` (default) | MinerU 3.4.5 VLM protocol; external OpenAI-compatible service | PDF and eight image formats; local inference and `mineru-api` are outside this compatibility scope | Existing MinerU-style result tree |
+| CLI `vlm-http-client` (default) | MinerU 3.4.5 VLM protocol; external OpenAI-compatible service | PDF and eight image formats; raw local layout API is separate and not integrated | Existing MinerU-style result tree |
 | CLI `hybrid-http-client` | Official MinerU 4.0.12 worker; external Python 3.10–3.14 environment | Direct mode only; PDF and eight image formats | `{stem}/hybrid-v4/` official bundle |
 | CLI `--backend local` | Rust text extraction; requires the `legacy-office` build feature | Legacy Office formats and clean text PDFs | Markdown only |
-| Rich Rust/Python/Node SDK | Official MinerU 4.0.12 / DocVortex 0.5.16 worker | 28 extensions; native formats require `flash` | Owned results and nine render targets |
-| Official-v1 HTTP API | Official MinerU 4.0.12 / DocVortex 0.5.16 worker | Upload/job API; PDF, images, and native formats; native requires `flash` | Markdown, middle JSON, structured content, or ZIP |
+| Rich Rust/Python/Node SDK | Rust-native CSV/TSV; checked-in worker contract MinerU 4.0.12 / DocVortex 0.5.16; latest reference 0.6.0 | 28 extensions; native formats require `flash` | Owned results; CSV/TSV render to Markdown or structured content only |
+| Official-v1 HTTP API | Rust-native CSV/TSV; checked-in worker contract MinerU 4.0.12 / DocVortex 0.5.16; latest reference 0.6.0 | Upload/job API; PDF, images, and native formats; native requires `flash` | Markdown, middle JSON, structured content, or ZIP |
 | Existing legacy bindings/API | MinerU 3.4.5 VLM behavior | Existing input and option contract | Existing output tree or Markdown/warnings |
 
 The 3.4.5 VLM and 4.0.12 official worker are separate routes. The latter's
@@ -98,13 +98,49 @@ atomic publication. It contains `markdown.md`, `middle_json.json`,
 It is never sent through the MinerU 3.4.5 builders, `official_route`, Office
 conversion, or the project-private AnyDoc lane. API Hybrid remains fail-closed.
 
-### Rich SDK and official HTTP API
+### Latest upstream reference and rich SDK / official HTTP API
+
+As of 2026-10-23, the latest upstream reference tuple is MinerU 4.0.12,
+DocVortex 0.6.0, and mineru-vl-utils 2.0.7. Exact commits, wheel hashes,
+platform wheel availability, and the scope of the model-free check are recorded
+in [`upstream-baseline.json`](upstream-baseline.json). DocVortex 0.6.0 wheels
+cover Linux x86-64/ARM64, Windows x86-64/ARM64, and macOS ARM64 (macOS 14+);
+there is no macOS Intel wheel or source distribution. Its Python range is
+3.11–3.14. These upstream wheel facts do not narrow this project's Rust or
+binding host-platform support.
+
+The latest tuple was checked model-free on macOS ARM64 with CPython 3.14 for
+CSV, MHTML, PDF flash/txt, and serialize/restore/Markdown-render operations.
+This is a focused smoke check, not a blanket compatibility claim: other
+platforms, Python versions, model-backed inference, formats, and tiers were not
+tested. Native CSV/TSV protocol, schema, and rendering behavior was unchanged
+between DocVortex 0.5.16 and 0.6.0. The 2.0.7 utility release also changes
+deduplication, version naming, and priority behavior; those differences remain
+pending alignment and are not silently adopted by the existing transport.
+
+The checked-in rich worker compatibility contract remains MinerU 4.0.12 /
+DocVortex 0.5.16; MinerU's declared utility range is `>=2.0.5,<3`, not an
+assertion that exactly 2.0.5 was previously tested. The latest upstream
+reference does not by itself mean the worker integration has migrated.
 
 The Rust `official` module and Python/Node rich binding surfaces accept the 28
 extensions listed in the [official SDK guide](official-sdk.md); 19 native
 formats require tier `flash`, while PDF and eight image formats support all
-four tiers. They use the external MinerU 4.0.12 / DocVortex 0.5.16 worker
-(Python 3.10–3.14). The Python facade itself supports Python 3.9+.
+four tiers. CSV and TSV currently parse natively in Rust; all other formats use
+the external MinerU 4.0.12 / DocVortex 0.5.16 worker (Python 3.10–3.14). CSV/TSV
+support UTF-8 with an optional BOM, Markdown and structured-content rendering,
+and restoration of their own middle JSON; other render targets are unsupported.
+This is a phased migration, not a fully native implementation. The Python
+facade itself supports Python 3.9+.
+
+The separate optional `local-inference` Cargo feature exposes a Rust CPU
+PP-DocLayoutV2 `LayoutSession` for raw model rows, using an operator-provided
+ONNX Runtime shared library and the pinned model cache. It does not replace the
+official worker, integrate with the parser/CLI/API routes, or provide official
+postprocessing, OCR, tier selection, or full-document inference. Without the
+feature, the optional ONNX Runtime dependencies and inference API are not
+enabled. Its Catmull-Rom image resize is not pixel-identical to the official
+Pillow BICUBIC preprocessing, so output parity is not claimed.
 
 The legacy `run`/`parse` APIs remain unchanged; rich result types are additive.
 See the [SDK guide](official-sdk.md) for binding build instructions and the
@@ -129,8 +165,8 @@ replacement for MinerU 3.4.5.
 
 This compatibility declaration covers OpenAI-compatible VLM HTTP transport for
 PDF pages, layout and block extraction, postprocessing, outputs, and layout
-preview. It excludes local inference, `mineru-api`, non-PDF input, and any
-general or full MinerU 3.4.5 compatibility claim.
+preview. It excludes integrating local inference, `mineru-api`, non-PDF input,
+and any general or full MinerU 3.4.5 compatibility claim.
 
 The `hybrid-http-client` token is not an alias for `vlm-http-client`, and it
 does not invoke the project-private AnyDoc native lane. Direct mode uses the

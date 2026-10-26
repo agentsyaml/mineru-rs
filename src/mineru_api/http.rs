@@ -1073,7 +1073,8 @@ mod tests {
         let submissions = Arc::new(AtomicUsize::new(0));
         let base = server(Router::new().route(
             "/tasks",
-            post(move |headers: HeaderMap| {
+            post(move |headers: HeaderMap, body: Bytes| {
+                assert!(!body.is_empty());
                 let attacker = payload_attacker.clone();
                 let call = submissions.fetch_add(1, Ordering::SeqCst);
                 async move {

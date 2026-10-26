@@ -20,6 +20,76 @@ For a concise comparison of supported formats and upstream versions, see the
 MinerU interfaces have dedicated [SDK](official-sdk.md) and
 [HTTP API](official-http.md) references.
 
+## Model artifact commands
+
+The CLI can display the pinned layout-model manifest and acquire or verify its
+artifacts:
+
+```sh
+mineru models show
+mineru models download --cache-dir "$HOME/.cache/mineru/models"
+mineru models verify --cache-dir "$HOME/.cache/mineru/models"
+mineru models download --cache-dir "$HOME/.cache/mineru/models" --offline
+```
+
+The cache directory is explicit and must be trusted by the current user. The
+manifest pins the repository revision and checks each artifact's path, size,
+and SHA-256. `download` may fetch missing files; `--offline` only uses cached
+files, and `verify` never accesses the network. These commands acquire/check
+model files only; they do not provide inference. The optional Rust library API
+can run raw PP-DocLayoutV2 inference, described below; this is not official
+parser integration or full document inference.
+
+## Optional raw layout inference
+
+Build with `cargo build --features local-inference` to enable the Rust library's
+CPU PP-DocLayoutV2 API. The feature gates optional ONNX Runtime dependencies;
+feature-free builds do not enable this inference API. Provide an existing
+absolute ONNX Runtime shared-library path at runtime; Python and Python model
+downloads are not required. `ModelCache` can prepare the pinned model/config
+with `DownloadPolicy::Auto`, or verify/use an existing cache with `Offline`.
+Cache directories must be trusted by the current user. Downloads use the
+system-configured HTTP proxies.
+
+```rust
+use image::DynamicImage;
+use mineru::{
+    inference::LayoutSession,
+    models::{DownloadPolicy, ModelCache},
+};
+
+async fn run(image: &DynamicImage) -> Result<(), Box<dyn std::error::Error>> {
+    let cache = ModelCache::new("/trusted/model-cache", DownloadPolicy::Auto)?;
+    let model = cache.ensure_layout().await?;
+    let mut session = LayoutSession::load(
+        model, "/absolute/path/to/libonnxruntime.dylib",
+    )?;
+    let rows = session.infer_raw(image)?;
+    println!("{rows:?}");
+    Ok(())
+}
+```
+
+`infer_raw` returns model-order rows of eight floats: class ID (one of 25
+classes, IDs 0–24), score, x1, y1, x2, y2, and two reading-order keys. Rows are
+validated but not filtered or reordered; this does not apply PaddleX filtering,
+official layout postprocessing, OCR, tiers, or parsing. Preprocessing resizes
+to 800×800 with Catmull-Rom, which is not pixel-identical to the official
+DocVortex cubic resize path; treat output parity as an outstanding risk.
+
+The runtime shared library is trusted executable code, not a sandboxed plugin.
+Use trusted model files, preferably from the verified cache. Input and resize
+limits do not impose a memory quota on ONNX Runtime graph execution.
+
+The ignored real-model smoke test needs a cached graph and an operator-provided
+runtime library (use an explicit absolute development path):
+
+```sh
+MINERU_TEST_ORT_DYLIB="/absolute/path/to/libonnxruntime.dylib" \
+MINERU_TEST_MODEL_CACHE="$HOME/.cache/mineru/models" \
+cargo test --locked --features local-inference --test local_inference optional_real_graph_smoke -- --ignored
+```
+
 ## Build and prerequisites
 
 Rust 1.89 is required:

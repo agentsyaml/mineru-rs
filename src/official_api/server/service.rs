@@ -20,8 +20,10 @@ pub(super) struct ServiceInner {
     pub jobs: Mutex<HashMap<String, Arc<AsyncMutex<JobRecord>>>>,
     pub queue: Mutex<VecDeque<String>>,
     pub notify: Notify,
+    pub cancel_notify: Notify,
     pub started: AtomicBool,
     pub stopping: AtomicBool,
+    pub ingest_slots: Arc<tokio::sync::Semaphore>,
     pub jobs_created: AtomicU64,
     pub pages_processed: AtomicU64,
     pub files_processed: AtomicU64,
@@ -76,10 +78,12 @@ impl OfficialService {
         Ok(Self {
             inner: Arc::new(ServiceInner {
                 parser,
+                ingest_slots: Arc::new(tokio::sync::Semaphore::new(store.ingest_concurrency())),
                 store,
                 jobs: Mutex::new(HashMap::new()),
                 queue: Mutex::new(VecDeque::new()),
                 notify: Notify::new(),
+                cancel_notify: Notify::new(),
                 started: AtomicBool::new(false),
                 stopping: AtomicBool::new(false),
                 jobs_created: AtomicU64::new(0),
@@ -99,16 +103,18 @@ impl OfficialService {
     }
     pub fn router(&self) -> axum::Router {
         let body_cap = self.inner.store.body_cap();
+        let ingest_cap = self.inner.store.ingest_body_cap();
         let job_routes = axum::Router::new()
             .route(
                 "/v1/parse/jobs",
-                axum::routing::post(jobs::create).get(jobs::list),
+                axum::routing::post(super::ingestion::create_job).get(jobs::list),
             )
             .route(
                 "/v1/parse/jobs/{id}",
                 axum::routing::get(jobs::get).delete(jobs::cancel),
             )
-            .with_state(self.inner.clone());
+            .with_state(self.inner.clone())
+            .layer(axum::extract::DefaultBodyLimit::max(ingest_cap));
         axum::Router::new()
             .merge(super::super::official_files_router(
                 self.inner.store.clone(),
@@ -181,6 +187,7 @@ impl OfficialService {
             }
         }
         self.inner.notify.notify_waiters();
+        self.inner.cancel_notify.notify_waiters();
     }
     pub async fn shutdown(&self) -> Result<(), OfficialError> {
         self.stop_admissions();

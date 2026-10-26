@@ -1,6 +1,7 @@
 mod artifacts;
 mod discovery;
 mod files;
+mod ingestion;
 mod jobs;
 mod service;
 mod store;

@@ -194,6 +194,9 @@ impl OfficialFileStore {
     pub(crate) fn body_cap(&self) -> usize {
         self.limits.lock().map(|v| v.body).unwrap_or(0)
     }
+    pub(crate) fn ingest_body_cap(&self) -> usize {
+        self.body_cap().min(INPUT_CAP as usize)
+    }
     pub(crate) fn zip_cap(&self) -> u64 {
         self.limits.lock().map(|v| v.zip).unwrap_or(0)
     }
@@ -277,6 +280,11 @@ impl OfficialFileStore {
     }
     pub(crate) fn max_concurrent(&self) -> usize {
         self.max_concurrent
+    }
+    pub(crate) fn ingest_concurrency(&self) -> usize {
+        self.max_concurrent
+            .min((INPUT_CAP / self.ingest_body_cap().max(1) as u64) as usize)
+            .max(1)
     }
     pub(crate) fn clear_retained(&self) {
         let removed = self

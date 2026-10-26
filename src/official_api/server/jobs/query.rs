@@ -127,6 +127,7 @@ pub(in crate::official_api::server) async fn cancel(
         ));
     }
     record.cancel.store(true, Ordering::Release);
+    s.cancel_notify.notify_waiters();
     if record.response.status == "queued" {
         record.response.status = "canceled".into();
         record.response.finished_at = Some(timestamp());

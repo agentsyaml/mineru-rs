@@ -37,6 +37,7 @@ jobs:
           python3 .github/scripts/check_cargo_audit.py self-test
           python3 .github/scripts/verify_container_release.py self-test
           python3 .github/scripts/container_smoke.py --self-check
+          python3 tools/compat/verify_latest_upstream.py --self-test
           python3 .github/scripts/source_snapshot.py self-test
           python3 .github/scripts/test_source_snapshot.py
 
@@ -109,6 +110,10 @@ jobs:
           cargo +1.89.0 test --locked -p mineru --features office --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
       - name: Check root package without default features
         run: cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features
+      - name: Check local inference feature without runtime assets
+        run: |
+          cargo +1.89.0 check --locked -p mineru --tests --features local-inference
+          cargo +1.89.0 test --locked -p mineru --lib --features local-inference inference::
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -171,6 +176,8 @@ jobs:
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc command::direct::tests -- --test-threads=4
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_output::tests -- --test-threads=4
           cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=4
+          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official:: -- --test-threads=4
+          cargo +1.89.0 test --locked -p mineru --lib --features local-inference --target x86_64-pc-windows-msvc inference::
       - name: Test Windows official worker Job Object lifecycle
         run: cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_worker::process::windows_tests -- --test-threads=1
       - name: Test Windows Office helper containment and conversion
@@ -181,6 +188,7 @@ jobs:
       - name: Check ARM64 Windows tests
         run: |
           cargo +1.89.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
+          cargo +1.89.0 check --locked -p mineru --tests --features local-inference --target aarch64-pc-windows-msvc
           cargo +1.89.0 check --locked -p mineru --features office,legacy-office --bin mineru-office-convert --target aarch64-pc-windows-msvc
 
   python-binding:

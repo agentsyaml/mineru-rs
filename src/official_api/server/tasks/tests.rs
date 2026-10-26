@@ -19,6 +19,125 @@ fn service(store: OfficialFileStore) -> super::super::service::OfficialService {
         .unwrap()
 }
 
+#[test]
+fn ingest_admission_is_bounded_and_released() {
+    let service = service(store());
+    let first = ingest_permit(&service.inner).unwrap();
+    let second = ingest_permit(&service.inner).unwrap();
+    assert_eq!(
+        ingest_permit(&service.inner).unwrap_err().code,
+        "capacity_exceeded"
+    );
+    drop(first);
+    assert!(ingest_permit(&service.inner).is_ok());
+    drop(second);
+}
+
+#[tokio::test]
+async fn stalled_body_times_out_and_releases_ingest_admission() {
+    let service = service(store());
+    let body = axum::body::Body::from_stream(futures_util::stream::once(std::future::pending::<
+        Result<bytes::Bytes, std::convert::Infallible>,
+    >()));
+    let permit = ingest_permit(&service.inner).unwrap();
+    let read = axum::body::to_bytes(body, 1024);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), read)
+            .await
+            .is_err()
+    );
+    drop(permit);
+    assert!(ingest_permit(&service.inner).is_ok());
+}
+
+#[tokio::test]
+async fn canceled_ingest_task_releases_admission() {
+    let service = service(store());
+    let inner = service.inner.clone();
+    let task = tokio::spawn(async move {
+        let _permit = ingest_permit(&inner).unwrap();
+        std::future::pending::<()>().await;
+    });
+    task.abort();
+    let _ = task.await;
+    assert!(ingest_permit(&service.inner).is_ok());
+}
+
+#[tokio::test]
+async fn job_route_rejects_non_json_content_type() {
+    let service = service(store());
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .header("content-type", "text/plain")
+        .body(axum::body::Body::from("{}"))
+        .unwrap();
+    let error = super::super::ingestion::create_job(State(service.inner.clone()), request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(ingest_permit(&service.inner).is_ok());
+}
+
+#[tokio::test]
+async fn job_ingress_deadline_releases_admission() {
+    let service = service(store());
+    let body = axum::body::Body::from_stream(futures_util::stream::once(std::future::pending::<
+        Result<bytes::Bytes, std::convert::Infallible>,
+    >()));
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap();
+    let error = super::super::ingestion::create_job_with_timeout(
+        State(service.inner.clone()),
+        request,
+        std::time::Duration::from_millis(10),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::REQUEST_TIMEOUT);
+    assert!(ingest_permit(&service.inner).is_ok());
+}
+
+#[tokio::test]
+async fn multipart_deadline_and_oversized_raw_body_release_admission() {
+    let service = service(store());
+    let body = axum::body::Body::from_stream(futures_util::stream::once(std::future::pending::<
+        Result<bytes::Bytes, std::convert::Infallible>,
+    >()));
+    let request = axum::http::Request::builder()
+        .header("content-type", "multipart/form-data; boundary=x")
+        .body(body)
+        .unwrap();
+    let permit = ingest_permit(&service.inner).unwrap();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            submission_from_request(&service.inner, request),
+        )
+        .await
+        .is_err()
+    );
+    drop(permit);
+    assert!(ingest_permit(&service.inner).is_ok());
+
+    let oversized = vec![0; service.inner.body_limit() + 1];
+    let request = axum::http::Request::builder()
+        .uri("/?filename=a.pdf")
+        .header("content-type", "application/octet-stream")
+        .header("content-length", oversized.len().to_string())
+        .body(axum::body::Body::from(oversized))
+        .unwrap();
+    let permit = ingest_permit(&service.inner).unwrap();
+    let error = submission_from_request(&service.inner, request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+    drop(permit);
+    assert!(ingest_permit(&service.inner).is_ok());
+}
+
 fn json_request(body: serde_json::Value) -> axum::http::Request<axum::body::Body> {
     axum::http::Request::builder()
         .method("POST")

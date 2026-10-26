@@ -2,6 +2,7 @@ use crate::command::OfficialWorkerMode;
 use std::{fmt, path::PathBuf, time::Duration};
 
 pub(crate) const RETAINED_RESULT_CAP: usize = 64 * 1024 * 1024;
+pub(crate) const INPUT_BYTE_CAP: usize = 200 * 1024 * 1024;
 pub(crate) const BUNDLE_BYTE_CAP: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone)]

@@ -4,17 +4,19 @@
 
 将 PDF、图像和 Office 文档解析为 Markdown。本项目提供 Rust 库、CLI 和 HTTP API
 服务，PDF 渲染由 Rust 实现。旧版 CLI/API 与 Python/Node `run`/`parse` 使用远程
-MinerU 兼容 VLM（MinerU 3.4.5 协议基线）；rich SDK 则使用用户另行准备的
-MinerU 4.0.12 / DocVortex 0.5.16 Python worker。
+MinerU 兼容 VLM（MinerU 3.4.5 协议基线）；rich SDK 还包括 Rust 原生 CSV/TSV
+解析，其他格式使用另行准备的 Python worker。当前 worker 契约为 MinerU 4.0.12 /
+DocVortex 0.5.16；最新 DocVortex 0.6.0 仅有不加载模型的 smoke 检查。详见
+[兼容性说明](docs/compatibility.md)。
 
 选择使用方式：
 
 - **Python / Node**：安装已发布的软件包；`parse()` 返回 Markdown，`run()` 写出完整结果目录。
-- **官方 rich SDK**：Rust、Python 或 Node SDK 需另行准备 Python 3.10–3.14 worker（`mineru==4.0.12`、`docvortex==0.5.16`），支持原生格式；详见[SDK 指南](docs/official-sdk.md)。
+- **官方 rich SDK**：Rust、Python 或 Node SDK 中 CSV/TSV 使用 Rust 解析，其他格式需另行准备 worker；详见[SDK 指南](docs/official-sdk.md)。
 - **Rust CLI / API 服务**：从准备好的源码检出构建。根工作区 Cargo 补丁不会传递给消费者，因此该 crate 不能从 crates.io 安装。
 - **本地转换**：CLI `--backend local` 通过内置 Rust helper 支持干净文本 PDF 和部分旧格式；只输出 Markdown，不生成版面 JSON，也不调用 VLM。
 
-当前源码检出目标版本为 0.3.1。安装指定版本前，请查看
+当前源码检出目标版本为 0.4.0。安装指定版本前，请查看
 [发布指南](docs/releasing.md#current-release-boundary)确认软件包和发布可用性。
 
 详细说明：[使用指南](docs/usage.md)、[兼容性](docs/compatibility.md)、

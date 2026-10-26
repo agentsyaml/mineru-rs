@@ -3,6 +3,7 @@
 mod direct;
 #[doc(hidden)]
 pub mod env;
+mod model_cli;
 mod official_cli;
 #[doc(hidden)]
 pub mod plain;
@@ -1774,6 +1775,9 @@ impl CliOutput {
 pub async fn run_cli(argv: Vec<OsString>, context: RunContext) -> i32 {
     if argv.first().and_then(|value| value.to_str()) == Some("official") {
         return official_cli::run(argv).await;
+    }
+    if argv.first().and_then(|value| value.to_str()) == Some("models") {
+        return model_cli::run(argv).await;
     }
     let args = std::iter::once(OsString::from("mineru")).chain(argv);
     // Same as `Cli::try_parse_from`, but on the styled command so help/version/errors

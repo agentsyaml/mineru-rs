@@ -26,9 +26,11 @@ include = [
     "LICENSE-APACHE",
     "docs/usage.md",
     "docs/compatibility.md",
+    "docs/upstream-baseline.json",
     "docs/official-sdk.md",
     "docs/official-http.md",
     "tests/fixtures/pdf/minimal.pdf",
+    "tests/fixtures/legacy/minimal.csv",
     "tests/fixtures/vlm/layout.txt",
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_middle.json",
@@ -60,6 +62,7 @@ path = "src/bin/mineru-office-convert.rs"
 default = []
 office = ["dep:office2pdf"]
 legacy-office = ["dep:anydoc", "dep:pdf-inspector"]
+local-inference = ["dep:ort", "dep:libloading"]
 
 [dependencies]
 anydoc = { version = "=0.1.9", optional = true }
@@ -81,7 +84,9 @@ hayro-jpeg2000 = { version = "=0.2.0", default-features = false }
 hayro-write = "=0.4.0"
 html-escape = "0.2"
 lopdf = { version = "=0.44.0", default-features = false }
+libloading = { version = "=0.8.9", optional = true }
 office2pdf = { version = "=0.6.5", optional = true }
+ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["std", "load-dynamic"] }
 pdf-inspector = { version = "=1.14.2", optional = true, default-features = false }
 pdf-writer = "=0.14.0"
 regex = "1"
@@ -90,6 +95,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
+unicase = "2.9.0"
 tempfile = "3"
 time = { version = "=0.3.55", features = ["formatting", "parsing"] }
 tiff = "=0.11.3"
@@ -125,7 +131,7 @@ exclude = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"

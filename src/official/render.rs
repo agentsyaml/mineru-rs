@@ -6,6 +6,8 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, time::Instant};
+#[path = "native_render.rs"]
+mod native_render;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -230,6 +232,9 @@ pub(crate) async fn serialize(
     runtime: &OfficialRuntime,
     skip_defaults: bool,
 ) -> Result<Value, OfficialError> {
+    if result.metadata.bundle_name == "native-csv" {
+        return Ok(native_render::serialize(result, skip_defaults));
+    }
     let response = operation(
         runtime,
         "serialize",
@@ -245,6 +250,10 @@ pub(crate) async fn serialize_json(
     runtime: &OfficialRuntime,
     skip_defaults: bool,
 ) -> Result<String, OfficialError> {
+    if result.metadata.bundle_name == "native-csv" {
+        let value = serialize(result, runtime, skip_defaults).await?;
+        return serde_json::to_string(&value).map_err(|e| error(e.to_string()));
+    }
     let response = operation(
         runtime,
         "serialize",
@@ -270,6 +279,28 @@ pub(crate) async fn restore(
     assets: BTreeMap<String, Bytes>,
     json_input: bool,
 ) -> Result<OfficialResult, OfficialError> {
+    let middle = if json_input {
+        let json = middle
+            .as_str()
+            .ok_or_else(|| error("restore JSON input missing"))?;
+        if json.len() > crate::official::runtime::RETAINED_RESULT_CAP {
+            return Err(limit_error());
+        }
+        let (route, original) = crate::official::native::restore_route::inspect_json_bounded(
+            json.to_owned(),
+            runtime.timeout,
+        )
+        .await?;
+        if route.is_native_csv() {
+            return crate::official::native::csv::restore_json(original, assets, runtime.timeout)
+                .await;
+        }
+        Value::String(original)
+    } else if crate::official::native::csv::is_native_middle(&middle) {
+        return crate::official::native::csv::restore_middle(middle, assets, runtime.timeout).await;
+    } else {
+        middle
+    };
     let payload = json!({"middle_json":middle,"json_input":json_input,"assets":assets.keys().collect::<Vec<_>>()});
     let bundle = operation_bundle(runtime, "restore", payload, &assets).await?;
     OfficialResult::from_bundle(bundle.path(), crate::official::runtime::RETAINED_RESULT_CAP)
@@ -283,6 +314,9 @@ impl OfficialResult {
         options: OfficialRenderOptions,
     ) -> Result<OfficialRendered, OfficialError> {
         options.validate(format)?;
+        if self.metadata.bundle_name == "native-csv" {
+            return native_render::render(self, format, &options);
+        }
         let payload = json!({"middle_json":self.middle,"format":format.as_str(),"options":options,"assets":self.assets.keys().collect::<Vec<_>>()});
         let bundle = operation_bundle(runtime, "render", payload, &self.assets).await?;
         let root = bundle.path();

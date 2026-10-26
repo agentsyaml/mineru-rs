@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::{OfficialRequest, OfficialWorker};
 use super::{
     PYTHON_SHIM, PYTHON_WORKER_FILES, PythonShim, STDERR_CAP, process::with_truncated_diagnostic,
-    read_diagnostic,
+    read_diagnostic, stage_input,
 };
 
 #[cfg(unix)]
@@ -48,6 +48,20 @@ fn python_shim_materializes_and_cleans_up() {
 
     drop(shim);
     assert!(!directory.exists());
+}
+
+#[tokio::test]
+async fn input_staging_obeys_an_expired_deadline() {
+    let error = stage_input(
+        bytes::Bytes::from_static(b"input"),
+        "pdf",
+        Vec::new(),
+        false,
+        Instant::now(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("staging deadline"));
 }
 
 #[tokio::test]
@@ -103,6 +117,7 @@ async fn verbose_stderr_does_not_reject_a_valid_response() {
         &temp.path().join("verbose-worker"),
         r#"#!/bin/sh
 request=$(cat)
+printf '%s' "$request" | python3 -c 'import json,os,sys; r=json.load(sys.stdin); assert os.path.isdir(r["operation_assets"])'
 request_id=$(printf '%s' "$request" | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_id"])')
 python3 -c 'import sys; sys.stderr.buffer.write(b"x" * 65537 + bytes([255]))'
 printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.12","schema_version":"2.0","bundle_name":"hybrid-v4","error":null}\n' "$request_id"
@@ -110,11 +125,13 @@ printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok
     );
     let worker = OfficialWorker::new(Some(script)).unwrap();
 
+    let mut request = test_request();
+    request.operation = Some("render".into());
     let result = worker
         .run(
             b"input",
             "pdf",
-            test_request(),
+            request,
             Instant::now() + Duration::from_secs(60),
         )
         .await;

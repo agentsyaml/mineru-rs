@@ -1,8 +1,9 @@
 # Rich official SDK
 
-The rich SDK parses documents with the pinned official MinerU worker and returns
-an owned result with JSON, Markdown, and assets. The existing `run`/`parse`
-interfaces remain unchanged (`parse` returns Markdown and warnings).
+The rich SDK returns owned results with JSON, Markdown, and assets. Most formats
+use the pinned official MinerU worker; CSV and TSV currently use a Rust-native
+parser. The existing `run`/`parse` interfaces remain unchanged (`parse` returns
+Markdown and warnings).
 
 Build the bindings from this checkout to use the rich API. For Python, build
 and install the wheel with the commands in the
@@ -13,10 +14,15 @@ Registry and release availability is covered by the [release guide](releasing.md
 
 ## Runtime and compatibility
 
-The worker requires `mineru==4.0.12` and `docvortex==0.5.16` with their upstream
-dependencies. Use Python 3.10–3.14: the worker uses PEP 604 union annotations
-and upstream MinerU requires `>=3.10,<3.15`. The Python facade itself supports
-Python 3.9+. Python and model assets are not bundled. Supply trusted absolute Python,
+The checked-in worker compatibility contract is `mineru==4.0.12` and
+`docvortex==0.5.16` with upstream dependencies. The latest upstream reference
+is DocVortex 0.6.0 with `mineru-vl-utils` 2.0.7; it has only been checked by a
+model-free smoke test on macOS ARM64 / CPython 3.14. See the
+[compatibility record](compatibility.md#latest-upstream-reference-and-rich-sdk--official-http-api)
+for versions, wheel availability, and the untested scope. DocVortex 0.6.0
+requires Python 3.11–3.14, while the checked-in worker contract uses Python
+3.10–3.14. The Python facade itself supports Python 3.9+. Python and model
+assets are not bundled. Supply trusted absolute Python,
 config, and model-directory paths through `OfficialRuntime` (Rust),
 `OfficialRuntime` (Python), or `OfficialRuntimeOptions` (Node). These paths are
 runtime configuration, not result data; Rust `Debug` and Python `repr` hide
@@ -52,6 +58,16 @@ Core recognizes 28 filename extensions:
 | PDF | `.pdf` | `flash`, `basic`, `standard`, or `advanced` |
 | Images (8) | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tiff`, `.jp2` | All four tiers |
 | Native formats (19) | `.doc`, `.docx`, `.ppt`, `.pptx`, `.xls`, `.xlsx`, `.rtf`, `.odt`, `.ods`, `.odp`, `.html`, `.htm`, `.shtml`, `.mhtml`, `.mht`, `.csv`, `.tsv`, `.epub`, `.ofd` | `flash` only |
+
+CSV and TSV are currently parsed by Rust in `OfficialParser`; parsing accepts
+UTF-8, optionally with a UTF-8 BOM, and rejects other encodings. It does not
+invoke Python or support VLM/source-context options. Their results can render as
+Markdown or structured content and serialize/restore their own middle JSON;
+other render targets are unsupported. Other native formats in the table still
+use the official Python worker. Native support here does not mean the SDK is
+fully native, and does not change the legacy default `run`/`parse` route.
+The separate optional raw PP-DocLayoutV2 API is not part of this parser; see
+the [local inference notes](usage.md#optional-raw-layout-inference).
 
 This does not widen the existing MinerU 3.4.5 tiered VLM route, which retains
 its prior PDF/eight-image interface. Other legacy CLI routes, such as Office or

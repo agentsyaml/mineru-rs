@@ -151,6 +151,8 @@ jobs:
         run: |
           cargo +1.89.0 test --locked -p mineru --all-targets \
             --features office,legacy-office -- --test-threads=4
+          cargo +1.89.0 check --locked -p mineru --tests --features local-inference
+          cargo +1.89.0 test --locked -p mineru --lib --features local-inference inference::
           cargo +1.89.0 build --locked --release -p mineru \
             --features office,legacy-office --bins
       - name: Record passing source-build evidence

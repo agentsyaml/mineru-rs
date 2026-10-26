@@ -5,7 +5,6 @@ mod tests;
 
 use std::{
     fmt,
-    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
@@ -174,6 +173,22 @@ impl OfficialPersistentWorker {
         &self,
         input: &[u8],
         suffix: &str,
+        request: OfficialRequest,
+        deadline: Instant,
+    ) -> Result<OfficialBundle, String> {
+        self.run_owned(
+            bytes::Bytes::copy_from_slice(input),
+            suffix,
+            request,
+            deadline,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_owned(
+        &self,
+        input: bytes::Bytes,
+        suffix: &str,
         mut request: OfficialRequest,
         deadline: Instant,
     ) -> Result<OfficialBundle, String> {
@@ -192,18 +207,10 @@ impl OfficialPersistentWorker {
             return Err("official persistent worker is shut down".into());
         }
 
-        let temporary = tempfile::tempdir().map_err(|e| format!("official worker tempdir: {e}"))?;
-        let input_path = temporary.path().join(format!("input.{suffix}"));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&input_path)
-            .map_err(|e| format!("official worker input snapshot: {e}"))?;
-        file.write_all(input)
-            .and_then(|_| file.flush())
-            .map_err(|e| format!("official worker input snapshot: {e}"))?;
+        let stage = super::stage_input(input, suffix, Vec::new(), false, deadline).await?;
+        let temporary = stage.temporary;
         let bundle = temporary.path().join(crate::hybrid_v4_output::BUNDLE_NAME);
-        request.input_path = input_path;
+        request.input_path = stage.input_path;
         request.bundle_path = bundle;
         if Instant::now() >= deadline {
             drop(permit);

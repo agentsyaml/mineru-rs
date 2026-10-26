@@ -98,6 +98,8 @@ PYTHON_SCRIPTS = {"mineru": "mineru_rs._cli:main", "mineru-rs": "mineru_rs._cli:
 NODE_ROOT_BIN = {"mineru": "bin/mineru.js", "mineru-rs": "bin/mineru.js"}
 WHEEL_ENTRY_POINTS = b"[console_scripts]\nmineru=mineru_rs._cli:main\nmineru-rs=mineru_rs._cli:main\n"
 CRATE_FIXTURES = {
+    "docs/upstream-baseline.json",
+    "tests/fixtures/legacy/minimal.csv",
     "tests/fixtures/pdf/minimal.pdf",
     "tests/fixtures/vlm/layout.txt",
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",

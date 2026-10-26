@@ -5,23 +5,25 @@
 Parse PDF, image, and Office documents into Markdown with a Rust library, CLI,
 and HTTP API server. PDF rendering is implemented in Rust. The legacy CLI/API
 and Python/Node `run`/`parse` paths use a remote MinerU-compatible VLM
-(MinerU 3.4.5 protocol baseline); the richer official SDK uses a separate,
-user-prepared MinerU 4.0.12 / DocVortex 0.5.16 Python worker.
+(MinerU 3.4.5 protocol baseline); rich parsing also includes Rust-native CSV/TSV,
+while other formats use a separate Python worker. The checked-in worker contract
+is MinerU 4.0.12 / DocVortex 0.5.16; the latest DocVortex 0.6.0 reference has
+model-free smoke coverage only. See [compatibility](docs/compatibility.md).
 
 Choose a route:
 
 - **Python or Node**: install the published package and use `parse()` for
   Markdown or `run()` for the complete output tree. See the language examples.
-- **Rich official SDK**: use the Rust, Python, or Node SDK with a separately
-  prepared Python 3.10–3.14 worker (`mineru==4.0.12`, `docvortex==0.5.16`);
-  it supports native formats. See the [SDK guide](docs/official-sdk.md).
+- **Rich official SDK**: use the Rust, Python, or Node SDK; CSV/TSV parse in
+  Rust and other formats use a separately prepared worker. See the
+  [SDK guide](docs/official-sdk.md) for its runtime contract.
 - **Rust CLI / API server**: build from a prepared checkout. The crate is not
   available from crates.io because root workspace patches do not reach consumers.
 - **Local conversion**: CLI `--backend local` supports clean text PDFs and
   selected legacy formats through the bundled Rust helper. It produces
   Markdown only, without layout JSON or a VLM call.
 
-This checkout targets 0.3.1. Check the [release guide](docs/releasing.md#current-release-boundary)
+This checkout targets 0.4.0. Check the [release guide](docs/releasing.md#current-release-boundary)
 for current package and release availability before installing a specific version.
 
 See [usage](docs/usage.md), [compatibility](docs/compatibility.md),

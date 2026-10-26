@@ -6,6 +6,8 @@ mod document_limits;
 mod error;
 mod hybrid_v4_output;
 mod image_pipeline;
+#[cfg(feature = "local-inference")]
+pub mod inference;
 #[doc(hidden)]
 pub mod input_prepare;
 mod layout;
@@ -14,6 +16,7 @@ mod layout;
 pub mod legacy_office;
 #[doc(hidden)]
 pub mod mineru_api;
+pub mod models;
 #[cfg(feature = "legacy-office")]
 mod native_pdf;
 mod office_workers;

@@ -29,12 +29,14 @@ use query::{IngestQuery, parse_query};
 mod tests;
 
 pub(super) fn router(state: Arc<ServiceInner>) -> Router {
+    let body_cap = state.store.ingest_body_cap();
     Router::new()
         .route("/v1/tasks", post(create))
         .route("/v1/tasks/{id}", get(status).delete(cancel))
         .route("/v1/tasks/{id}/result", get(task_result))
         .route("/v1/file_parse", post(file_parse))
         .with_state(state)
+        .layer(axum::extract::DefaultBodyLimit::max(body_cap))
 }
 fn parse_response_format(value: Option<&str>) -> Result<&'static str, WireError> {
     match value {
@@ -92,8 +94,42 @@ async fn create(
     State(s): State<Arc<ServiceInner>>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Response, WireError> {
-    let submission = submission_from_request(&s, request).await?;
-    submit(&s, submission).await
+    if let Some(error) = stopping(&s) {
+        return Err(error);
+    }
+    let _ingest = ingest_permit(&s)?;
+    let submission = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        submission_from_request(&s, request),
+    )
+    .await
+    .map_err(|_| ingest_timeout())??;
+    let result = submit(&s, submission).await;
+    drop(_ingest);
+    result
+}
+
+pub(super) fn ingest_permit(
+    s: &ServiceInner,
+) -> Result<tokio::sync::OwnedSemaphorePermit, WireError> {
+    s.ingest_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| WireError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "capacity_exceeded",
+            message: "Request body capacity is exhausted.",
+            param: None,
+        })
+}
+
+pub(super) fn ingest_timeout() -> WireError {
+    WireError {
+        status: StatusCode::REQUEST_TIMEOUT,
+        code: "body_timeout",
+        message: "Request body was not received before the deadline.",
+        param: None,
+    }
 }
 
 /// Submit through the shared admission pipeline and return HTTP 202 with the
@@ -304,6 +340,9 @@ async fn file_parse(
     Query(query): Query<FileParseQuery>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Response, WireError> {
+    if let Some(error) = stopping(&s) {
+        return Err(error);
+    }
     let timeout = query.wait_timeout.unwrap_or(300);
     if !(1..=3600).contains(&timeout) {
         return Err(WireError::bad(
@@ -315,12 +354,19 @@ async fn file_parse(
     // JSON bodies reject parse options in the query string inside
     // `submission_from_request`; multipart and octet-stream legitimately read
     // their upload options from the query string.
-    let mut submission = submission_from_request(&s, request).await?;
+    let _ingest = ingest_permit(&s)?;
+    let mut submission = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        submission_from_request(&s, request),
+    )
+    .await
+    .map_err(|_| ingest_timeout())??;
     // Upstream file_parse forces a zip output when the caller asks for one.
     if format == "zip" && !submission.output_formats.contains(&OutputFormat::Zip) {
         submission.output_formats.push(OutputFormat::Zip);
     }
     let (_, Json(job)) = prepare_job(&s, submission)?;
+    drop(_ingest);
     let id = job.job_id.clone();
     wait_for_terminal(&s, &id, timeout).await;
     match serve_result(s.clone(), id.clone(), Some(format)).await {
@@ -406,6 +452,6 @@ async fn read_body(body: axum::body::Body, limit: usize) -> Result<bytes::Bytes,
 
 impl ServiceInner {
     fn body_limit(&self) -> usize {
-        self.store.body_cap()
+        self.store.ingest_body_cap()
     }
 }

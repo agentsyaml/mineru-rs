@@ -10,11 +10,7 @@ use crate::{
     },
     official_api::wire::*,
 };
-use axum::{
-    Json,
-    extract::{State, rejection::JsonRejection},
-    http::StatusCode,
-};
+use axum::{Json, extract::State, http::StatusCode};
 use base64::Engine;
 use std::sync::{
     Arc,
@@ -25,14 +21,15 @@ pub(super) mod output;
 #[cfg(test)]
 mod progress_tests;
 mod query;
+mod tier;
 use output::publish_outputs;
 pub(super) use query::{cancel, get, list};
 
+#[cfg(test)]
 pub(super) async fn create(
     State(s): State<Arc<ServiceInner>>,
-    req: Result<Json<JobCreate>, JsonRejection>,
+    req: Result<Json<JobCreate>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<JobResponse>), WireError> {
-    // Shutdown precedence: an in-flight shutdown wins over body validation.
     if s.stopping.load(Ordering::Acquire) {
         return Err(error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -41,7 +38,15 @@ pub(super) async fn create(
         ));
     }
     let Json(req) = req.map_err(|_| WireError::bad("body", "Invalid job request."))?;
-    prepare_job(&s, Submission::from_create(req))
+    create_submission(&s, req)
+}
+
+#[cfg(test)]
+fn create_submission(
+    s: &ServiceInner,
+    req: JobCreate,
+) -> Result<(StatusCode, Json<JobResponse>), WireError> {
+    prepare_job(s, Submission::from_create(req))
 }
 
 /// Shared admission pipeline for every submission route: stopping check,
@@ -179,8 +184,8 @@ pub(super) fn prepare_job(
                 )
             }
         };
-        let tier = requested_tier(req.tier, &name);
-        if is_native(&name) && tier != OfficialTier::Flash {
+        let tier = tier::requested_tier(req.tier, &name);
+        if tier::is_native(&name) && tier != OfficialTier::Flash {
             return Err(WireError::bad(
                 "tier",
                 "Native formats require the flash tier.",
@@ -307,7 +312,20 @@ pub(super) async fn run_job(s: Arc<ServiceInner>, id: String) {
             break;
         }
         shared.lock().await.response.files[index].status = "running".into();
-        let permit = match s.store.shared_gate().acquire().await {
+        let permit = loop {
+            let notified = s.cancel_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if canceled.load(Ordering::Acquire) || s.stopping.load(Ordering::Acquire) {
+                break None;
+            }
+            tokio::select! {
+                permit = s.store.shared_gate().acquire() => break Some(permit),
+                _ = &mut notified => {}
+            }
+        };
+        let Some(permit) = permit else { break };
+        let permit = match permit {
             Ok(v) => v,
             Err(_) => {
                 failures += 1;
@@ -449,33 +467,6 @@ pub(super) fn update_progress(job: &mut JobRecord) {
         .iter()
         .filter(|file| file.status == "failed")
         .count() as u32;
-}
-fn requested_tier(request: Option<Tier>, name: &str) -> OfficialTier {
-    request.map(convert_tier).unwrap_or_else(|| {
-        if is_native(name) {
-            OfficialTier::Flash
-        } else {
-            OfficialTier::Standard
-        }
-    })
-}
-fn convert_tier(tier: Tier) -> OfficialTier {
-    match tier {
-        Tier::Flash => OfficialTier::Flash,
-        Tier::Basic => OfficialTier::Basic,
-        Tier::Standard => OfficialTier::Standard,
-        Tier::Advanced => OfficialTier::Advanced,
-    }
-}
-fn is_native(name: &str) -> bool {
-    !matches!(
-        name.rsplit('.')
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str(),
-        "pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tiff" | "jp2"
-    )
 }
 fn timestamp() -> String {
     time::OffsetDateTime::now_utc()

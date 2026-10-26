@@ -6,7 +6,10 @@ with the CLI and SDK. This API returns requested artifacts, not an in-memory
 SDK `OfficialResult`.
 
 Jobs use the separately installed MinerU 4.0.12 / DocVortex 0.5.16 Python worker
-(Python 3.10–3.14); the server does not perform local model inference. Existing
+(Python 3.10–3.14); the server does not perform local model inference. The
+latest DocVortex reference is 0.6.0 and has only model-free smoke coverage;
+see the [upstream compatibility record](compatibility.md#latest-upstream-reference-and-rich-sdk--official-http-api).
+Existing
 routes remain available alongside `/v1`.
 
 ## Enablement and trusted runtime

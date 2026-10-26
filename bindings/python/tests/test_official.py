@@ -148,9 +148,7 @@ class OfficialNativeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.addAsyncCleanup(parser.shutdown)
                 parsed = await parser.parse_rich(csv, options=mineru_rs.OfficialParseOptions(
                     tier=mineru_rs.OfficialTier.FLASH, ocr_mode=mineru_rs.OfficialOcrMode.AUTO,
-                    image_analysis=True, page_range=None,
-                    source_context=mineru_rs.HtmlSourceContext(),
-                    vlm_config=mineru_rs.OfficialVlmConfig()))
+                    image_analysis=True))
                 self.assertIn("alpha", parsed.markdown)
                 self.assertEqual(parsed.version_metadata.schema_version, "2.0")
                 self.assertEqual(parsed.pages, parsed.export_pages())
