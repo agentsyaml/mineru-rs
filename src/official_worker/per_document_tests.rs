@@ -3,7 +3,8 @@ use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 #[cfg(unix)]
 use super::{OfficialRequest, OfficialWorker};
