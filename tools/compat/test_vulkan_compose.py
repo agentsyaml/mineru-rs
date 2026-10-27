@@ -55,7 +55,7 @@ class VulkanComposeTest(unittest.TestCase):
             self.assertEqual(service["ports"][0]["published"], "30001")
             self.assertEqual(service["ports"][0]["host_ip"], "127.0.0.1")
             self.assertTrue(service["volumes"][0]["read_only"])
-            self.assertFalse(service["volumes"][0]["bind"]["create_host_path"])
+            self.assertFalse(service["volumes"][0].get("bind", {}).get("create_host_path", False))
             self.assertIn("/models/model.gguf", service["command"])
             self.assertIn("/models/mmproj.gguf", service["command"])
             self.assertIn("mineru-vlm", service["command"])
