@@ -1980,9 +1980,7 @@ fn task_vlm_config(
         config.server_url = Some(url.parse().map_err(|_| ())?);
         config.invalid_server_url = false;
         config.api_key = None;
-        config
-            .headers
-            .retain(|header| !header.name().eq_ignore_ascii_case("authorization"));
+        config.headers.clear();
     }
     Ok(config)
 }
@@ -5629,7 +5627,7 @@ mod tests {
     }
 
     #[test]
-    fn task_server_url_overrides_invalid_default_without_inherited_credentials() {
+    fn task_server_url_overrides_invalid_default_without_inherited_headers() {
         let config = VlmHttpConfig {
             invalid_server_url: true,
             api_key: Some("api-key-secret".into()),
@@ -5637,6 +5635,8 @@ mod tests {
                 crate::VlmHeader::new("Authorization", "Bearer header-secret").unwrap(),
                 crate::VlmHeader::new("X-Trace", "kept").unwrap(),
                 crate::VlmHeader::new("AUTHORIZATION", "Basic second-secret").unwrap(),
+                crate::VlmHeader::new("X-Api-Key", "header-api-secret").unwrap(),
+                crate::VlmHeader::new("Cookie", "session-secret").unwrap(),
             ],
             ..Default::default()
         };
@@ -5644,17 +5644,27 @@ mod tests {
         assert!(!config.invalid_server_url);
         assert_eq!(config.authorization(), None);
         assert_eq!(config.api_key, None);
-        assert_eq!(config.headers.len(), 1);
-        assert_eq!(config.headers[0].name(), "X-Trace");
-        assert_eq!(config.headers[0].value(), "kept");
+        assert!(config.headers.is_empty());
         assert_eq!(
             config.server_url.unwrap().as_str(),
             "http://127.0.0.1:8000/"
         );
     }
 
+    #[test]
+    fn task_vlm_config_preserves_headers_without_server_override() {
+        let config = VlmHttpConfig {
+            headers: vec![crate::VlmHeader::new("X-Trace", "kept").unwrap()],
+            ..Default::default()
+        };
+        let config = task_vlm_config(config, None).unwrap();
+        assert_eq!(config.headers.len(), 1);
+        assert_eq!(config.headers[0].name(), "X-Trace");
+        assert_eq!(config.headers[0].value(), "kept");
+    }
+
     #[tokio::test]
-    async fn task_server_override_sends_non_auth_headers_but_no_credentials() {
+    async fn task_server_override_sends_no_inherited_headers() {
         let seen = Arc::new(Mutex::new(None));
         let captured = seen.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5678,6 +5688,9 @@ mod tests {
                 headers: vec![
                     crate::VlmHeader::new("Authorization", "Bearer header-secret").unwrap(),
                     crate::VlmHeader::new("X-Trace", "kept").unwrap(),
+                    crate::VlmHeader::new("AUTHORIZATION", "Basic second-secret").unwrap(),
+                    crate::VlmHeader::new("X-Api-Key", "header-api-secret").unwrap(),
+                    crate::VlmHeader::new("Cookie", "session-secret").unwrap(),
                 ],
                 ..Default::default()
             },
@@ -5693,7 +5706,9 @@ mod tests {
         .unwrap();
         let headers = seen.lock().unwrap().take().unwrap();
         assert!(headers.get(header::AUTHORIZATION).is_none());
-        assert_eq!(headers["x-trace"], "kept");
+        assert!(headers.get("x-trace").is_none());
+        assert!(headers.get("x-api-key").is_none());
+        assert!(headers.get(header::COOKIE).is_none());
         server.abort();
     }
 

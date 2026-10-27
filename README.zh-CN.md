@@ -21,6 +21,7 @@ DocVortex 0.5.16；最新 DocVortex 0.6.0 仅有不加载模型的 smoke 检查�
 
 详细说明：[使用指南](docs/usage.md)、[兼容性](docs/compatibility.md)、
 [SDK](docs/official-sdk.md) 和[官方 HTTP API](docs/official-http.md)。
+See the English [Vulkan Compose guide](docs/vulkan.md) for a local `llama.cpp` VLM server.
 
 ## 快速开始
 

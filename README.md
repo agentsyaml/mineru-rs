@@ -28,6 +28,7 @@ for current package and release availability before installing a specific versio
 
 See [usage](docs/usage.md), [compatibility](docs/compatibility.md),
 [SDK](docs/official-sdk.md), and [official HTTP API](docs/official-http.md).
+For a local Vulkan `llama.cpp` VLM server, see the [Vulkan Compose guide](docs/vulkan.md).
 
 ## Quickstart
 

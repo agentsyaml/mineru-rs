@@ -29,6 +29,10 @@ jobs:
         run: |
           actionlint="$(go env GOPATH)/bin/actionlint"
           "$actionlint"
+      - name: Check Vulkan Compose profiles
+        run: |
+          docker compose version
+          python3 tools/compat/test_vulkan_compose.py
       - name: Run release script self-tests
         run: |
           python3 .github/scripts/verify_release.py self-test

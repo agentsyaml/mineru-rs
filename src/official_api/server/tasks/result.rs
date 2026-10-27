@@ -141,48 +141,122 @@ async fn zip_response(
     let bytes = if payload.files.len() == 1 {
         sources.into_iter().next().expect("one zip").1
     } else {
-        combine_zips(&payload, &sources)?
+        // The archive scanner's production entry limit is 100,000; retain it
+        // across all inputs and the generated manifest.
+        combine_zips(&payload, &sources, s.store.zip_cap(), 100_000)?
     };
     zip_http(id, &payload.status, bytes)
 }
 
-fn combine_zips(payload: &JobResponse, sources: &[(usize, Bytes)]) -> Result<Bytes, WireError> {
+fn combine_zips(
+    payload: &JobResponse,
+    sources: &[(usize, Bytes)],
+    cap: u64,
+    max_entries: u64,
+) -> Result<Bytes, WireError> {
     use std::io::{Read, Write};
-    let sink = std::io::Cursor::new(Vec::new());
-    let mut writer = zip::ZipWriter::new(sink);
     let manifest = serde_json::to_vec(&task_payload(payload)).map_err(|_| invalid_response())?;
+    let mut expanded = u64::try_from(manifest.len()).map_err(|_| invalid_response())?;
+    let mut entries = 1u64;
+    for (_, source) in sources {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&source[..]))
+            .map_err(|_| invalid_response())?;
+        entries = entries
+            .checked_add(archive.len() as u64)
+            .ok_or_else(invalid_response)?;
+        for item in 0..archive.len() {
+            let file = archive.by_index(item).map_err(|_| invalid_response())?;
+            expanded = expanded
+                .checked_add(file.size())
+                .ok_or_else(invalid_response)?;
+            if expanded > cap || entries > max_entries {
+                return Err(invalid_response());
+            }
+        }
+    }
+    if expanded > cap || entries > max_entries {
+        return Err(invalid_response());
+    }
+    let sink = BoundedCursor::new(cap);
+    let mut writer = zip::ZipWriter::new(sink);
     writer
         .start_file("manifest.json", zip::write::SimpleFileOptions::default())
         .map_err(|_| invalid_response())?;
     writer
         .write_all(&manifest)
         .map_err(|_| invalid_response())?;
+    let mut copied_expanded = u64::try_from(manifest.len()).map_err(|_| invalid_response())?;
     for (index, source) in sources {
         let prefix = format!("{:04}/", index + 1);
         let mut reader = zip::ZipArchive::new(std::io::Cursor::new(&source[..]))
             .map_err(|_| invalid_response())?;
         for i in 0..reader.len() {
-            let mut entry = reader.by_index(i).map_err(|_| invalid_response())?;
+            let entry = reader.by_index(i).map_err(|_| invalid_response())?;
             let name = entry.name().map_err(|_| invalid_response())?.into_owned();
             if name.starts_with('/') || name.contains('\\') || name.contains("..") {
                 return Err(invalid_response());
             }
-            let mut data = Vec::new();
-            entry
-                .read_to_end(&mut data)
-                .map_err(|_| invalid_response())?;
             writer
                 .start_file(
                     format!("{prefix}{name}"),
                     zip::write::SimpleFileOptions::default(),
                 )
                 .map_err(|_| invalid_response())?;
-            writer.write_all(&data).map_err(|_| invalid_response())?;
+            let entry_size = entry.size();
+            let copied = std::io::copy(&mut entry.take(entry_size.saturating_add(1)), &mut writer)
+                .map_err(|_| invalid_response())?;
+            if copied != entry_size {
+                return Err(invalid_response());
+            }
+            copied_expanded = copied_expanded
+                .checked_add(copied)
+                .ok_or_else(invalid_response)?;
+            if copied_expanded > cap {
+                return Err(invalid_response());
+            }
         }
     }
     let cursor = writer.finish().map_err(|_| invalid_response())?;
-    Ok(Bytes::from(cursor.into_inner()))
+    Ok(Bytes::from(cursor.inner.into_inner()))
 }
+
+struct BoundedCursor {
+    inner: std::io::Cursor<Vec<u8>>,
+    cap: u64,
+}
+impl BoundedCursor {
+    fn new(cap: u64) -> Self {
+        Self {
+            inner: std::io::Cursor::new(Vec::new()),
+            cap,
+        }
+    }
+}
+impl std::io::Write for BoundedCursor {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let end = self
+            .inner
+            .position()
+            .checked_add(data.len() as u64)
+            .filter(|end| *end <= self.cap)
+            .ok_or_else(|| std::io::Error::other("zip output limit exceeded"))?;
+        let n = std::io::Write::write(&mut self.inner, data)?;
+        debug_assert!(self.inner.position() <= end);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.inner)
+    }
+}
+impl std::io::Seek for BoundedCursor {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(&mut self.inner, pos)
+    }
+}
+
+#[cfg(test)]
+#[path = "result_tests.rs"]
+mod tests;
 
 fn zip_http(id: &str, status: &str, bytes: Bytes) -> Result<Response, WireError> {
     let disposition = HeaderValue::from_str(&format!("attachment; filename=\"{id}.zip\""))

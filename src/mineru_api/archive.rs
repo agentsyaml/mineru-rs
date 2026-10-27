@@ -1868,6 +1868,50 @@ mod tests {
     }
 
     #[test]
+    fn unicode_path_extra_cannot_bypass_depth_limit_before_publication() {
+        let mut writer = ZipWriter::new(io::Cursor::new(Vec::new()));
+        writer
+            .start_file("x", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"x").unwrap();
+        let mut bytes = writer.finish().unwrap().into_inner();
+        let effective = vec!["a"; 65].join("/");
+        let mut field = 0x7075u16.to_le_bytes().to_vec();
+        field.extend(((5 + effective.len()) as u16).to_le_bytes());
+        field.push(1);
+        field.extend(0x8cdc1683u32.to_le_bytes());
+        field.extend(effective.as_bytes());
+
+        let local = bytes.windows(4).position(|w| w == b"PK\x03\x04").unwrap();
+        let local_extra = local + 30 + 1;
+        bytes.splice(local_extra..local_extra, field.iter().copied());
+        let len = u16::from_le_bytes(bytes[local + 28..local + 30].try_into().unwrap());
+        bytes[local + 28..local + 30].copy_from_slice(&(len + field.len() as u16).to_le_bytes());
+        let central = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let central_extra = central + 46 + 1;
+        bytes.splice(central_extra..central_extra, field.iter().copied());
+        let len = u16::from_le_bytes(bytes[central + 30..central + 32].try_into().unwrap());
+        bytes[central + 30..central + 32]
+            .copy_from_slice(&(len + field.len() as u16).to_le_bytes());
+        let eocd = bytes.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        let offset = u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap());
+        bytes[eocd + 16..eocd + 20].copy_from_slice(&(offset + field.len() as u32).to_le_bytes());
+        let size = u32::from_le_bytes(bytes[eocd + 12..eocd + 16].try_into().unwrap());
+        bytes[eocd + 12..eocd + 16].copy_from_slice(&(size + field.len() as u32).to_le_bytes());
+        let mut zip = ZipArchive::new(io::Cursor::new(bytes.clone())).unwrap();
+        assert_eq!(zip.by_index(0).unwrap().name().unwrap().as_ref(), effective);
+
+        let archive = DownloadedZip(NamedTempFile::new().unwrap());
+        std::fs::write(archive.path(), bytes).unwrap();
+        let output = sentinel_output();
+        assert_eq!(
+            archive.extract(output.path(), limits()),
+            Err("invalid result archive".into())
+        );
+        assert_sentinel_unchanged(&archive, &output);
+    }
+
+    #[test]
     fn max_entries_boundary_and_plus_one() {
         let entries = [
             ("one", b"a".as_slice(), CompressionMethod::Stored),

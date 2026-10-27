@@ -167,6 +167,7 @@ pub(crate) fn scan<R: Read + Seek>(
         validate_name(&name, limits, &mut components)?;
         let mut extra = vec![0; xl];
         take(reader, &mut cursor, central_end, &mut extra)?;
+        validate_extra(&extra)?;
         skip(reader, &mut cursor, central_end, cl as u64)?;
         let (compressed, local) = zip64_values(&h, &extra)?;
         if local
@@ -196,6 +197,9 @@ pub(crate) fn scan<R: Read + Seek>(
         if local_name != name {
             return Err(bad());
         }
+        let mut local_extra = vec![0; usize::try_from(lxl).map_err(|_| bad())?];
+        at(reader, name_at + lnl as u64, &mut local_extra)?;
+        validate_extra(&local_extra)?;
         let data = name_at
             .checked_add(lnl as u64)
             .and_then(|v| v.checked_add(lxl))
@@ -353,6 +357,22 @@ fn zip64_values(h: &[u8; 46], extra: &[u8]) -> Result<(u64, u64), ScanError> {
         return Err(bad());
     }
     Ok((values[1], values[2]))
+}
+fn validate_extra(extra: &[u8]) -> Result<(), ScanError> {
+    let mut i = 0;
+    while i < extra.len() {
+        if i + 4 > extra.len() {
+            return Err(bad());
+        }
+        let id = u16at(extra, i);
+        let n = u16at(extra, i + 2) as usize;
+        i += 4;
+        if i + n > extra.len() || id == 0x7075 {
+            return Err(bad());
+        }
+        i += n;
+    }
+    Ok(())
 }
 fn validate_name(n: &[u8], l: ScanLimits, components: &mut u64) -> Result<(), ScanError> {
     if n.is_empty() || n.iter().any(|b| *b == b'\\' || *b < 0x20 || *b == 0x7f) {
@@ -771,6 +791,18 @@ mod tests {
         let c = central(&b);
         p16(&mut b, c + 30, 1);
         assert!(!ok(b, limits()));
+    }
+    #[test]
+    fn rejects_unicode_path_extra_and_accepts_utf8_raw_name() {
+        let mut b = one();
+        let c = central(&b);
+        p16(&mut b, c + 30, 5);
+        b.splice(c + 47..c + 47, [0x75, 0x70, 1, 0, 0]);
+        let e = eocd(&b);
+        p32(&mut b, e + 12, 52);
+        assert_eq!(err(b, limits()), ScanError::Fallback);
+        assert!(ok(zip(&[("é".as_bytes(), b"")]), limits()));
+        assert!(validate_extra(&[0x75, 0x70, 1, 0]).is_err());
     }
     #[test]
     fn rejects_central_comment_escape() {

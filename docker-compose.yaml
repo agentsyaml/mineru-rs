@@ -31,12 +31,53 @@ x-mineru-vllm: &mineru-vllm
             device_ids: ["${VLLM_NVIDIA_DEVICE_ID:-0}"]
             capabilities: [gpu]
 
+x-llama-vulkan: &llama-vulkan
+  image: ${LLAMA_VULKAN_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-vulkan}
+  ports:
+    - "${MINERU_PROVIDER_BIND_HOST:-127.0.0.1}:${MINERU_PORT_OVERRIDE_LLAMA:-30001}:8080"
+  volumes:
+    - type: bind
+      source: ${LLAMA_MODEL_DIR:-./models}
+      target: /models
+      read_only: true
+      bind:
+        create_host_path: false
+  command:
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8080"
+    - --model
+    - /models/${LLAMA_MODEL_FILE:-model.gguf}
+    - --mmproj
+    - /models/${LLAMA_MMPROJ_FILE:-mmproj.gguf}
+    - --alias
+    - ${LLAMA_MODEL_ALIAS:-mineru-vlm}
+    - --n-gpu-layers
+    - ${LLAMA_GPU_LAYERS:-auto}
+
 services:
+  llama-server-vulkan:
+    <<: *llama-vulkan
+    profiles: [vulkan]
+    devices:
+      - ${VULKAN_DRI_PATH:-/dev/dri}:/dev/dri
+  llama-server-vulkan-nvidia:
+    <<: *llama-vulkan
+    profiles: [vulkan-nvidia]
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: graphics,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${VULKAN_NVIDIA_DEVICE_ID:-0}"]
+              capabilities: [gpu]
   mineru-openai-server:
     <<: *mineru-vllm
     profiles:
-      - "openai-server"
-      - ${COMPOSE_PROFILES:-} # empty by default: active without an explicit profile
+      - openai-server
     ports:
       - "${MINERU_PROVIDER_BIND_HOST:-127.0.0.1}:${MINERU_PORT_OVERRIDE_VLLM:-30000}:30000"
     entrypoint: mineru-openai-server
