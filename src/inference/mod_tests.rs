@@ -50,8 +50,7 @@ fn normalization_matches_official_reciprocal_multiplication() {
 
 #[test]
 fn preprocess_scale_is_800_over_source_dimensions() {
-    let image =
-        DynamicImage::ImageRgb8(image::RgbImage::from_pixel(640, 320, image::Rgb([10; 3])));
+    let image = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(640, 320, image::Rgb([10; 3])));
     let (_, scale) = preprocess(&image).unwrap();
     assert_eq!(scale, (800.0 / 320.0, 800.0 / 640.0));
 }
