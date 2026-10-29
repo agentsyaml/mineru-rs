@@ -3,9 +3,11 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use image::{DynamicImage, GenericImageView, imageops::FilterType};
+use image::{DynamicImage, GenericImageView};
 use ort::{session::Session, value::Tensor};
 use thiserror::Error;
+
+mod resize;
 
 const SIDE: u32 = 800;
 const MAX_PIXELS: u64 = 40_000_000;
@@ -122,44 +124,21 @@ impl LayoutSession {
     pub fn infer_raw(&mut self, image: &DynamicImage) -> Result<Vec<[f32; 8]>, InferenceError> {
         let (w, h) = image.dimensions();
         validate_image_dimensions(w, h)?;
+        // Validate the graph contract before any preprocessing or tensor build.
+        let mut has_image = false;
+        for metadata in &self.session.inputs {
+            validate_input(&metadata.name, &metadata.input_type)?;
+            has_image |= metadata.name == "image";
+        }
+        if !has_image {
+            return Err(InferenceError::Invalid("model has no image input".into()));
+        }
         let (input, scale) = preprocess(image)?;
         let mut inputs = vec![(
             "image",
             Tensor::from_array(([1usize, 3, 800, 800], input)).map_err(rt_error)?,
         )];
         for metadata in &self.session.inputs {
-            let expected_rank = if metadata.name == "image" { 4 } else { 2 };
-            let (kind, shape) = match &metadata.input_type {
-                ort::value::ValueType::Tensor { ty, shape, .. } => (ty, shape),
-                _ => {
-                    return Err(InferenceError::Invalid(format!(
-                        "input {} is not a tensor",
-                        metadata.name
-                    )));
-                }
-            };
-            let dims: &[i64] = shape;
-            if *kind != ort::tensor::TensorElementType::Float32 || dims.len() != expected_rank {
-                return Err(InferenceError::Invalid(format!(
-                    "input {} has unsupported dtype or rank",
-                    metadata.name
-                )));
-            }
-            let expected = if metadata.name == "image" {
-                &[1, 3, 800, 800][..]
-            } else {
-                &[1, 2][..]
-            };
-            if dims
-                .iter()
-                .zip(expected)
-                .any(|(actual, wanted)| *actual >= 0 && actual != wanted)
-            {
-                return Err(InferenceError::Invalid(format!(
-                    "input {} has an incompatible shape",
-                    metadata.name
-                )));
-            }
             match metadata.name.as_str() {
                 "image" => (),
                 "im_shape" => inputs.push((
@@ -176,9 +155,6 @@ impl LayoutSession {
                     )));
                 }
             }
-        }
-        if !self.session.inputs.iter().any(|i| i.name == "image") {
-            return Err(InferenceError::Invalid("model has no image input".into()));
         }
         let outputs = self.session.run(inputs).map_err(rt_error)?;
         decode_outputs(&outputs)
@@ -238,15 +214,51 @@ fn preprocess(image: &DynamicImage) -> Result<(Vec<f32>, (f32, f32)), InferenceE
     let (w, h) = image.dimensions();
     validate_image_dimensions(w, h)?;
     let rgb = image.to_rgb8();
-    // Catmull-Rom is cubic, but is not pixel-identical to Pillow's BICUBIC kernel.
-    let resized = image::imageops::resize(&rgb, SIDE, SIDE, FilterType::CatmullRom);
+    // Fixed 800x800 with keep_ratio=false, matching MinerU 4.0.12 upstream.
+    let resized = resize::resize_bicubic(rgb.as_raw(), w as usize, h as usize, 800, 800, 3);
     let mut chw = vec![0f32; (3 * SIDE * SIDE) as usize];
-    for (i, pixel) in resized.pixels().enumerate() {
+    // Quantization uses the same float32 reciprocal as upstream (`* 1/255`).
+    let inv = 1.0f32 / 255.0;
+    for (i, pixel) in resized.chunks_exact(3).enumerate() {
         for c in 0..3 {
-            chw[c * (SIDE * SIDE) as usize + i] = f32::from(pixel[c]) / 255.0;
+            chw[c * (SIDE * SIDE) as usize + i] = f32::from(pixel[c]) * inv;
         }
     }
     Ok((chw, (SIDE as f32 / h as f32, SIDE as f32 / w as f32)))
+}
+
+/// Fail-closed ONNX input check: the pinned layout model declares float32
+/// inputs only; no dtype casting or dynamic shapes are accepted.
+fn validate_input(name: &str, input_type: &ort::value::ValueType) -> Result<(), InferenceError> {
+    let expected_rank = if name == "image" { 4 } else { 2 };
+    let expected: &[i64] = if name == "image" {
+        &[1, 3, 800, 800]
+    } else {
+        &[1, 2]
+    };
+    let ort::value::ValueType::Tensor {
+        ty, shape: dims, ..
+    } = input_type
+    else {
+        return Err(InferenceError::Invalid(format!(
+            "input {name} is not a tensor"
+        )));
+    };
+    if *ty != ort::tensor::TensorElementType::Float32 || dims.len() != expected_rank {
+        return Err(InferenceError::Invalid(format!(
+            "input {name} must be a rank-{expected_rank} float32 tensor"
+        )));
+    }
+    if dims
+        .iter()
+        .zip(expected)
+        .any(|(actual, wanted)| actual != wanted)
+    {
+        return Err(InferenceError::Invalid(format!(
+            "input {name} has an incompatible shape"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_image_dimensions(w: u32, h: u32) -> Result<(), InferenceError> {
@@ -338,62 +350,5 @@ fn rt_error(error: impl std::fmt::Display) -> InferenceError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn preprocessing_is_rgb_chw_and_normalized() {
-        let image =
-            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 1, image::Rgb([255, 0, 128])));
-        let (tensor, scale) = preprocess(&image).unwrap();
-        assert_eq!(tensor.len(), 3 * 800 * 800);
-        assert_eq!(scale, (800.0, 400.0));
-        assert!(tensor[0] > 0.99 && tensor[800 * 800] < 0.01);
-    }
-
-    #[test]
-    fn extreme_aspect_ratios_are_rejected_before_resize_allocation() {
-        assert!(validate_image_dimensions(1_000_000, 40).is_err());
-        assert!(validate_image_dimensions(40, 1_000_000).is_err());
-    }
-    #[test]
-    fn runtime_path_failure_is_reported_without_panicking() {
-        let error = LayoutSession::load("model.onnx", "relative-runtime.dylib")
-            .err()
-            .unwrap();
-        assert!(matches!(error, InferenceError::Invalid(_)));
-    }
-
-    #[test]
-    fn existing_non_library_runtime_is_reported_without_panicking() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let error = LayoutSession::load("model.onnx", file.path())
-            .err()
-            .unwrap();
-        assert!(matches!(error, InferenceError::Runtime(_)));
-    }
-
-    #[test]
-    fn output_rows_validate_score_coordinates_and_class() {
-        let row = [21.0, 0.9, 2.0, 3.0, 90.0, 30.0, 1.0, 1.0];
-        assert_eq!(validate_rows(&row, 1).unwrap(), vec![row]);
-        for bad in [
-            [21.0, 1.1, 2.0, 3.0, 90.0, 30.0, 1.0, 1.0],
-            [25.0, 0.9, 2.0, 3.0, 90.0, 30.0, 1.0, 1.0],
-            [21.0, 0.9, 2.0, 3.0, f32::NAN, 30.0, 1.0, 1.0],
-        ] {
-            assert!(validate_rows(&bad, 1).is_err());
-        }
-        assert!(validate_rows(&row, 2).is_err());
-    }
-
-    #[test]
-    fn malformed_output_shapes_are_rejected_without_indexing_panics() {
-        assert!(validate_output_shapes(&[], &[], &[1], &[0]).is_err());
-        assert!(validate_output_shapes(&[0, 8], &[], &[1], &[]).is_err());
-        assert!(validate_output_shapes(&[1, 8], &[1.0; 8], &[1], &[0]).is_err());
-        assert_eq!(
-            validate_output_shapes(&[0, 8], &[], &[1], &[0]).unwrap(),
-            Vec::<[f32; 8]>::new()
-        );
-    }
-}
+#[path = "mod_tests.rs"]
+mod tests;

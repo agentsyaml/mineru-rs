@@ -139,8 +139,13 @@ ONNX Runtime shared library and the pinned model cache. It does not replace the
 official worker, integrate with the parser/CLI/API routes, or provide official
 postprocessing, OCR, tier selection, or full-document inference. Without the
 feature, the optional ONNX Runtime dependencies and inference API are not
-enabled. Its Catmull-Rom image resize is not pixel-identical to the official
-Pillow BICUBIC preprocessing, so output parity is not claimed.
+enabled. Preprocessing follows MinerU 4.0.12: fixed 800x800 cubic resize
+(kernel a = -0.75, uint8 fixed-point weights), RGB, and division by 255 with no
+mean/std subtraction. Resize output is verified byte-exact against docvortex
+0.6.0 golden fixtures (tests/fixtures/layout/resize-golden.json). ONNX input
+metadata is validated fail-closed before tensor construction: inputs must
+declare float32, the expected rank, and compatible shapes, with no casting.
+Postprocessing remains unimplemented, so output parity is not claimed.
 
 The legacy `run`/`parse` APIs remain unchanged; rich result types are additive.
 See the [SDK guide](official-sdk.md) for binding build instructions and the

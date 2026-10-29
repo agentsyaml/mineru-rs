@@ -100,6 +100,7 @@ WHEEL_ENTRY_POINTS = b"[console_scripts]\nmineru=mineru_rs._cli:main\nmineru-rs=
 CRATE_FIXTURES = {
     "docs/upstream-baseline.json",
     "tests/fixtures/legacy/minimal.csv",
+    "tests/fixtures/layout/resize-golden.json",
     "tests/fixtures/pdf/minimal.pdf",
     "tests/fixtures/vlm/layout.txt",
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",

@@ -31,6 +31,7 @@ include = [
     "docs/official-http.md",
     "tests/fixtures/pdf/minimal.pdf",
     "tests/fixtures/legacy/minimal.csv",
+    "tests/fixtures/layout/resize-golden.json",
     "tests/fixtures/vlm/layout.txt",
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_model.json",
     "tests/fixtures/official/arxiv_2410.21169v5/vlm/2410.21169v5_middle.json",
