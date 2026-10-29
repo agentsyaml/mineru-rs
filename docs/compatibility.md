@@ -190,6 +190,36 @@ and existence of every referenced asset. Preview PDFs must retain page count
 and CropBox geometry. It intentionally ignores PDF, image, and JSON bytes,
 JSON key order, filenames, and private metadata.
 
+## Published crate dependency advisories
+
+The crates.io package resolves its Office dependencies from the registry. The
+workspace's `[patch.crates-io]` repairs are local build inputs and never reach
+consumers, so enabling `office` or `legacy-office` pulls dependency versions
+with open advisories. Default features and `local-inference` are clean.
+
+`office` (13 findings): `quick-xml` 0.37.5 and 0.38.4 each carry
+RUSTSEC-2026-0194 and RUSTSEC-2026-0195; `zip` 0.6.6, 2.6.1, and 8.6.0 each
+carry RUSTSEC-2026-0367, RUSTSEC-2026-0368, and RUSTSEC-2026-0369.
+`legacy-office` (3 findings): `zip` 8.6.0 with the same three.
+
+Reachability, audited against the resolved sources:
+
+- The nine `zip` findings all concern `ZipArchive::extract` and
+  `ZipStreamReader::extract`. None of the six Office dependencies calls either
+  API, and this crate extracts archives with `zip` 9.0.5 through its own bounded
+  reader. Those findings are not reachable through this crate.
+- The four `quick-xml` findings are parsing denial of service: quadratic
+  duplicate-attribute checking and unbounded namespace-declaration allocation.
+  They are reachable through `office2pdf`, which parses untrusted OOXML. Office
+  conversion runs in a separate helper process bounded by input, output,
+  wall-clock, CPU, and address-space limits, which caps the impact but does not
+  remove the advisory.
+
+Upstream is unresolved on both paths. `citationberg` merged a `quick-xml` 0.41
+bump in July 2026 but has not released it, and it reaches this crate through
+`typst` -> `hayagriva`. `anydoc` has an unmerged `zip` 9 pull request and still
+declares `zip` 8.6.0. Both must land before this section can be removed.
+
 ## Rust API container image
 
 The GHCR image is `ghcr.io/agentsyaml/mineru-cli`. Verify tag availability

@@ -13,10 +13,10 @@ DocVortex 0.5.16；最新 DocVortex 0.6.0 仅有不加载模型的 smoke 检查�
 
 - **Python / Node**：安装已发布的软件包；`parse()` 返回 Markdown，`run()` 写出完整结果目录。
 - **官方 rich SDK**：Rust、Python 或 Node SDK 中 CSV/TSV 使用 Rust 解析，其他格式需另行准备 worker；详见[SDK 指南](docs/official-sdk.md)。
-- **Rust CLI / API 服务**：从准备好的源码检出构建。根工作区 Cargo 补丁不会传递给消费者，因此该 crate 不能从 crates.io 安装。
+- **Rust CLI / API 服务**：可从 crates.io 安装；需要精确钉住的源码时也可从准备好的源码检出构建。已发布的 crate 在可选特性下带有依赖告警，见[兼容性](docs/compatibility.md#published-crate-dependency-advisories)。
 - **本地转换**：CLI `--backend local` 通过内置 Rust helper 支持干净文本 PDF 和部分旧格式；只输出 Markdown，不生成版面 JSON，也不调用 VLM。
 
-当前源码检出目标版本为 0.4.0。安装指定版本前，请查看
+当前源码检出目标版本为 0.4.1。安装指定版本前，请查看
 [发布指南](docs/releasing.md#current-release-boundary)确认软件包和发布可用性。
 
 详细说明：[使用指南](docs/usage.md)、[兼容性](docs/compatibility.md)、
@@ -75,12 +75,18 @@ npx --yes --package="@alexsun-top/mineru@$version" -- mineru-rs -p input.pdf -o 
 
 ## CLI 和 API 服务端
 
-Rust 1.89+ CLI 可从准备好的源码检出安装；`office` 和 `legacy-office` 是可选
-feature。准备与安装步骤见[源码构建](#从源码构建)。
+Rust 1.89+ CLI 可从 crates.io 安装：
 
 ```sh
-cargo install --path . --locked --features office,legacy-office
+cargo install mineru --locked --features office,legacy-office
 ```
+
+`office` 和 `legacy-office` 是可选 feature。已发布的 crate 从 crates.io 解析
+Office 依赖，因此启用这两个特性会引入带公开安全告警的依赖版本；启用前请阅读
+[兼容性](docs/compatibility.md#published-crate-dependency-advisories)。默认特性
+与 `local-inference` 构建是干净的。
+
+也可以从准备好的源码检出构建，步骤见[源码构建](#从源码构建)。
 
 `backend=local` 通过内置 helper 将干净文本 PDF 和部分旧格式转换为 Markdown；
 不运行模型，不生成版面 JSON。不确定的 PDF 会失败。完整输入及 backend 说明见

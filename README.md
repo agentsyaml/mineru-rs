@@ -17,13 +17,15 @@ Choose a route:
 - **Rich official SDK**: use the Rust, Python, or Node SDK; CSV/TSV parse in
   Rust and other formats use a separately prepared worker. See the
   [SDK guide](docs/official-sdk.md) for its runtime contract.
-- **Rust CLI / API server**: build from a prepared checkout. The crate is not
-  available from crates.io because root workspace patches do not reach consumers.
+- **Rust CLI / API server**: install from crates.io, or build from a prepared
+  checkout for the exact pinned sources. The published crate carries the
+  optional-feature dependency advisories listed in
+  [compatibility](docs/compatibility.md#published-crate-dependency-advisories).
 - **Local conversion**: CLI `--backend local` supports clean text PDFs and
   selected legacy formats through the bundled Rust helper. It produces
   Markdown only, without layout JSON or a VLM call.
 
-This checkout targets 0.4.0. Check the [release guide](docs/releasing.md#current-release-boundary)
+This checkout targets 0.4.1. Check the [release guide](docs/releasing.md#current-release-boundary)
 for current package and release availability before installing a specific version.
 
 See [usage](docs/usage.md), [compatibility](docs/compatibility.md),
@@ -85,12 +87,23 @@ and [SDK guide](docs/official-sdk.md).
 
 ## CLI and API server
 
-Install Rust CLI binaries from a prepared source checkout as shown below.
+Install from crates.io:
 
-A source build produces the `mineru`, `mineru-api`, and
-`mineru-office-convert` binaries. The conversion capabilities are opt-in
-features. Run the preparation commands under [Build from source](#build-from-source) first;
-they are required before any Cargo command in this checkout.
+```sh
+cargo install mineru --locked --features office,legacy-office
+```
+
+The published crate resolves its Office dependencies from crates.io, so the
+`office` and `legacy-office` features pull dependency versions with open
+advisories; read
+[compatibility](docs/compatibility.md#published-crate-dependency-advisories)
+before enabling them. A default-feature build and `local-inference` are clean.
+
+Alternatively build from a prepared source checkout. A source build produces
+the `mineru`, `mineru-api`, and `mineru-office-convert` binaries. The
+conversion capabilities are opt-in features. Run the preparation commands under
+[Build from source](#build-from-source) first; they are required before any
+Cargo command in this checkout.
 
 ```sh
 cargo install --path . --locked --features office          # docx/pptx/xlsx → PDF + VLM

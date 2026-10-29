@@ -65,6 +65,55 @@ def check_lock(lock):
 
 
 def check(report, lock, audit_status):
+    validate_report(report, audit_status, expect_clean=True)
+    warnings = report["warnings"]
+    for finding in warnings["unmaintained"]:
+        if not isinstance(finding, dict) or finding.get("kind") != "unmaintained":
+            fail("malformed unmaintained warning")
+    exact_set(warnings["unmaintained"], WARNINGS, "warning")
+    check_lock(lock)
+
+
+# The published crate resolves its Office dependencies from the registry because
+# `[patch.crates-io]` never reaches consumers. These are the exact findings a
+# consumer sees, and they are documented in docs/compatibility.md. Any addition
+# or removal must update that section in the same change.
+PUBLISHED_VULNERABILITIES = {
+    ("RUSTSEC-2026-0194", "quick-xml", "0.37.5"),
+    ("RUSTSEC-2026-0195", "quick-xml", "0.37.5"),
+    ("RUSTSEC-2026-0194", "quick-xml", "0.38.4"),
+    ("RUSTSEC-2026-0195", "quick-xml", "0.38.4"),
+    ("RUSTSEC-2026-0367", "zip", "0.6.6"),
+    ("RUSTSEC-2026-0368", "zip", "0.6.6"),
+    ("RUSTSEC-2026-0369", "zip", "0.6.6"),
+    ("RUSTSEC-2026-0367", "zip", "2.6.1"),
+    ("RUSTSEC-2026-0368", "zip", "2.6.1"),
+    ("RUSTSEC-2026-0369", "zip", "2.6.1"),
+    ("RUSTSEC-2026-0367", "zip", "8.6.0"),
+    ("RUSTSEC-2026-0368", "zip", "8.6.0"),
+    ("RUSTSEC-2026-0369", "zip", "8.6.0"),
+}
+
+
+def check_published(report, audit_status):
+    validate_report(report, audit_status, expect_clean=False)
+    vulnerabilities = report["vulnerabilities"]
+    if (
+        vulnerabilities.get("found") is not True
+        or type(vulnerabilities.get("count")) is not int
+        or vulnerabilities["count"] != len(PUBLISHED_VULNERABILITIES)
+        or not isinstance(vulnerabilities.get("list"), list)
+    ):
+        fail("published vulnerability count/found/list mismatch")
+    exact_set(vulnerabilities["list"], PUBLISHED_VULNERABILITIES, "published vulnerability")
+    warnings = report["warnings"]
+    for finding in warnings["unmaintained"]:
+        if not isinstance(finding, dict) or finding.get("kind") != "unmaintained":
+            fail("malformed unmaintained warning")
+    exact_set(warnings["unmaintained"], WARNINGS, "warning")
+
+
+def validate_report(report, audit_status, expect_clean):
     if not isinstance(report, dict) or set(report) != {"database", "lockfile", "settings", "vulnerabilities", "warnings"}:
         fail("malformed cargo-audit report schema")
     if not isinstance(report["database"], dict) or not isinstance(report["lockfile"], dict):
@@ -72,13 +121,14 @@ def check(report, lock, audit_status):
     settings = report["settings"]
     if not isinstance(settings, dict) or settings.get("ignore") != []:
         fail("cargo-audit report was filtered or malformed")
-    if type(audit_status) is not int or audit_status != 0:
+    expected_status = 0 if expect_clean else 1
+    if type(audit_status) is not int or audit_status != expected_status:
         fail(f"cargo-audit exited with status {audit_status}")
     vulnerabilities = report["vulnerabilities"]
-    if (
-        not isinstance(vulnerabilities, dict)
-        or set(vulnerabilities) != {"found", "count", "list"}
-        or vulnerabilities.get("found") is not False
+    if not isinstance(vulnerabilities, dict) or set(vulnerabilities) != {"found", "count", "list"}:
+        fail("malformed vulnerability summary")
+    if expect_clean and (
+        vulnerabilities.get("found") is not False
         or type(vulnerabilities.get("count")) is not int
         or vulnerabilities["count"] != 0
         or vulnerabilities.get("list") != []
@@ -91,11 +141,6 @@ def check(report, lock, audit_status):
         or not isinstance(warnings["unmaintained"], list)
     ):
         fail("unexpected cargo-audit warning category")
-    for finding in warnings["unmaintained"]:
-        if not isinstance(finding, dict) or finding.get("kind") != "unmaintained":
-            fail("malformed unmaintained warning")
-    exact_set(warnings["unmaintained"], WARNINGS, "warning")
-    check_lock(lock)
 
 
 def load_report(path):
@@ -156,6 +201,37 @@ def self_test():
     bad = json.loads(json.dumps(lock)); bad["package"].append(dict(bad["package"][0])); rejected(bad_lock=bad)
     rejected(status=1)
     rejected({})
+
+    published = json.loads(json.dumps(report))
+    published["vulnerabilities"] = {
+        "found": True,
+        "count": len(PUBLISHED_VULNERABILITIES),
+        "list": [
+            {"kind": "vulnerability", "advisory": {"id": advisory}, "package": {"name": name, "version": version}}
+            for advisory, name, version in sorted(PUBLISHED_VULNERABILITIES)
+        ],
+    }
+    check_published(published, 1)
+
+    def rejected_published(bad=None, status=1):
+        try:
+            check_published(published if bad is None else bad, status)
+        except ValueError:
+            return
+        raise AssertionError("self-test accepted an invalid published audit result")
+
+    rejected_published(status=0)
+    bad = json.loads(json.dumps(published)); bad["vulnerabilities"]["count"] += 1; rejected_published(bad)
+    bad = json.loads(json.dumps(published)); bad["vulnerabilities"]["found"] = False; rejected_published(bad)
+    bad = json.loads(json.dumps(published)); bad["vulnerabilities"]["list"].pop(); rejected_published(bad)
+    bad = json.loads(json.dumps(published))
+    bad["vulnerabilities"]["list"].append(
+        {"kind": "vulnerability", "advisory": {"id": "RUSTSEC-2026-9999"}, "package": {"name": "zip", "version": "9.0.5"}}
+    )
+    bad["vulnerabilities"]["count"] += 1
+    rejected_published(bad)
+    bad = json.loads(json.dumps(published)); bad["settings"]["ignore"] = ["RUSTSEC-2026-0194"]; rejected_published(bad)
+
     with tempfile.TemporaryDirectory() as directory:
         malformed = Path(directory) / "report.json"
         malformed.write_text("{")
@@ -175,9 +251,16 @@ def main():
     production.add_argument("--report", type=Path, required=True)
     production.add_argument("--lockfile", type=Path, required=True)
     production.add_argument("--audit-status", type=int, required=True)
+    published = subcommands.add_parser("published")
+    published.add_argument("--report", type=Path, required=True)
+    published.add_argument("--audit-status", type=int, required=True)
     args = parser.parse_args()
     if args.command == "self-test":
         self_test()
+        return
+    if args.command == "published":
+        check_published(load_report(args.report), args.audit_status)
+        print("published crate carries exactly the documented 13 advisories")
         return
     try:
         report = load_report(args.report)

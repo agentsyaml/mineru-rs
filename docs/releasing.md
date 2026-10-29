@@ -10,14 +10,21 @@ archives, and a two-architecture GHCR image.
 
 ## Current release boundary
 
-Crates.io publication is suspended because the root workspace's local
-`[patch.crates-io]` repairs are not inherited by downstream consumers. Do not
-enable or perform crate publication until the published dependency chain is
-safe. Before dispatch, inspect GitHub tags/releases and query each enabled
-registry for the candidate `X.Y.Z`; reuse an existing version only when its
-artifacts match the workflow's expected identity and digests. CI success alone
-does not establish publication. PyPI, npm, the CLI container, and GitHub binary
-releases are separate outputs. See
+Crates.io publication is enabled. The workspace's `[patch.crates-io]` repairs
+are local build inputs: they are not inherited by downstream consumers, so the
+published crate resolves its Office dependencies from the registry. The
+`office` and `legacy-office` features therefore pull dependency versions with
+open advisories; default features and `local-inference` are clean. The exact
+findings, their reachability, and the upstream conditions that clear them are
+recorded in
+[`compatibility.md`](compatibility.md#published-crate-dependency-advisories).
+Do not drop that section while any finding remains.
+
+Before dispatch, inspect GitHub tags/releases and query each enabled registry
+for the candidate `X.Y.Z`; reuse an existing version only when its artifacts
+match the workflow's expected identity and digests. CI success alone does not
+establish publication. PyPI, npm, crates.io, the CLI container, and GitHub
+binary releases are separate outputs. See
 [`office-xml041/PROVENANCE.md`](../tools/deps/office-xml041/PROVENANCE.md) for
 the local dependency source records and constraints.
 
@@ -125,15 +132,21 @@ gh workflow run release.yml --ref main -f version=X.Y.Z -f commit="$commit"
 The workflow checks that the requested commit equals the dispatch ref's
 `GITHUB_SHA`, verifies exact successful push-CI evidence, and rejects an
 existing `vX.Y.Z` tag or release before building. Protected environments named
-`pypi`, `npm`, and `ghcr` gate registry jobs; PyPI and npm use trusted-publisher
-OIDC, and GHCR uses a job-scoped `GITHUB_TOKEN` with `packages: write`. Do not
-store registry tokens in the repository, GitHub secrets, `.npmrc`, or Cargo
-configuration. There is no active crates.io publication job.
+`pypi`, `npm`, `ghcr`, and `crates-io` gate registry jobs; PyPI, npm, and
+crates.io use trusted-publisher OIDC, and GHCR uses a job-scoped `GITHUB_TOKEN`
+with `packages: write`. Do not store registry tokens in the repository, GitHub
+secrets, `.npmrc`, or Cargo configuration.
 
-The workflow verifies and publishes five wheels, seven npm tarballs, and the
-multi-platform container only after its build and artifact checks succeed. The
-source-build job records evidence from a fresh tracked-source snapshot; it is
-not a `.crate` package and is not uploaded as a binary release asset.
+The workflow verifies and publishes five wheels, seven npm tarballs, one
+`.crate`, and the multi-platform container only after its build and artifact
+checks succeed. The `crate-package` job prepares the pinned Office sources,
+packages, tests the unpacked crate, installs both Office features, and seals the
+`.crate`; `publish-crate` recreates and compares it byte-for-byte, asserts the
+packaged lockfile still resolves to exactly the advisories recorded in
+`docs/compatibility.md`, publishes only when crates.io lacks the version, and
+then verifies the published bytes. The source-build job records evidence from a
+fresh tracked-source snapshot; it is not a `.crate` package and is not uploaded
+as a binary release asset.
 
 GitHub Release assets are exactly six main-library archives and `SHA256SUMS`:
 
@@ -164,10 +177,12 @@ source-code archives are not uploaded assets or Rust `.crate` packages.
 ## One-time registry configuration
 
 Protect `main` and restrict release dispatch to it. Configure protected GitHub
-environments `pypi`, `npm`, and `ghcr` with required reviewers. Configure
-trusted publishers for PyPI project `mineru-rs` and all seven npm records under
-`@alexsun-top`, using repository `agentsyaml/mineru-rs`, workflow `release.yml`,
-and the corresponding `pypi` or `npm` environment. GHCR publication uses the
-job-scoped GitHub token. The crates.io `mineru` bootstrap and publication
-instructions are intentionally omitted: the current dependency-boundary issue
-keeps crate publishing suspended.
+environments `pypi`, `npm`, `ghcr`, and `crates-io` with required reviewers.
+Configure trusted publishers for PyPI project `mineru-rs`, all seven npm records
+under `@alexsun-top`, and crates.io crate `mineru`, using repository
+`agentsyaml/mineru-rs`, workflow `release.yml`, and the corresponding
+environment. GHCR publication uses the job-scoped GitHub token. The crates.io
+job acquires an ephemeral credential through
+`rust-lang/crates-io-auth-action`; it needs no stored secret, and `cargo publish`
+fails closed when the trusted-publisher record is missing or names a different
+environment.
