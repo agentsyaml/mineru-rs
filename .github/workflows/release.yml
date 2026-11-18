@@ -73,11 +73,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/cargo-audit
-          key: release-cargo-audit-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-cargo-audit-0.22.2-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
-      - name: Install Rust 1.89.0
-        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
-      - name: Check Office XML compatibility
-        run: python tools/deps/office_xml_parity.py
+          key: release-cargo-audit-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-cargo-audit-0.22.2-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
+      - name: Install Rust 1.92.0
+        run: rustup toolchain install 1.92.0 --profile minimal && rustup default 1.92.0
       - name: Install cargo-audit 0.22.2
         run: |
           if [ "$("$HOME/.cargo/bin/cargo-audit" --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]; then
@@ -90,7 +88,7 @@ jobs:
           "$HOME/.cargo/bin/cargo-audit" audit --json > "$RUNNER_TEMP/cargo-audit.json"
           python3 .github/scripts/check_cargo_audit.py check \
             --report "$RUNNER_TEMP/cargo-audit.json" --lockfile Cargo.lock --audit-status 0
-          echo "cargo-audit: zero vulnerabilities; Cargo.lock contains registry quick-xml 0.41.0" >> "$GITHUB_STEP_SUMMARY"
+          echo "cargo-audit: zero vulnerabilities; Cargo.lock contains registry quick-xml 0.41.0 and 0.42.0" >> "$GITHUB_STEP_SUMMARY"
       - name: Verify immutable release identity and package metadata
         id: identity
         run: |
@@ -134,26 +132,23 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-cargo-source-build-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-host-x86_64-unknown-linux-gnu-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
-      - name: Install Rust 1.89.0
-        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+          key: release-cargo-source-build-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-host-x86_64-unknown-linux-gnu-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
+      - name: Install Rust 1.92.0
+        run: rustup toolchain install 1.92.0 --profile minimal && rustup default 1.92.0
       - name: Prepare snapshot dependencies and test bootstrap tools
         working-directory: ${{ runner.temp }}/mineru-source
         run: |
           python tools/deps/prepare_office.py prepare
           python tools/deps/prepare_office.py verify
           python -m unittest discover -s tools/deps -p 'test_*.py'
-      - name: Check Office XML compatibility
-        working-directory: ${{ runner.temp }}/mineru-source
-        run: python tools/deps/office_xml_parity.py
       - name: Test extracted source snapshot
         working-directory: ${{ runner.temp }}/mineru-source
         run: |
-          cargo +1.89.0 test --locked -p mineru --all-targets \
+          cargo +1.92.0 test --locked -p mineru --all-targets \
             --features office,legacy-office -- --test-threads=4
-          cargo +1.89.0 check --locked -p mineru --tests --features local-inference
-          cargo +1.89.0 test --locked -p mineru --lib --features local-inference inference::
-          cargo +1.89.0 build --locked --release -p mineru \
+          cargo +1.92.0 check --locked -p mineru --tests --features local-inference
+          cargo +1.92.0 test --locked -p mineru --lib --features local-inference inference::
+          cargo +1.92.0 build --locked --release -p mineru \
             --features office,legacy-office --bins
       - name: Record passing source-build evidence
         env:
@@ -190,9 +185,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-cargo-crate-package-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-host-x86_64-unknown-linux-gnu-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
-      - name: Install Rust 1.89.0
-        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+          key: release-cargo-crate-package-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-host-x86_64-unknown-linux-gnu-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
+      - name: Install Rust 1.92.0
+        run: rustup toolchain install 1.92.0 --profile minimal && rustup default 1.92.0
       # `cargo package` resolves the workspace [patch.crates-io] entries, so the
       # pinned Office sources must exist even though the crate never ships them.
       - name: Prepare and verify pinned Office sources
@@ -285,11 +280,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-cargo-python-wheel-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ matrix.target }}-${{ hashFiles('.gitignore', 'Cargo.lock', 'Cargo.toml', 'bindings/python/Cargo.toml', 'bindings/python/pyproject.toml', 'tools/deps/**') }}
-      - name: Install Rust 1.89.0
-        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add ${{ matrix.target }}
-      - name: Check Office XML compatibility
-        run: python tools/deps/office_xml_parity.py
+          key: release-cargo-python-wheel-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-${{ matrix.target }}-${{ hashFiles('.gitignore', 'Cargo.lock', 'Cargo.toml', 'bindings/python/Cargo.toml', 'bindings/python/pyproject.toml', 'tools/deps/**') }}
+      - name: Install Rust 1.92.0
+        run: rustup toolchain install 1.92.0 --profile minimal && rustup default 1.92.0 && rustup target add ${{ matrix.target }}
       - name: Build locked manylinux wheel
         if: runner.os == 'Linux'
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
@@ -297,7 +290,7 @@ jobs:
           command: build
           target: ${{ matrix.target }}
           manylinux: "2014"
-          rust-toolchain: 1.89.0
+          rust-toolchain: 1.92.0
           args: --release --locked --manifest-path bindings/python/Cargo.toml --out dist
       - name: Build locked native wheel
         if: runner.os != 'Linux'
@@ -305,7 +298,7 @@ jobs:
         with:
           command: build
           target: ${{ matrix.target }}
-          rust-toolchain: 1.89.0
+          rust-toolchain: 1.92.0
           args: --release --locked --manifest-path bindings/python/Cargo.toml --out dist
       - name: Verify, install, and smoke wheel
         run: |
@@ -382,14 +375,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-cargo-node-native-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ matrix.target }}-${{ hashFiles('.gitignore', 'Cargo.lock', 'Cargo.toml', 'bindings/node/Cargo.toml', 'bindings/node/package.json', 'bindings/node/package-lock.json', 'tools/deps/**') }}
+          key: release-cargo-node-native-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-${{ matrix.target }}-${{ hashFiles('.gitignore', 'Cargo.lock', 'Cargo.toml', 'bindings/node/Cargo.toml', 'bindings/node/package.json', 'bindings/node/package-lock.json', 'tools/deps/**') }}
       - name: Install npm 12.0.2 and dependencies
         working-directory: bindings/node
         run: npm install --global npm@12.0.2 && npm --version && npm ci
-      - name: Install Rust 1.89.0 target
-        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add ${{ matrix.target }}
-      - name: Check Office XML compatibility
-        run: python tools/deps/office_xml_parity.py
+      - name: Install Rust 1.92.0 target
+        run: rustup toolchain install 1.92.0 --profile minimal && rustup default 1.92.0 && rustup target add ${{ matrix.target }}
       - name: Build generated addon
         shell: bash
         working-directory: bindings/node
@@ -568,7 +559,7 @@ jobs:
           set -euo pipefail
           docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
             -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e TARGET="${{ matrix.target }}" \
-            rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff \
+            rust:1.92.0-bookworm@sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2 \
             sh -ec '
               apt-get update
               apt-get install --no-install-recommends -y ca-certificates python3
@@ -580,7 +571,6 @@ jobs:
               setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups python3 tools/deps/prepare_office.py verify
               setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups python3 -m unittest discover -s tools/deps -p "test_*.py"
               setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups python3 tools/deps/prepare_office.py verify
-              setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups python3 tools/deps/office_xml_parity.py
               setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo build --locked --release -p mineru --features office,legacy-office --bins --target "$TARGET"
               setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups cargo test --locked --release -p mineru --features office,legacy-office --target "$TARGET" --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
               chmod -R a+rX "/workspace/target/$TARGET/release"
@@ -601,16 +591,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-cargo-build-binary-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ matrix.target }}-${{ hashFiles('.gitignore', 'Cargo.lock', 'Cargo.toml', 'tools/deps/**') }}
+          key: release-cargo-build-binary-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-${{ matrix.target }}-${{ hashFiles('.gitignore', 'Cargo.lock', 'Cargo.toml', 'tools/deps/**') }}
       - name: Build native binaries
         if: runner.os != 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install 1.89.0 --profile minimal
-          rustup default 1.89.0
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup default 1.92.0
           rustup target add ${{ matrix.target }}
-          python tools/deps/office_xml_parity.py
           cargo build --locked --release -p mineru --features office,legacy-office --bin mineru --bin mineru-office-convert --target ${{ matrix.target }}
       - name: Validate packaged binaries and Office helper E2E
         shell: bash
@@ -792,9 +781,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-cargo-crate-package-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-host-x86_64-unknown-linux-gnu-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
-      - name: Install Rust 1.89.0
-        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+          key: release-cargo-crate-package-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-host-x86_64-unknown-linux-gnu-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
+      - name: Install Rust 1.92.0
+        run: rustup toolchain install 1.92.0 --profile minimal && rustup default 1.92.0
       - name: Install cargo-audit 0.22.2
         run: |
           if [ "$("$HOME/.cargo/bin/cargo-audit" --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]; then

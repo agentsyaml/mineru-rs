@@ -1,17 +1,30 @@
 use crate::official::OfficialTier;
-use crate::official_api::wire::Tier;
+use crate::official_api::wire::{TaskFileInput, Tier};
 
-pub(super) fn requested_tier(request: Option<Tier>, name: &str) -> OfficialTier {
-    request.map(convert_tier).unwrap_or_else(|| {
-        if is_native(name) {
-            OfficialTier::Flash
-        } else {
-            OfficialTier::Standard
-        }
-    })
+/// `resolve_task_tier`: native-only batches always use flash; otherwise the
+/// explicit tier wins and the default is standard.
+pub(crate) fn resolve(request: Option<Tier>, files: &[TaskFileInput]) -> Tier {
+    if files.iter().all(|file| is_native(&file.file_name)) {
+        return Tier::Flash;
+    }
+    request.unwrap_or(Tier::Standard)
 }
 
-fn convert_tier(tier: Tier) -> OfficialTier {
+/// Per-file tier recorded in task detail: native documents are flash.
+pub(crate) fn file_tier(task: Tier, name: &str) -> Tier {
+    if is_native(name) { Tier::Flash } else { task }
+}
+
+/// Per-file tier: native documents are always parsed with the flash engine.
+pub(crate) fn requested_tier(task: Tier, name: &str) -> OfficialTier {
+    if is_native(name) {
+        OfficialTier::Flash
+    } else {
+        convert(task)
+    }
+}
+
+fn convert(tier: Tier) -> OfficialTier {
     match tier {
         Tier::Flash => OfficialTier::Flash,
         Tier::Basic => OfficialTier::Basic,

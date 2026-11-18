@@ -37,11 +37,7 @@ pub(super) fn http_error(status: StatusCode, bytes: &[u8]) -> OfficialApiError {
 pub(super) fn remote_file_error(file: &Value) -> OfficialApiError {
     let error = file.get("error").cloned().unwrap_or_default();
     OfficialApiError::File {
-        error_type: error
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("remote_error")
-            .into(),
+        error_type: "remote_error".into(),
         code: error
             .get("code")
             .and_then(Value::as_str)
@@ -57,14 +53,12 @@ pub(super) fn remote_file_error(file: &Value) -> OfficialApiError {
 pub(super) fn result_metadata(state: &Value) -> Value {
     let mut metadata = serde_json::json!({});
     for key in [
-        "job_id",
+        "task_id",
         "status",
         "created_at",
         "started_at",
         "finished_at",
-        "tier",
         "output_formats",
-        "access_level",
         "progress",
     ] {
         if let Some(value) = state.get(key) {
@@ -73,22 +67,6 @@ pub(super) fn result_metadata(state: &Value) -> Value {
     }
     metadata["files"] = serde_json::json!([state.pointer("/files/0")]);
     metadata
-}
-pub(super) fn mime_for(name: &str) -> &'static str {
-    match name
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "pdf" => "application/pdf",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "zip" => "application/zip",
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        _ => "application/octet-stream",
-    }
 }
 pub(super) fn segment(id: &str) -> String {
     url::form_urlencoded::byte_serialize(id.as_bytes()).collect()

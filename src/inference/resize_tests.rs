@@ -31,7 +31,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 /// Byte-exact differential check against the real docvortex 0.6.0
-/// `resize_image` (Pillow BICUBIC replica used by MinerU 4.0.12).
+/// `resize_image` (Pillow BICUBIC replica used by MinerU 4.2.3).
 #[test]
 fn resize_matches_official_bicubic_golden_cases() {
     for case in fixture_cases() {

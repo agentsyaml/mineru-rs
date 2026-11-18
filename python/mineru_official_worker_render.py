@@ -1,4 +1,4 @@
-"""Exact, callable-free renderer option mapping for MinerU 4.0.12."""
+"""Exact, callable-free renderer option mapping for MinerU 4.2.3."""
 
 from __future__ import annotations
 

@@ -66,7 +66,7 @@ legacy-office = ["dep:anydoc", "dep:pdf-inspector"]
 local-inference = ["dep:ort", "dep:libloading"]
 
 [dependencies]
-anydoc = { version = "=0.1.9", optional = true }
+anydoc = { version = "=0.2.4", optional = true }
 base64 = "0.23"
 axum = { version = "0.8", features = ["multipart"] }
 bytes = { version = "1", features = ["serde"] }
@@ -86,7 +86,7 @@ hayro-write = "=0.4.0"
 html-escape = "0.2"
 lopdf = { version = "=0.44.0", default-features = false }
 libloading = { version = "=0.8.9", optional = true }
-office2pdf = { version = "=0.6.5", optional = true }
+office2pdf = { version = "=0.11.0", optional = true }
 ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["std", "load-dynamic"] }
 pdf-inspector = { version = "=1.14.2", optional = true, default-features = false }
 pdf-writer = "=0.14.0"
@@ -102,7 +102,7 @@ time = { version = "=0.3.55", features = ["formatting", "parsing"] }
 tiff = "=0.11.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "net", "process", "io-util", "signal"] }
 url = { version = "2", features = ["serde"] }
-zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "=9.7.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = { version = "=0.41.0", default-features = false, features = ["encoding"] }
 
 [dev-dependencies]
@@ -122,29 +122,21 @@ libc = "0.2"
 [workspace]
 members = [".", "bindings/python", "bindings/node"]
 exclude = [
-    ".deps/office-xml041/office2pdf",
-    ".deps/office-xml041/umya-spreadsheet",
     ".deps/office-xml041/citationberg",
     ".deps/office-xml041/anydoc",
-    ".deps/office-xml041/calamine",
-    ".deps/office-xml041/docx-rs",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/agentsyaml/mineru-rs"
 
 [patch.crates-io]
-office2pdf = { path = ".deps/office-xml041/office2pdf" }
-umya-spreadsheet = { path = ".deps/office-xml041/umya-spreadsheet" }
 citationberg = { path = ".deps/office-xml041/citationberg" }
 anydoc = { path = ".deps/office-xml041/anydoc" }
-calamine = { path = ".deps/office-xml041/calamine" }
-docx-rs = { path = ".deps/office-xml041/docx-rs" }
 
 # Dev-experience: dependencies rarely recompile, so optimize them even in dev
 # builds (one-time cost, cached), and lightly optimize the test profile so the

@@ -92,7 +92,7 @@ cargo test --locked --features local-inference --test local_inference optional_r
 
 ## Build and prerequisites
 
-Rust 1.89 is required:
+Rust 1.92 is required:
 
 ```sh
 python3 tools/deps/prepare_office.py prepare
@@ -208,8 +208,8 @@ Without `--api-url`, `mineru` calls the external VLM service directly. The servi
 
 ### Official Hybrid backend
 
-Select `--backend hybrid-http-client` to run the official MinerU 4.0.12 worker
-directly. It requires a separately installed Python 3.10–3.14 environment and
+Select `--backend hybrid-http-client` to run the official MinerU 4.2.3 worker
+directly. It requires a separately installed Python 3.11–3.14 environment and
 model assets; the Rust binary does not bundle them. This backend accepts PDF and
 image inputs, and cannot be used with `--api-url`. See the
 [compatibility details](compatibility.md#mineru-4010-direct-hybrid) for worker
@@ -278,7 +278,7 @@ With `--api-url`, `mineru` submits documents to a running `mineru-api` server; t
 | `-o, --output <directory>` | Required | Output directory. |
 | `--api-url <URL>` | None | Remote API server address; without it, direct VLM mode is used. |
 | `-m, --method <auto\|txt\|ocr>` | `auto` | Parsing method; ignored by direct `vlm-http-client`. In official direct Hybrid it maps directly to the upstream `ocr_mode` parameter. |
-| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.0.12 worker; API Hybrid remains unsupported. |
+| `-b, --backend <vlm-http-client\|hybrid-http-client\|local>` | `vlm-http-client` | Backend. `local` invokes the project-private AnyDoc lane in the bundled Rust helper for legacy formats and conservative clean PDFs, rejecting unsupported/uncertain inputs. The local helper invokes no Python, Office application, model, or network. Direct `hybrid-http-client` is the official 4.2.3 worker; API Hybrid remains unsupported. |
 | `--tier <flash\|basic\|standard\|advanced>` | None | Official direct Hybrid tier, mapped 1:1 to the upstream tier. Rejected on other backends and in API mode. `--effort` is a compatibility alias (`medium`→`standard`, `high`/`xhigh`→`advanced`); `--tier` wins when both are given. Other direct backends accept only `medium`/`high` effort. |
 | `--effort <medium\|high\|xhigh>` | `medium` | Compatibility alias for `--tier`: `medium`→`standard`, `high`/`xhigh`→`advanced`. Ignored when `--tier` is set. Other direct backends accept only `medium`/`high`. |
 | `--model-stack <auto\|light\|full>` | `auto` | Official direct Hybrid model stack. `model.stack`/`MINERU_MODEL_STACK` was removed before 4.0.10; the current version does not support it. Configure `model.small_backend` + `model.vlm.engine` via `MINERU_CONFIG`, so non-default values, including `auto`, are rejected. |
@@ -374,7 +374,7 @@ The Rust API image is `ghcr.io/agentsyaml/mineru-cli`. It listens on
 container port `8000`, serves `GET /health`, writes task output below
 `/app/output`, and runs its default command as a non-root user. The release
 binaries include the `office,legacy-office` feature set, but the image bundles
-Rust binaries only: it contains no Python, `mineru==4.0.12`, or model assets.
+Rust binaries only: it contains no Python, `mineru==4.2.3`, or model assets.
 Verify the requested tag exists in GHCR before pulling it. The example uses
 `:0.3.0`; see the [release guide](releasing.md#current-release-boundary) for
 publication checks. Releases do not update
@@ -643,8 +643,8 @@ public fields on `RunOptions` (`api_url`, `api_key`) before calling `run`.
 
 The Python and Node bindings retain their legacy `parse()` and `run()` methods.
 The additive rich SDK uses separate parser and result types; see its
-[guide](official-sdk.md) for source-build requirements. The opt-in upload/job
-service has a separate [HTTP API guide](official-http.md).
+[guide](official-sdk.md) for source-build requirements. The opt-in official-v1
+task service has a separate [HTTP API guide](official-http.md).
 
 > The legacy binding `run()`/`parse()` flow does not bundle the
 > `mineru-office-convert` helper and does not perform Office-to-PDF conversion;

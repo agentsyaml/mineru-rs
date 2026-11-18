@@ -1,4 +1,4 @@
-//! Pixel-exact replica of Pillow's BICUBIC resize as used by MinerU 4.0.12
+//! Pixel-exact replica of Pillow's BICUBIC resize as used by MinerU 4.2.3
 //! (`pp_doclayout_v2_onnx.py::_preprocess_single_image`): a = -0.75 kernel,
 //! half-pixel coordinate centers, edge clamping, uint8 fixed-point weights
 //! (rint(w * 2048)) in the horizontal pass, and a split float/integer vertical

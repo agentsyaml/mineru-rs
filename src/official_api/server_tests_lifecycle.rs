@@ -1,333 +1,275 @@
-use super::super::{files, uploads};
-use super::{job_request, service, store as new_store};
-use crate::official_api::wire::UploadCreate;
+use super::{service, store as new_store};
 use axum::{
-    Json,
     body::Body,
     extract::{Path, State},
     http::HeaderMap,
 };
+use serde_json::{Value, json};
+use std::sync::atomic::Ordering;
 
-#[tokio::test]
-async fn artifact_bytes_are_charged_to_each_file_lease_not_job_history() {
-    let store = new_store();
-    let metadata = store.reserve_metadata(3).unwrap();
-    let budget = store.artifact_budget(8).unwrap();
-    let files = (0..2)
-        .map(|n| {
-            let id = format!("artifact-{n}");
+async fn create(
+    service: &super::super::service::OfficialService,
+    body: Value,
+) -> (String, Vec<(String, String)>) {
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/tasks")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = super::super::tasks::create(State(service.inner.clone()), request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let task_id = value["task_id"].as_str().unwrap().to_owned();
+    let files = value["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| {
             (
-                crate::official_api::wire::FileObject {
-                    id,
-                    object: "file",
-                    bytes: 4,
-                    created_at: 0,
-                    expires_at: None,
-                    filename: "x.bin".into(),
-                    purpose: "parse".into(),
-                    sha256sum: None,
-                },
-                vec![n; 4],
+                file["file_id"].as_str().unwrap().to_owned(),
+                file["file_name"].as_str().unwrap().to_owned(),
             )
         })
         .collect();
-    store
-        .publish_artifact_batch(files, metadata.clone(), budget.clone())
-        .unwrap();
-    budget.shrink_to(0);
-    metadata.shrink_to(1);
-    let held = match store
-        .inner
-        .entries
-        .lock()
-        .unwrap()
-        .get("artifact-0")
-        .unwrap()
-    {
-        super::super::store::Entry::File(file) => file.bytes.clone(),
-        _ => unreachable!(),
-    };
-    for id in ["artifact-0", "artifact-1"] {
-        assert!(
-            files::delete(State(store.clone()), Path(id.into()))
-                .await
-                .unwrap()
-                .0
-                .deleted
-        );
-    }
-    assert_eq!(
-        store
-            .inner
-            .artifact_used
-            .load(std::sync::atomic::Ordering::Acquire),
-        4
-    );
-    assert_eq!(
-        store
-            .inner
-            .meta_used
-            .load(std::sync::atomic::Ordering::Acquire),
-        1
-    );
-    drop(held);
-    assert_eq!(
-        store
-            .inner
-            .artifact_used
-            .load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
-    drop(metadata);
-    assert_eq!(
-        store
-            .inner
-            .meta_used
-            .load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
+    (task_id, files)
 }
 
-#[tokio::test]
-async fn expired_source_cannot_be_leased_but_existing_lease_survives_cleanup() {
-    let store = new_store();
-    let upload = uploads::create(
-        State(store.clone()),
-        Ok(Json(UploadCreate {
-            filename: "input.pdf".into(),
-            bytes: 3,
-            mime_type: "application/pdf".into(),
-            purpose: "parse".into(),
-            sha256sum: None,
-            expires_after: None,
-        })),
-    )
-    .await
-    .unwrap()
-    .0;
-    uploads::put(
-        State(store.clone()),
-        Path(upload.id.clone()),
-        HeaderMap::new(),
-        Body::from("abc"),
-    )
-    .await
-    .unwrap();
-    let file = uploads::complete(State(store.clone()), Path(upload.id), Ok(None))
-        .await
-        .unwrap()
-        .0
-        .file
-        .unwrap();
-    let lease = store.input_lease(&file.id).unwrap().1;
-    if let Some(super::super::store::Entry::File(file)) =
-        store.inner.entries.lock().unwrap().get_mut(&file.id)
-    {
-        file.object.expires_at = Some(0);
-    }
-    assert!(store.input_lease(&file.id).is_none());
-    store.cleanup_expired();
-    assert_eq!(&lease[..], b"abc");
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        3
-    );
-    drop(lease);
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
-}
-
-#[tokio::test]
-async fn deleting_queued_source_reclaims_its_job_lease_on_cancel() {
-    let store = new_store();
-    let upload = uploads::create(
-        State(store.clone()),
-        Ok(Json(UploadCreate {
-            filename: "input.pdf".into(),
-            bytes: 3,
-            mime_type: "application/pdf".into(),
-            purpose: "parse".into(),
-            sha256sum: None,
-            expires_after: None,
-        })),
-    )
-    .await
-    .unwrap()
-    .0;
-    uploads::put(
-        State(store.clone()),
-        Path(upload.id.clone()),
-        HeaderMap::new(),
-        Body::from("abc"),
-    )
-    .await
-    .unwrap();
-    let source = uploads::complete(State(store.clone()), Path(upload.id), Ok(None))
-        .await
-        .unwrap()
-        .0
-        .file
-        .unwrap();
-    let service = service(store.clone());
-    let (_, job) = super::super::jobs::create(
+async fn upload(
+    service: &super::super::service::OfficialService,
+    task_id: &str,
+    file_id: &str,
+    body: &'static [u8],
+) -> Result<Value, crate::official_api::wire::WireError> {
+    let response = super::super::tasks::upload::put(
         State(service.inner.clone()),
-        Ok(Json(job_request(
-            serde_json::json!([{"source":{"type":"file_id","file_id":source.id}}]),
-        ))),
+        Path((task_id.to_owned(), file_id.to_owned())),
+        HeaderMap::new(),
+        Body::from(body),
+    )
+    .await?;
+    Ok(serde_json::to_value(response.0).unwrap())
+}
+
+#[tokio::test]
+async fn canceled_upload_releases_the_input_reservation() {
+    let store = new_store();
+    let service = service(store.clone());
+    let (task_id, files) = create(
+        &service,
+        json!({"files": [{"file_name": "a.pdf", "bytes": 4}]}),
+    )
+    .await;
+    let response = upload(&service, &task_id, &files[0].0, b"abcd")
+        .await
+        .unwrap();
+    assert_eq!(response["status"], "pending");
+    assert_eq!(store.inner.used.load(Ordering::Acquire), 4);
+    let receipt = super::super::tasks::cancel(
+        State(service.inner.clone()),
+        Path(task_id.clone()),
+        HeaderMap::new(),
     )
     .await
-    .unwrap();
+    .unwrap()
+    .0;
+    assert_eq!(receipt.status, "canceled");
+    assert_eq!(store.inner.used.load(Ordering::Acquire), 0);
+    let state = super::super::tasks::status(
+        State(service.inner.clone()),
+        Path(task_id),
+        HeaderMap::new(),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        state.status,
+        crate::official_api::wire::TaskStatus::Canceled
+    );
     assert!(
-        files::delete(State(store.clone()), Path(source.id))
-            .await
-            .unwrap()
-            .0
-            .deleted
+        state
+            .files
+            .iter()
+            .all(|file| file.status == crate::official_api::wire::TaskFileState::Canceled)
     );
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        3
-    );
-    assert_eq!(
-        super::super::jobs::cancel(State(service.inner.clone()), Path(job.job_id.clone()))
-            .await
-            .unwrap()
-            .0
-            .status,
-        "canceled"
-    );
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
+    service.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn cancellation_before_artifact_commit_prevents_publication() {
+async fn repeated_upload_of_a_completed_file_is_idempotent() {
     let store = new_store();
     let service = service(store.clone());
-    let (_, response) = super::super::jobs::create(
-        State(service.inner.clone()),
-        Ok(Json(job_request(serde_json::json!([
-            {"source":{"type":"inline","name":"done.pdf","data":"YQ=="}},
-            {"source":{"type":"inline","name":"current.pdf","data":"Yg=="}},
-            {"source":{"type":"inline","name":"later.pdf","data":"Yw=="}}
-        ])))),
+    let (task_id, files) = create(
+        &service,
+        json!({"files": [{"file_name": "a.pdf", "bytes": 4}]}),
     )
-    .await
-    .unwrap();
-    let shared = service.inner.jobs.lock().unwrap()[&response.job_id].clone();
-    assert!(!super::super::jobs::publication_was_canceled(&service.inner, &shared).await);
+    .await;
+    assert_eq!(
+        upload(&service, &task_id, &files[0].0, b"abcd")
+            .await
+            .unwrap()["status"],
+        "pending"
+    );
+    assert_eq!(
+        upload(&service, &task_id, &files[0].0, b"abcd")
+            .await
+            .unwrap()["status"],
+        "pending"
+    );
+    assert_eq!(store.inner.used.load(Ordering::Acquire), 4);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancel_before_execution_prevents_publication() {
+    let store = new_store();
+    let service = service(store.clone());
+    let (task_id, files) = create(
+        &service,
+        json!({"files": [
+            {"file_name": "a.pdf", "bytes": 4},
+            {"file_name": "b.pdf", "bytes": 4}
+        ]}),
+    )
+    .await;
+    upload(&service, &task_id, &files[0].0, b"abcd")
+        .await
+        .unwrap();
+    let shared = store.lookup(&task_id).unwrap();
     {
-        let mut record = shared.lock().await;
-        record.response.files[0].status = "completed".into();
-        record.response.files[0].parse = Some(serde_json::json!({"pages":1}));
-        record.response.files[1].status = "running".into();
+        let mut task = shared.lock().await;
+        super::super::jobs::cancel_task(&service.inner, &mut task);
     }
-    let result = crate::official::OfficialResult {
-        middle: serde_json::json!({"pages":[{}]}),
-        model: None,
-        markdown: "text".into(),
-        structured: serde_json::json!({}),
-        assets: std::collections::BTreeMap::new(),
-        warnings: Vec::new(),
-        metadata: crate::official::OfficialVersionMetadata {
-            mineru_package: "test".into(),
-            schema_version: "test".into(),
-            bundle_name: "test".into(),
-        },
-    };
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
-    *service.inner.publication_pause.lock().unwrap() = Some((ready_tx, resume_rx));
+    assert!(
+        super::super::jobs::output::publish_result(
+            &service.inner,
+            &shared,
+            0,
+            &crate::official::OfficialResult {
+                middle: json!({"pages":[{}]}),
+                model: None,
+                markdown: "text".into(),
+                structured: json!({}),
+                assets: std::collections::BTreeMap::new(),
+                warnings: Vec::new(),
+                metadata: crate::official::OfficialVersionMetadata {
+                    mineru_package: "test".into(),
+                    schema_version: "test".into(),
+                    bundle_name: "test".into(),
+                },
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert!(store.inner.files.lock().unwrap().is_empty());
+    assert_eq!(store.inner.used.load(Ordering::Acquire), 0);
+    assert_eq!(store.inner.artifact_used.load(Ordering::Acquire), 0);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn shutdown_barrier_preserves_accepted_commit_and_rejects_later_tasks() {
+    let store = new_store();
+    let service = service(store.clone());
+    let (runner_ready_tx, runner_ready_rx) = tokio::sync::oneshot::channel();
+    let (runner_resume_tx, runner_resume_rx) = tokio::sync::oneshot::channel();
+    *service.inner.runner_empty_pause.lock().unwrap() = Some((runner_ready_tx, runner_resume_rx));
+    service.start().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), runner_ready_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    *service.inner.commit_pause.lock().unwrap() = Some((ready_tx, resume_rx));
+    let (stop_waiting_tx, stop_waiting_rx) = tokio::sync::oneshot::channel();
+    *service.inner.stop_waiting.lock().unwrap() = Some(stop_waiting_tx);
     let inner = service.inner.clone();
-    let target = shared.clone();
-    let publish = tokio::spawn(async move {
-        super::super::jobs::output::publish_outputs(&inner, &target, 1, &result, &mut 0).await
+    let create = tokio::spawn(async move {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"files": [{"file_name": "a.pdf", "bytes": 1}]}).to_string(),
+            ))
+            .unwrap();
+        super::super::tasks::create(State(inner), request).await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(3), ready_rx)
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::task::spawn_blocking(move || ready_rx.recv().unwrap()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stopping = service.clone();
+    let shutdown = tokio::spawn(async move { stopping.shutdown().await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), stop_waiting_rx)
         .await
         .unwrap()
         .unwrap();
-    shared
-        .lock()
-        .await
-        .cancel
-        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(!service.inner.stopping.load(Ordering::Acquire));
     resume_tx.send(()).unwrap();
-    assert!(publish.await.unwrap().is_err());
-    let mut failures = 0;
-    assert!(
-        super::super::jobs::record_publication_failure(&service.inner, &shared, 1, &mut failures)
+    let response = create.await.unwrap().unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+    runner_resume_tx.send(()).unwrap();
+    shutdown.await.unwrap().unwrap();
+    let error = {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"files": [{"file_name": "late.pdf", "bytes": 1}]}).to_string(),
+            ))
+            .unwrap();
+        super::super::tasks::create(State(service.inner.clone()), request)
             .await
-    );
-    assert_eq!(failures, 0);
-    {
-        let record = shared.lock().await;
-        assert!(record.response.files[1].output_files.is_none());
-        assert!(record.response.files[1].parse.is_none());
-        assert_eq!(record.response.progress.failed, 0);
-    }
-    assert!(store.inner.entries.lock().unwrap().is_empty());
-    assert!(
-        shared
-            .lock()
-            .await
-            .cancel
-            .load(std::sync::atomic::Ordering::Acquire)
-    );
-    super::super::jobs::finalize_job(&service.inner, &shared, 1, 0).await;
-    let record = shared.lock().await;
-    assert_eq!(record.response.status, "canceled");
-    assert_eq!(record.response.files[0].status, "completed");
-    assert_eq!(
-        record.response.files[0].parse,
-        Some(serde_json::json!({"pages":1}))
-    );
-    assert_eq!(record.response.files[1].status, "canceled");
-    assert_eq!(record.response.files[2].status, "canceled");
-    assert_eq!(record.response.progress.completed, 1);
-    assert_eq!(record.response.progress.failed, 0);
-    drop(record);
-    assert_eq!(
-        store
-            .inner
-            .artifact_used
-            .load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
+            .unwrap_err()
+    };
+    assert_eq!(error.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(service.inner.queue.lock().unwrap().is_empty());
+    assert_eq!(service.inner.jobs_created.load(Ordering::Acquire), 1);
+    assert_eq!(store.inner.used.load(Ordering::Acquire), 0);
+
+    let store2 = new_store();
+    store2.stop_admissions();
+    assert!(!store2.inner.accepting.load(Ordering::Acquire));
 }
 
-#[tokio::test]
-async fn uncanceled_artifact_generation_error_is_counted_as_failed() {
-    let service = service(new_store());
-    let (_, response) = super::super::jobs::create(
-        State(service.inner.clone()),
-        Ok(Json(job_request(
-            serde_json::json!([{"source":{"type":"inline","name":"bad.pdf","data":"YQ=="}}]),
-        ))),
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn shutdown_while_waiting_for_gate_does_not_need_the_external_permit() {
+    let store = new_store();
+    let gate = store.shared_gate().clone();
+    let held: Vec<_> = (0..gate.available_permits())
+        .map(|_| gate.clone().try_acquire_owned().unwrap())
+        .collect();
+    assert!(!held.is_empty());
+    let service = service(store.clone());
+    let (task_id, files) = create(
+        &service,
+        json!({"files": [{"file_name": "a.pdf", "bytes": 4}]}),
     )
-    .await
-    .unwrap();
-    let shared = service.inner.jobs.lock().unwrap()[&response.job_id].clone();
-    let mut failures = 0;
-    assert!(
-        !super::super::jobs::record_publication_failure(&service.inner, &shared, 0, &mut failures)
-            .await
-    );
-    assert_eq!(failures, 1);
-    let record = shared.lock().await;
-    assert_eq!(record.response.files[0].status, "failed");
-    assert_eq!(
-        record.response.files[0].error.as_ref().unwrap().message,
-        "artifact generation failed"
-    );
+    .await;
+    upload(&service, &task_id, &files[0].0, b"abcd")
+        .await
+        .unwrap();
+    service.start().unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), service.shutdown())
+        .await
+        .expect("shutdown must not wait for the external gate permit")
+        .unwrap();
+    assert_eq!(store.inner.used.load(Ordering::Acquire), 0);
+    drop(held);
 }
 
 #[path = "server_tests_lifecycle_limits.rs"]

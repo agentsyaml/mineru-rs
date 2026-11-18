@@ -1,238 +1,106 @@
-use super::{files, store::OfficialFileStore, uploads};
-use crate::official_api::wire::{Completion, UploadCreate};
+use super::{files, store::OfficialFileStore};
+use crate::official_api::wire::{FileObjectModel, FilePurpose};
 use axum::{
-    Json,
-    body::Body,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    http::StatusCode,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
-fn store() -> OfficialFileStore {
+pub(super) fn store() -> OfficialFileStore {
+    store_with_slots(2)
+}
+
+pub(super) fn store_with_slots(slots: usize) -> OfficialFileStore {
     OfficialFileStore::new(
-        Arc::new(Semaphore::new(2)),
+        Arc::new(Semaphore::new(slots)),
         Arc::new(Semaphore::new(1)),
-        std::time::Duration::from_secs(3600),
+        Duration::from_secs(3600),
     )
     .unwrap()
 }
 
-fn job_request(files: serde_json::Value) -> crate::official_api::wire::JobCreate {
-    serde_json::from_value(serde_json::json!({"files": files})).unwrap()
-}
-
-fn service(store: OfficialFileStore) -> super::service::OfficialService {
+pub(super) fn service(store: OfficialFileStore) -> super::service::OfficialService {
     super::service::OfficialService::new(crate::official::OfficialRuntime::new(), store).unwrap()
 }
 
-#[tokio::test]
-async fn upload_complete_source_forbidden_and_delete_keeps_lease_charged() {
-    let store = store();
-    let request = UploadCreate {
-        filename: "doc.pdf".into(),
-        bytes: 3,
-        mime_type: "application/pdf".into(),
-        purpose: "parse".into(),
+pub(super) fn object(id: &str, name: &str, bytes: u64) -> FileObjectModel {
+    FileObjectModel {
+        id: id.into(),
+        object: FileObjectModel::OBJECT,
+        bytes,
+        created_at: 7,
+        expires_at: None,
+        file_name: name.into(),
+        purpose: FilePurpose::ParseOutput,
         sha256sum: None,
-        expires_after: None,
-    };
-    let created = uploads::create(State(store.clone()), Ok(Json(request)))
-        .await
-        .unwrap()
-        .0;
-    let put = uploads::put(
-        State(store.clone()),
-        Path(created.id.clone()),
-        HeaderMap::new(),
-        Body::from("abc"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(put.into_response().status(), StatusCode::OK);
-    let completed = uploads::complete(
-        State(store.clone()),
-        Path(created.id),
-        Ok(Some(Json(Completion { sha256sum: None }))),
-    )
-    .await
-    .unwrap()
-    .0;
-    let file_id = completed.file.unwrap().id;
-    assert_eq!(
-        uploads::complete(State(store.clone()), Path(completed.id.clone()), Ok(None))
-            .await
-            .unwrap()
-            .0
-            .file
-            .unwrap()
-            .id,
-        file_id
-    );
-    let terminal = uploads::cancel(State(store.clone()), Path(completed.id))
-        .await
-        .unwrap_err();
-    assert_eq!(terminal.status, StatusCode::CONFLICT);
-    let denied = files::content(State(store.clone()), Path(file_id.clone()))
-        .await
-        .unwrap_err();
-    assert_eq!(denied.status, StatusCode::FORBIDDEN);
-    let lease = store.input_lease(&file_id).unwrap().1;
-    let deleted = files::delete(State(store.clone()), Path(file_id.clone()))
-        .await
-        .unwrap();
-    assert!(deleted.0.deleted);
-    assert!(store.input_lease(&file_id).is_none());
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        3
-    );
-    drop(lease);
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
-}
-
-#[tokio::test]
-async fn bad_upload_length_rolls_back_reservation() {
-    let store = store();
-    let req = UploadCreate {
-        filename: "x.pdf".into(),
-        bytes: 4,
-        mime_type: "application/pdf".into(),
-        purpose: "parse".into(),
-        sha256sum: None,
-        expires_after: None,
-    };
-    let upload = uploads::create(State(store.clone()), Ok(Json(req)))
-        .await
-        .unwrap()
-        .0;
-    let error = match uploads::put(
-        State(store.clone()),
-        Path(upload.id),
-        HeaderMap::new(),
-        Body::from("abc"),
-    )
-    .await
-    {
-        Err(error) => error,
-        Ok(_) => panic!("short body should fail"),
-    };
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
-}
-
-#[tokio::test]
-async fn upload_hash_mismatch_rolls_back_once() {
-    let store = store();
-    let req = UploadCreate {
-        filename: "x.pdf".into(),
-        bytes: 3,
-        mime_type: "application/pdf".into(),
-        purpose: "parse".into(),
-        sha256sum: Some("0".repeat(64)),
-        expires_after: None,
-    };
-    let upload = uploads::create(State(store.clone()), Ok(Json(req)))
-        .await
-        .unwrap()
-        .0;
-    let error = match uploads::put(
-        State(store.clone()),
-        Path(upload.id),
-        HeaderMap::new(),
-        Body::from("abc"),
-    )
-    .await
-    {
-        Err(error) => error,
-        Ok(_) => panic!("hash mismatch should fail"),
-    };
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
-}
-
-#[tokio::test]
-async fn expired_reservation_released_and_saturation_rejected() {
-    let store = store();
-    let req = UploadCreate {
-        filename: "x.pdf".into(),
-        bytes: 4,
-        mime_type: "application/pdf".into(),
-        purpose: "parse".into(),
-        sha256sum: None,
-        expires_after: None,
-    };
-    let upload = uploads::create(State(store.clone()), Ok(Json(req.clone())))
-        .await
-        .unwrap()
-        .0;
-    if let Some(super::store::Entry::Upload(u)) =
-        store.inner.entries.lock().unwrap().get_mut(&upload.id)
-    {
-        u.expires = 0;
     }
-    store.cleanup_expired();
-    assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
+}
+
+/// Publish one artifact through the bounded batch path used by the runner.
+pub(super) fn publish(store: &OfficialFileStore, id: &str, name: &str, data: &[u8]) {
     store
-        .inner
-        .used
-        .store(256 * 1024 * 1024, std::sync::atomic::Ordering::Release);
-    let error = match uploads::create(State(store.clone()), Ok(Json(req))).await {
-        Err(error) => error,
-        Ok(_) => panic!("saturated pool should reject"),
-    };
-    assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+        .publish_artifact_batch(
+            vec![(object(id, name, data.len() as u64), data.to_vec())],
+            store.reserve_metadata(1).unwrap(),
+            store.artifact_budget(data.len() as u64).unwrap(),
+        )
+        .unwrap();
 }
 
 #[tokio::test]
-async fn queued_job_cancel_is_terminal_and_releases_input_before_history_expiry() {
+async fn content_serves_published_bytes_and_unknown_is_not_found() {
     let store = store();
-    let service = service(store.clone());
-    let request = job_request(serde_json::json!([
-        {"source":{"type":"inline","name":"a.pdf","data":"YQ=="}}
-    ]));
-    let (status, response) = super::jobs::create(State(service.inner.clone()), Ok(Json(request)))
+    publish(&store, "file_a", "a.pdf", b"abcd");
+    let Json(object) = files::get(State(store.clone()), Path("file_a".into()))
         .await
         .unwrap();
-    assert_eq!(status, StatusCode::ACCEPTED);
-    let canceled = super::jobs::cancel(State(service.inner.clone()), Path(response.job_id.clone()))
+    assert_eq!(object.file_name, "a.pdf");
+    let response = files::content(State(store.clone()), Path("file_a".into()))
         .await
-        .unwrap()
-        .0;
-    assert_eq!(canceled.status, "canceled");
+        .unwrap();
     assert_eq!(
-        store.inner.used.load(std::sync::atomic::Ordering::Acquire),
-        0
+        response.headers().get("content-type").unwrap(),
+        "application/octet-stream"
     );
-    assert!(
-        service.inner.jobs.lock().unwrap()[&response.job_id]
-            .try_lock()
-            .unwrap()
-            .files
-            .is_empty()
-    );
-    assert_eq!(
-        super::jobs::get(State(service.inner.clone()), Path(response.job_id.clone()))
-            .await
-            .unwrap()
-            .0
-            .status,
-        "canceled"
-    );
-    service.shutdown().await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 16)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"abcd");
+    let error = files::get(State(store), Path("missing".into()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::NOT_FOUND);
+}
+
+use axum::Json;
+
+#[tokio::test]
+async fn published_artifacts_stay_charged_until_their_lease_drops() {
+    use std::sync::atomic::Ordering;
+    let store = store();
+    publish(&store, "file_a", "a.pdf", b"abcd");
+    let (_, held) = store.content("file_a").unwrap();
+    assert_eq!(store.inner.artifact_used.load(Ordering::Acquire), 4);
+    assert_eq!(store.inner.meta_used.load(Ordering::Acquire), 1);
+    store.clear_retained();
+    assert_eq!(store.inner.artifact_used.load(Ordering::Acquire), 4);
+    assert_eq!(store.inner.meta_used.load(Ordering::Acquire), 0);
+    drop(held);
+    assert_eq!(store.inner.artifact_used.load(Ordering::Acquire), 0);
+    assert_eq!(store.inner.meta_used.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn expired_artifacts_are_hidden_and_collected() {
+    let store = store();
+    publish(&store, "file_a", "a.pdf", b"abcd");
+    if let Some(file) = store.inner.files.lock().unwrap().get_mut("file_a") {
+        file.object.expires_at = Some(0);
+    }
+    assert!(store.file("file_a").is_none());
+    store.cleanup_expired();
+    assert!(store.inner.files.lock().unwrap().is_empty());
 }
 
 #[path = "server_tests_lifecycle.rs"]

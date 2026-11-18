@@ -1,15 +1,16 @@
 {
-  "as_of": "2026-10-23",
+  "as_of": "2026-11-18",
   "purpose": "Latest upstream release references for model-free compatibility checks; this is not a blanket platform or feature compatibility claim.",
   "mineru": {
-    "version": "4.0.12",
-    "commit": "b7f3dd0c5f6e6d66a298239ffd02b328b873918e",
-    "wheel": "mineru-4.0.12-py3-none-any.whl",
-    "sha256": "a3ff8582a4608eb1f4dde55800ac156d59b01ceabd2ab4002bdf8e86306b1eab"
+    "version": "4.2.3",
+    "commit": "cba4f4dad1c386f13065be832e3321cb0d1ae095",
+    "wheel": "mineru-4.2.3-py3-none-any.whl",
+    "sha256": "d73e1e01deef1cee569674e7dcb322c65b6e5be1ab5c8031bbe3cbd9a022fa9b"
   },
   "docvortex": {
-    "version": "0.6.0",
-    "commit": "1e1178b7bdcd58e93417baeaad5e18e7ea3169db",
+    "version": "0.6.24",
+    "source": "myhloli/DocVortex",
+    "commit": "8757b728260c28ccbee070ceb8b317c54cb9c653",
     "python": ">=3.11,<3.15",
     "wheels": {
       "linux-x86_64": "available",
@@ -19,16 +20,16 @@
       "macos-arm64": {
         "available": true,
         "minimum_macos": "14",
-        "sha256": "11330da89cc4a816f6c4cbe8a8d87f8f3906050428bd3c1ab9d879b0c0db76de"
+        "sha256": "417faec2b82331a4675a3de301349fa13de2d32fd51a3e5ceea2097d11250709"
       },
       "macos-x86_64": "no wheel",
       "source-distribution": "none"
     }
   },
   "mineru-vl-utils": {
-    "version": "2.0.7",
-    "commit": "8bf83648810bbaedad4683744c73be9810d74df7",
-    "wheel_sha256": "3bf184c359d69e78d0509f58324c58ad323037cf97bd4086cacb9caf53db0db7"
+    "version": "2.0.9",
+    "commit": "c3b3446901697a1c9e3b98ea6186ccf08834441f",
+    "wheel_sha256": "d09c612d28d0d2a1fa561aae3764639e6c704baf7a30d8c4f07f78bc9d2b4060"
   },
   "verification": {
     "scope": "model-free smoke checks only",

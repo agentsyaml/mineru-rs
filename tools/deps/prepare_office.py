@@ -35,10 +35,10 @@ from archive_safe import (
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / ".deps" / "office-xml041"
 LOCK = ROOT / ".deps" / ".office-xml041.prepare.lock"
-SOURCE_PIN = "b6e63b9d41687cfe2a735fcc955bc4a6743fc82bf0f0f3049bedd4082d8e16e5"
-RECIPE_PIN = "966dbe9bdd58a5e22d3a8f8a4f35fef3a93091847693b3e1e7f85294b7dcad6a"
+SOURCE_PIN = "c1d44851e20638f37a00e0c94985f7f7574b3e424e7cc986b20c1cb2439893ed"
+RECIPE_PIN = "029714082828215698249e753a90c8a885bca5dcf11d44ce81e53ccf156f30e2"
 ALLOWED_HOSTS = {"static.crates.io", "codeload.github.com"}
-PACKAGES = {"office2pdf", "umya-spreadsheet", "citationberg", "anydoc", "calamine", "docx-rs"}
+PACKAGES = {"citationberg", "anydoc"}
 TIMEOUT_SECONDS = 30
 MAX_DOWNLOAD_SECONDS = 120
 

@@ -1,4 +1,6 @@
-use crate::official_api::wire::{FileObject, UploadCreate};
+use crate::official_api::wire::{
+    ErrorDetail, FileObjectModel, FileParseInfo, TaskFileState, TaskStatus, Tier, UploadTaskOptions,
+};
 use bytes::Bytes;
 use std::{
     collections::HashMap,
@@ -8,125 +10,95 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
+
+mod accounting;
+pub(crate) use accounting::{Charged, MetadataReservation, Reservation};
 
 const INPUT_CAP: u64 = 256 * 1024 * 1024;
 const META_CAP: usize = 1024;
 pub(crate) struct Inner {
     pub admission: Mutex<()>,
-    pub entries: Mutex<HashMap<String, Entry>>,
+    /// Task records keyed by task id; each record owns its per-file state.
+    pub tasks: Mutex<HashMap<String, Arc<AsyncMutex<TaskRecord>>>>,
+    /// Published parse results keyed by the task file id they belong to.
+    pub files: Mutex<HashMap<String, StoredFile>>,
     pub used: AtomicU64,
     pub artifact_used: AtomicU64,
     pub meta_used: std::sync::atomic::AtomicUsize,
     pub ids: Mutex<Arc<AtomicU64>>,
     pub accepting: std::sync::atomic::AtomicBool,
 }
-pub(crate) enum Entry {
-    Upload(Upload),
-    File(File),
-}
-pub(crate) struct Upload {
-    pub request: UploadCreate,
-    pub created: i64,
-    pub expires: i64,
-    pub bytes: Option<Bytes>,
-    pub reservation: Option<Arc<Reservation>>,
-    pub metadata: Arc<MetadataReservation>,
-    pub file_id: Option<String>,
-    pub uploading: bool,
-}
-pub(crate) struct File {
-    pub object: FileObject,
+pub(crate) struct StoredFile {
+    pub object: FileObjectModel,
     pub bytes: Bytes,
-    pub source: bool,
-    pub _metadata: Option<Arc<MetadataReservation>>,
+    _metadata: Arc<MetadataReservation>,
 }
-pub(crate) struct Reservation {
-    pub size: std::sync::atomic::AtomicU64,
-    inner: std::sync::Weak<Inner>,
-    artifact: bool,
+/// One input file of a task, owning its upload reservation and result state.
+pub(crate) struct TaskFile {
+    pub file_id: String,
+    pub file_name: String,
+    /// Declared size from the request; kept for upload consistency checks.
+    pub declared: Option<u64>,
+    /// Actual size once bytes or a URL download were accepted.
+    pub actual: Option<u64>,
+    pub url: Option<String>,
+    pub sha256sum: Option<String>,
+    pub page_range: String,
+    pub tier: Tier,
+    pub status: TaskFileState,
+    pub expired: bool,
+    /// Whether an upload or a URL download already delivered this input.
+    pub uploaded: bool,
+    pub upload_active: bool,
+    pub submitted: bool,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub parse: Option<FileParseInfo>,
+    pub error: Option<ErrorDetail>,
+    pub data: Option<Bytes>,
+    /// Serializes uploads of this file; a repeat after completion is a no-op.
+    pub upload_lock: Arc<AsyncMutex<()>>,
 }
-impl Reservation {
-    pub(crate) fn split(&self, bytes: u64) -> Option<Arc<Self>> {
-        self.size
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |size| {
-                size.checked_sub(bytes)
-            })
-            .ok()?;
-        Some(Arc::new(Self {
-            size: AtomicU64::new(bytes),
-            inner: self.inner.clone(),
-            artifact: self.artifact,
-        }))
+pub(crate) struct TaskRecord {
+    pub id: String,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+    pub status: TaskStatus,
+    pub options: UploadTaskOptions,
+    pub files: Vec<TaskFile>,
+    pub expires_at: i64,
+    pub retention_at: Option<i64>,
+    pub error: Option<ErrorDetail>,
+    pub running: bool,
+    pub _slot: OwnedSemaphorePermit,
+    pub _metadata: Arc<MetadataReservation>,
+    pub _artifact_budget: Arc<Reservation>,
+}
+impl TaskFile {
+    pub(crate) fn bytes(&self) -> Option<u64> {
+        self.actual.or(self.declared)
     }
-    pub(crate) fn shrink_to(&self, size: u64) {
-        let old = self.size.swap(size, Ordering::AcqRel);
-        if let Some(inner) = self.inner.upgrade() {
-            let pool = if self.artifact {
-                &inner.artifact_used
-            } else {
-                &inner.used
-            };
-            if size < old {
-                pool.fetch_sub(old - size, Ordering::AcqRel);
-            }
-        }
-    }
-}
-pub(crate) struct MetadataReservation {
-    count: std::sync::atomic::AtomicUsize,
-    inner: std::sync::Weak<Inner>,
-}
-impl MetadataReservation {
-    fn split(&self) -> Option<Arc<Self>> {
-        self.count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_sub(1)
-            })
-            .ok()?;
-        Some(Arc::new(Self {
-            count: std::sync::atomic::AtomicUsize::new(1),
-            inner: self.inner.clone(),
-        }))
-    }
-    pub(crate) fn shrink_to(&self, count: usize) {
-        let old = self.count.swap(count, Ordering::AcqRel);
-        if count < old
-            && let Some(inner) = self.inner.upgrade()
-        {
-            inner.meta_used.fetch_sub(old - count, Ordering::AcqRel);
-        }
+    /// Mirrors upstream `_upload_descriptor`: only an actionable upload shows.
+    pub(crate) fn upload_available(&self, task: &TaskRecord, now: i64) -> bool {
+        self.url.is_none()
+            && !self.uploaded
+            && !self.upload_active
+            && self.status == TaskFileState::WaitingFile
+            && task.status != TaskStatus::Canceled
+            && task.expires_at > now
     }
 }
-impl Drop for MetadataReservation {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.upgrade() {
-            inner
-                .meta_used
-                .fetch_sub(self.count.load(Ordering::Acquire), Ordering::AcqRel);
-        }
-    }
+pub(crate) fn task_terminal(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Completed | TaskStatus::Partial | TaskStatus::Failed | TaskStatus::Canceled
+    )
 }
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.upgrade() {
-            let pool = if self.artifact {
-                &inner.artifact_used
-            } else {
-                &inner.used
-            };
-            pool.fetch_sub(self.size.load(Ordering::Acquire), Ordering::AcqRel);
-        }
-    }
-}
-pub(crate) struct Charged {
-    pub data: Vec<u8>,
-    _reservation: Arc<Reservation>,
-}
-impl AsRef<[u8]> for Charged {
-    fn as_ref(&self) -> &[u8] {
-        &self.data
-    }
+pub(crate) fn timestamp() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 #[derive(Clone)]
 pub struct OfficialFileStore {
@@ -156,7 +128,8 @@ impl OfficialFileStore {
         Ok(Self {
             inner: Arc::new(Inner {
                 admission: Mutex::new(()),
-                entries: Mutex::new(HashMap::new()),
+                tasks: Mutex::new(HashMap::new()),
+                files: Mutex::new(HashMap::new()),
                 used: AtomicU64::new(0),
                 artifact_used: AtomicU64::new(0),
                 meta_used: std::sync::atomic::AtomicUsize::new(0),
@@ -206,9 +179,6 @@ impl OfficialFileStore {
             .unwrap_or_default()
             .as_secs() as i64
     }
-    pub(crate) fn id(&self) -> String {
-        self.next_id("upload")
-    }
     pub(crate) fn next_id(&self, prefix: &str) -> String {
         let ids = self
             .inner
@@ -233,13 +203,8 @@ impl OfficialFileStore {
             .is_ok()
     }
     pub(crate) fn input_reservation(&self, bytes: u64) -> Option<Arc<Reservation>> {
-        self.reserve(bytes).then(|| {
-            Arc::new(Reservation {
-                size: AtomicU64::new(bytes),
-                inner: Arc::downgrade(&self.inner),
-                artifact: false,
-            })
-        })
+        self.reserve(bytes)
+            .then(|| Arc::new(Reservation::input(bytes, &self.inner)))
     }
     pub(crate) fn artifact_budget(&self, bytes: u64) -> Option<Arc<Reservation>> {
         self.inner
@@ -248,11 +213,7 @@ impl OfficialFileStore {
                 n.checked_add(bytes).filter(|v| *v <= 256 * 1024 * 1024)
             })
             .ok()?;
-        Some(Arc::new(Reservation {
-            size: AtomicU64::new(bytes),
-            inner: Arc::downgrade(&self.inner),
-            artifact: true,
-        }))
+        Some(Arc::new(Reservation::artifact(bytes, &self.inner)))
     }
     pub(crate) fn reserve_metadata(&self, count: usize) -> Option<Arc<MetadataReservation>> {
         self.inner
@@ -261,19 +222,10 @@ impl OfficialFileStore {
                 n.checked_add(count).filter(|v| *v <= META_CAP)
             })
             .ok()?;
-        Some(Arc::new(MetadataReservation {
-            count: std::sync::atomic::AtomicUsize::new(count),
-            inner: Arc::downgrade(&self.inner),
-        }))
+        Some(Arc::new(MetadataReservation::new(count, &self.inner)))
     }
     pub(crate) fn charged(&self, data: Vec<u8>, reservation: Arc<Reservation>) -> Bytes {
-        Bytes::from_owner(Charged {
-            data,
-            _reservation: reservation,
-        })
-    }
-    pub(crate) fn retain_for(&self, seconds: u64) -> bool {
-        seconds <= self.retention.as_secs()
+        Charged::new(data, reservation).into_bytes()
     }
     pub(crate) fn retention_secs(&self) -> u64 {
         self.retention.as_secs()
@@ -289,40 +241,110 @@ impl OfficialFileStore {
     pub(crate) fn clear_retained(&self) {
         let removed = self
             .inner
-            .entries
+            .tasks
+            .lock()
+            .map(|mut m| std::mem::take(&mut *m))
+            .unwrap_or_default();
+        let files = self
+            .inner
+            .files
             .lock()
             .map(|mut m| std::mem::take(&mut *m))
             .unwrap_or_default();
         drop(removed);
+        drop(files);
     }
-    pub(crate) fn file(&self, id: &str) -> Option<FileObject> {
-        match self.inner.entries.lock().ok()?.get(id)? {
-            Entry::File(f)
-                if f.object
-                    .expires_at
-                    .is_none_or(|expiry| expiry > Self::now()) =>
-            {
-                Some(f.object.clone())
-            }
-            _ => None,
+    pub(crate) fn lookup(&self, id: &str) -> Option<Arc<AsyncMutex<TaskRecord>>> {
+        self.inner.tasks.lock().ok()?.get(id).cloned()
+    }
+    pub(crate) fn insert_task(&self, id: String, record: Arc<AsyncMutex<TaskRecord>>) {
+        if let Ok(mut tasks) = self.inner.tasks.lock() {
+            tasks.insert(id, record);
         }
     }
-    pub(crate) fn input_lease(&self, id: &str) -> Option<(FileObject, Bytes)> {
-        match self.inner.entries.lock().ok()?.get(id)? {
-            Entry::File(f)
-                if f.source
-                    && f.object
-                        .expires_at
-                        .is_none_or(|expiry| expiry > Self::now()) =>
-            {
-                Some((f.object.clone(), f.bytes.clone()))
-            }
-            _ => None,
+    /// Recompute the aggregate status, finishing the task once every file ends.
+    pub(crate) fn aggregate(&self, task: &mut TaskRecord) {
+        if task.status == TaskStatus::Canceled {
+            return;
         }
+        let (mut running, mut pending, mut waiting, mut completed) = (false, false, false, 0u32);
+        for file in &task.files {
+            match file.status {
+                TaskFileState::Running => running = true,
+                TaskFileState::Pending => pending = true,
+                TaskFileState::WaitingFile => waiting = true,
+                TaskFileState::Completed => completed += 1,
+                TaskFileState::Failed | TaskFileState::Canceled => {}
+            }
+        }
+        task.status = if running {
+            TaskStatus::Running
+        } else if pending {
+            TaskStatus::Pending
+        } else if waiting {
+            TaskStatus::WaitingFile
+        } else if completed as usize == task.files.len() {
+            TaskStatus::Completed
+        } else if completed > 0 {
+            TaskStatus::Partial
+        } else {
+            TaskStatus::Failed
+        };
+        if task_terminal(task.status) && task.finished_at.is_none() {
+            task.finished_at = Some(timestamp());
+            task.retention_at = Some(Self::now() + self.retention_secs() as i64);
+        }
+    }
+    /// Mirrors upstream `update_lease`: a caller-supplied lease extends how long
+    /// the task's uploads and finished results stay retrievable.
+    pub(crate) fn update_lease(&self, task: &mut TaskRecord, lease: Option<u64>) {
+        let Some(seconds) = lease else {
+            return;
+        };
+        let deadline = Self::now() + seconds as i64;
+        task.expires_at = task.expires_at.max(deadline);
+        task.retention_at = task.retention_at.map(|at| at.max(deadline));
+    }
+    /// Mirrors upstream `_expire_uploads`: end files that never uploaded.
+    pub(crate) fn expire_uploads(&self, task: &mut TaskRecord) {
+        if task.expires_at > Self::now() || task.status == TaskStatus::Canceled {
+            return;
+        }
+        for file in &mut task.files {
+            if file.url.is_none()
+                && file.data.is_none()
+                && file.status == TaskFileState::WaitingFile
+                && !file.upload_active
+            {
+                file.expired = true;
+                file.status = TaskFileState::Failed;
+                file.error = Some(ErrorDetail {
+                    code: "upload_expired".into(),
+                    message: "Upload expired".into(),
+                    param: None,
+                });
+            }
+        }
+        self.aggregate(task);
+    }
+    pub(crate) fn file(&self, id: &str) -> Option<FileObjectModel> {
+        self.content(id).map(|(object, _)| object)
+    }
+    pub(crate) fn content(&self, id: &str) -> Option<(FileObjectModel, Bytes)> {
+        let files = self.inner.files.lock().ok()?;
+        let file = files.get(id)?;
+        if file
+            .object
+            .expires_at
+            .is_some_and(|expiry| expiry <= Self::now())
+        {
+            return None;
+        }
+        Some((file.object.clone(), file.bytes.clone()))
     }
     pub(crate) fn publish_artifact_batch(
         &self,
-        files: Vec<(FileObject, Vec<u8>)>,
+        files: Vec<(FileObjectModel, Vec<u8>)>,
         metadata: Arc<MetadataReservation>,
         reservation: Arc<Reservation>,
     ) -> Result<(), &'static str> {
@@ -336,7 +358,7 @@ impl OfficialFileStore {
         if total > reservation.size.load(Ordering::Acquire) {
             return Err("artifact reservation exhausted");
         }
-        let mut entries = match self.inner.entries.lock() {
+        let mut entries = match self.inner.files.lock() {
             Ok(v) => v,
             Err(_) => return Err("store unavailable"),
         };
@@ -358,12 +380,11 @@ impl OfficialFileStore {
             let id = object.id.clone();
             entries.insert(
                 id,
-                Entry::File(File {
+                StoredFile {
                     object,
                     bytes,
-                    source: false,
-                    _metadata: Some(file_metadata),
-                }),
+                    _metadata: file_metadata,
+                },
             );
         }
         Ok(())
@@ -377,25 +398,20 @@ impl OfficialFileStore {
         self.inner.accepting.store(false, Ordering::Release);
     }
     pub fn cleanup_expired(&self) {
-        let mut removed = Vec::new();
-        if let Ok(mut entries) = self.inner.entries.lock() {
-            let now = Self::now();
-            let ids: Vec<_> = entries
-                .iter()
-                .filter_map(|(id, entry)| match entry {
-                    Entry::Upload(u) if u.expires <= now => Some(id.clone()),
-                    Entry::File(f) if f.object.expires_at.is_some_and(|t| t <= now) => {
-                        Some(id.clone())
-                    }
-                    _ => None,
-                })
-                .collect();
-            for id in ids {
-                if let Some(entry) = entries.remove(&id) {
-                    removed.push(entry);
-                }
-            }
+        let now = Self::now();
+        if let Ok(mut files) = self.inner.files.lock() {
+            files.retain(|_, file| file.object.expires_at.is_none_or(|expiry| expiry > now));
         }
-        drop(removed);
+        if let Ok(mut tasks) = self.inner.tasks.lock() {
+            tasks.retain(|_, task| {
+                if Arc::strong_count(task) > 1 {
+                    return true;
+                }
+                match task.try_lock() {
+                    Ok(state) => state.retention_at.is_none_or(|at| at > now),
+                    Err(_) => true,
+                }
+            });
+        }
     }
 }

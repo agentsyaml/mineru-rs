@@ -24,9 +24,9 @@ from typing import Any
 sys.dont_write_bytecode = True
 
 EXPECTED = {
-    "mineru": "4.0.12",
-    "docvortex": "0.6.0",
-    "mineru-vl-utils": "2.0.7",
+    "mineru": "4.2.3",
+    "docvortex": "0.6.24",
+    "mineru-vl-utils": "2.0.9",
 }
 PYTHON_DIR = Path(__file__).resolve().parents[2] / "python"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

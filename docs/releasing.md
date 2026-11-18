@@ -2,7 +2,7 @@
 
 This guide covers maintainer preflight and the protected GitHub Actions release
 workflow in `.github/workflows/release.yml`. Run repository commands from the
-root. Release builds use Rust 1.89.0 and pinned local Office sources. Python
+root. Release builds use Rust 1.92.0 and pinned local Office sources. Python
 3.9+ can prepare those sources and build the local wheel; use Python 3.11+ for
 the audit checker, which reads TOML with `tomllib`. The workflow builds five
 Python wheels, six native npm packages plus the npm root package, six binary
@@ -38,7 +38,6 @@ the local dependency source records and constraints.
    python3 tools/deps/prepare_office.py prepare
    python3 tools/deps/prepare_office.py verify
    python3 -m unittest discover -s tools/deps -p 'test_*.py'
-   python3 tools/deps/office_xml_parity.py
    ```
 
 2. Synchronize the workspace version, workspace package entries in
@@ -46,10 +45,11 @@ the local dependency source records and constraints.
    `bindings/node/package-lock.json`, and the expected version constants in
    maintained `bindings/node/index.js` to stable `X.Y.Z`. Python wheel version
    is derived from the workspace; do not edit separate Python version metadata.
+   Add `docs/releases/X.Y.Z.md` describing user-visible changes.
    Verify root package and target identities:
 
    ```sh
-   cargo +1.89.0 metadata --locked --no-deps --format-version 1
+   cargo +1.92.0 metadata --locked --no-deps --format-version 1
    ```
 
    Verify all six native platform-package manifests use `X.Y.Z`. They are
@@ -59,12 +59,12 @@ the local dependency source records and constraints.
 3. Complete every local check below before committing and pushing:
 
    ```sh
-   cargo +1.89.0 fmt --all -- --check
-   cargo +1.89.0 test --locked -p mineru --all-targets --features office
-   cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features
-   RUSTDOCFLAGS="-D warnings" cargo +1.89.0 doc --locked -p mineru --no-deps
-   cargo +1.89.0 clippy --locked -p mineru --all-targets --features office
-   cargo build --bins --features office
+   cargo +1.92.0 fmt --all -- --check
+   cargo +1.92.0 test --locked -p mineru --all-targets --features office
+   cargo +1.92.0 check --locked -p mineru --all-targets --no-default-features
+   RUSTDOCFLAGS="-D warnings" cargo +1.92.0 doc --locked -p mineru --no-deps
+   cargo +1.92.0 clippy --locked -p mineru --all-targets --features office
+   cargo +1.92.0 build --bins --features office
    ```
 
 In addition to the Cargo checks, run the audit check and six self-tests below;
@@ -73,7 +73,7 @@ the ignored build directory rather than replacing a globally installed tool,
 and pass its exit status to the checker:
 
 ```sh
-cargo +1.89.0 install cargo-audit --version 0.22.2 --locked --root target/tools
+cargo +1.92.0 install cargo-audit --version 0.22.2 --locked --root target/tools
 audit_report="$(mktemp)"
 trap 'rm -f "$audit_report"' EXIT
 set +e

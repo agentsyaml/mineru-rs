@@ -1,5 +1,7 @@
-use super::{service::ServiceInner, store::Entry};
-use crate::official_api::wire::{ApiError, ApiErrorBody};
+use super::service::ServiceInner;
+use crate::official_api::wire::{
+    Health, ModelInfo, ModelListResponse, Tier, TierInfo, TierListResponse, WireError, code,
+};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -7,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -22,44 +24,41 @@ pub(super) fn router(state: Arc<ServiceInner>) -> Router {
         .route("/v1/usage", get(usage))
         .with_state(state)
 }
-async fn health() -> Json<crate::official_api::wire::Health> {
-    Json(crate::official_api::wire::Health::default())
+async fn health() -> Json<Health> {
+    Json(Health::default())
 }
-async fn tiers() -> Json<Value> {
-    let current_model = virtual_model_id();
-    let data: Vec<Value> = [
-        ("flash", "Fast local text extraction."),
-        ("basic", "Basic parsing with local lightweight models."),
-        ("standard", "Standard parsing for most documents."),
-        ("advanced", "Advanced parsing for difficult documents."),
-    ]
-    .into_iter()
-    .map(|(id, description)| {
-        json!({"id":id,"description":description,"current_model":current_model})
+async fn tiers() -> Json<TierListResponse> {
+    let current_model = Some(virtual_model_id());
+    let data = [Tier::Flash, Tier::Basic, Tier::Standard, Tier::Advanced]
+        .into_iter()
+        .map(|id| TierInfo {
+            id,
+            description: crate::official_api::wire::tier_description(id),
+            current_model: current_model.clone(),
+        })
+        .collect();
+    Json(TierListResponse {
+        object: "list",
+        data,
     })
-    .collect();
-    Json(json!({"object":"list","data":data}))
 }
-async fn models() -> Json<Value> {
-    let id = virtual_model_id();
-    Json(json!({"object":"list","data":[model_info(&id)]}))
+async fn models() -> Json<ModelListResponse> {
+    Json(ModelListResponse {
+        object: "list",
+        data: vec![model_info(&virtual_model_id())],
+    })
 }
 async fn model(Path(id): Path<String>) -> Response {
     if id == virtual_model_id() {
         return Json(model_info(&id)).into_response();
     }
-    (
+    let error = WireError::new(
         StatusCode::NOT_FOUND,
-        Json(ApiError {
-            error: ApiErrorBody {
-                error_type: "invalid_request_error".into(),
-                code: "model_not_found".into(),
-                message: format!("Model '{id}' not found"),
-                param: None,
-            },
-        }),
-    )
-        .into_response()
+        code::MODEL_NOT_FOUND,
+        format!("Model '{id}' not found"),
+        None,
+    );
+    error.into_response()
 }
 /// The single virtual model advertised by `/v1/models`. Its id tracks the
 /// pinned MinerU package version; quality is chosen per request through `tier`.
@@ -76,20 +75,28 @@ fn model_registered_at() -> i64 {
             .unwrap_or_default()
     })
 }
-fn model_info(id: &str) -> Value {
-    json!({
-        "id":id,"object":"model","created":model_registered_at(),"owned_by":"mineru",
-        "description":"MinerU virtual model. Quality is selected per request via tier (flash|basic|standard|advanced); this id identifies the server version, not a specific engine."
-    })
+fn model_info(id: &str) -> ModelInfo {
+    ModelInfo {
+        id: id.into(),
+        object: "model",
+        created: model_registered_at(),
+        owned_by: "mineru",
+        description: Some(
+            "MinerU virtual model. PDF/image quality is selected per request via tier; \
+             native documents always use flash. this id identifies the server version, \
+             not a specific engine."
+                .into(),
+        ),
+    }
 }
-async fn usage(State(s): State<Arc<ServiceInner>>) -> Json<Value> {
+async fn usage(State(s): State<Arc<ServiceInner>>) -> Json<serde_json::Value> {
     let jobs = s.jobs_created.load(std::sync::atomic::Ordering::Acquire);
     let files = s
         .store
         .inner
-        .entries
+        .files
         .lock()
-        .map(|v| v.values().filter(|e| matches!(e, Entry::File(_))).count())
+        .map(|v| v.len())
         .unwrap_or_default();
     Json(
         json!({"object":"usage","access_level":"self-hosted","billing_period":{"start":null,"end":null},

@@ -5,13 +5,13 @@
 | Surface | Upstream/runtime | Inputs and behavior | Outputs |
 | --- | --- | --- | --- |
 | CLI `vlm-http-client` (default) | MinerU 3.4.5 VLM protocol; external OpenAI-compatible service | PDF and eight image formats; raw local layout API is separate and not integrated | Existing MinerU-style result tree |
-| CLI `hybrid-http-client` | Official MinerU 4.0.12 worker; external Python 3.10–3.14 environment | Direct mode only; PDF and eight image formats | `{stem}/hybrid-v4/` official bundle |
+| CLI `hybrid-http-client` | Official MinerU 4.2.3 worker; external Python 3.11–3.14 environment | Direct mode only; PDF and eight image formats | `{stem}/hybrid-v4/` official bundle |
 | CLI `--backend local` | Rust text extraction; requires the `legacy-office` build feature | Legacy Office formats and clean text PDFs | Markdown only |
-| Rich Rust/Python/Node SDK | Rust-native CSV/TSV; checked-in worker contract MinerU 4.0.12 / DocVortex 0.5.16; latest reference 0.6.0 | 28 extensions; native formats require `flash` | Owned results; CSV/TSV render to Markdown or structured content only |
-| Official-v1 HTTP API | Rust-native CSV/TSV; checked-in worker contract MinerU 4.0.12 / DocVortex 0.5.16; latest reference 0.6.0 | Upload/job API; PDF, images, and native formats; native requires `flash` | Markdown, middle JSON, structured content, or ZIP |
+| Rich Rust/Python/Node SDK | Rust-native CSV/TSV; checked-in worker contract MinerU 4.2.3 / DocVortex 0.6.24 | 28 extensions; native formats require `flash` | Owned results; CSV/TSV render to Markdown or structured content only |
+| Official-v1 HTTP API | Rust-native CSV/TSV; checked-in worker contract MinerU 4.2.3 / DocVortex 0.6.24 | Task API; PDF, images, and native formats; native requires `flash` | One artifact per file: `default` archive, DOCX, HTML, or LaTeX |
 | Existing legacy bindings/API | MinerU 3.4.5 VLM behavior | Existing input and option contract | Existing output tree or Markdown/warnings |
 
-The 3.4.5 VLM and 4.0.12 official worker are separate routes. The latter's
+The 3.4.5 VLM and 4.2.3 official worker are separate routes. The latter's
 format support does not widen the former. See the [SDK guide](official-sdk.md)
 and [HTTP guide](official-http.md) for their own option and result contracts.
 
@@ -33,15 +33,15 @@ The bundled Compose image `alexsuntop/mineru:3.4.2` is a separate provider-image
 baseline. The MinerU 3.4.5 version above is the VLM protocol baseline for this
 compatibility contract, not a Compose image-tag requirement.
 
-### MinerU 4.0.12 direct Hybrid
+### MinerU 4.2.3 direct Hybrid
 
-Direct `hybrid-http-client` is a separate, pinned boundary for the MinerU 4.0.12
-release (tag `mineru-4.0.12-released`, commit
-`b7f3dd0c5f6e6d66a298239ffd02b328b873918e`). Install with
-`python -m pip install mineru==4.0.12`. Upstream requires Python >=3.10,<3.15 and declares
-`docvortex>=0.5.16,<1` and `mineru-vl-utils>=2.0.5,<3`. The confirmed wheel
-`mineru-4.0.12-py3-none-any.whl` has SHA256
-`a3ff8582a4608eb1f4dde55800ac156d59b01ceabd2ab4002bdf8e86306b1eab`. Python, MinerU,
+Direct `hybrid-http-client` is a separate, pinned boundary for the MinerU 4.2.3
+release (tag `mineru-4.2.3-released`, commit
+`cba4f4dad1c386f13065be832e3321cb0d1ae095`). Install with
+`python -m pip install mineru==4.2.3`. Upstream requires Python >=3.11,<3.15 and declares
+`docvortex>=0.6.24,<0.7` and `mineru-vl-utils>=2.0.9,<3`. The confirmed wheel
+`mineru-4.2.3-py3-none-any.whl` has SHA256
+`d73e1e01deef1cee569674e7dcb322c65b6e5be1ab5c8031bbe3cbd9a022fa9b`. Python, MinerU,
 and model assets are not bundled. When no worker mode is specified, selection is
 automatic after input preflight: one runnable document invokes the official
 `mineru.parser.parse_async` entrypoint in one fresh subprocess, while multiple runnable
@@ -100,34 +100,33 @@ conversion, or the project-private AnyDoc lane. API Hybrid remains fail-closed.
 
 ### Latest upstream reference and rich SDK / official HTTP API
 
-As of 2026-10-23, the latest upstream reference tuple is MinerU 4.0.12,
-DocVortex 0.6.0, and mineru-vl-utils 2.0.7. Exact commits, wheel hashes,
+As of 2026-11-18, the latest upstream reference tuple is MinerU 4.2.3,
+DocVortex 0.6.24, and mineru-vl-utils 2.0.9. Exact commits, wheel hashes,
 platform wheel availability, and the scope of the model-free check are recorded
-in [`upstream-baseline.json`](upstream-baseline.json). DocVortex 0.6.0 wheels
+in [`upstream-baseline.json`](upstream-baseline.json). DocVortex 0.6.24 wheels
 cover Linux x86-64/ARM64, Windows x86-64/ARM64, and macOS ARM64 (macOS 14+);
 there is no macOS Intel wheel or source distribution. Its Python range is
 3.11–3.14. These upstream wheel facts do not narrow this project's Rust or
 binding host-platform support.
 
-The latest tuple was checked model-free on macOS ARM64 with CPython 3.14 for
-CSV, MHTML, PDF flash/txt, and serialize/restore/Markdown-render operations.
-This is a focused smoke check, not a blanket compatibility claim: other
-platforms, Python versions, model-backed inference, formats, and tiers were not
-tested. Native CSV/TSV protocol, schema, and rendering behavior was unchanged
-between DocVortex 0.5.16 and 0.6.0. The 2.0.7 utility release also changes
-deduplication, version naming, and priority behavior; those differences remain
-pending alignment and are not silently adopted by the existing transport.
+This synchronization was verified by wheel digests and a source diff, not by a
+fresh model-free run. `mineru.parser.parse` and `parse_async` keep their
+signature and defaults, and `ParseResult.save` writes the same three text files
+and assets as before. The only removal is the optional `model_output.json`
+emitted when the upstream result carried model output, which this worker never
+sets. MinerU 4.2.3 pins `docvortex<0.7,>=0.6.24` and
+`mineru-vl-utils<3,>=2.0.9`, so the three versions move together.
 
-The checked-in rich worker compatibility contract remains MinerU 4.0.12 /
-DocVortex 0.5.16; MinerU's declared utility range is `>=2.0.5,<3`, not an
-assertion that exactly 2.0.5 was previously tested. The latest upstream
-reference does not by itself mean the worker integration has migrated.
+The checked-in rich worker compatibility contract is MinerU 4.2.3 /
+DocVortex 0.6.24. The official worker refuses to start when the installed
+`mineru` distribution reports a different version, so an environment holding
+4.0.12 or 4.1.x fails closed instead of running untested code.
 
 The Rust `official` module and Python/Node rich binding surfaces accept the 28
 extensions listed in the [official SDK guide](official-sdk.md); 19 native
 formats require tier `flash`, while PDF and eight image formats support all
 four tiers. CSV and TSV currently parse natively in Rust; all other formats use
-the external MinerU 4.0.12 / DocVortex 0.5.16 worker (Python 3.10–3.14). CSV/TSV
+the external MinerU 4.2.3 / DocVortex 0.6.24 worker (Python 3.11–3.14). CSV/TSV
 support UTF-8 with an optional BOM, Markdown and structured-content rendering,
 and restoration of their own middle JSON; other render targets are unsupported.
 This is a phased migration, not a fully native implementation. The Python
@@ -139,10 +138,11 @@ ONNX Runtime shared library and the pinned model cache. It does not replace the
 official worker, integrate with the parser/CLI/API routes, or provide official
 postprocessing, OCR, tier selection, or full-document inference. Without the
 feature, the optional ONNX Runtime dependencies and inference API are not
-enabled. Preprocessing follows MinerU 4.0.12: fixed 800x800 cubic resize
-(kernel a = -0.75, uint8 fixed-point weights), RGB, and division by 255 with no
-mean/std subtraction. Resize output is verified byte-exact against docvortex
-0.6.0 golden fixtures (tests/fixtures/layout/resize-golden.json). ONNX input
+enabled. Preprocessing follows the MinerU 4.2.x layout path: fixed 800x800
+cubic resize (kernel a = -0.75, uint8 fixed-point weights), RGB, and division
+by 255 with no mean/std subtraction. Resize output is verified byte-exact
+against the recorded docvortex golden fixtures
+(tests/fixtures/layout/resize-golden.json). ONNX input
 metadata is validated fail-closed before tensor construction: inputs must
 declare float32, the expected rank, and compatible shapes, with no casting.
 Postprocessing remains unimplemented, so output parity is not claimed.
@@ -152,9 +152,9 @@ See the [SDK guide](official-sdk.md) for binding build instructions and the
 [release guide](releasing.md#current-release-boundary) for registry availability
 and publication constraints.
 
-The official-v1 upload/job service is a separate opt-in interface alongside
-the existing server routes. Its accepted input, limits, and four output formats
-are documented in the [HTTP API guide](official-http.md).
+The official-v1 task service is a separate opt-in interface alongside
+the existing server routes. Its accepted input, upload and cancel flow, limits,
+and four output formats are documented in the [HTTP API guide](official-http.md).
 
 Rust library consumers of the 3.4.5 VLM lane should note one public-API break
 shipping with this release: `VlmBatchPriority::PerItem` was removed in favor of
@@ -175,7 +175,7 @@ and any general or full MinerU 3.4.5 compatibility claim.
 
 The `hybrid-http-client` token is not an alias for `vlm-http-client`, and it
 does not invoke the project-private AnyDoc native lane. Direct mode uses the
-official 4.0.12 worker; API mode remains explicitly unsupported. The default
+official 4.2.3 worker; API mode remains explicitly unsupported. The default
 `vlm-http-client` remains the existing 3.4.5 VLM-only path.
 
 Validation is semantic and structural only. It never promises byte-identical
@@ -197,28 +197,30 @@ workspace's `[patch.crates-io]` repairs are local build inputs and never reach
 consumers, so enabling `office` or `legacy-office` pulls dependency versions
 with open advisories. Default features and `local-inference` are clean.
 
-`office` (13 findings): `quick-xml` 0.37.5 and 0.38.4 each carry
-RUSTSEC-2026-0194 and RUSTSEC-2026-0195; `zip` 0.6.6, 2.6.1, and 8.6.0 each
-carry RUSTSEC-2026-0367, RUSTSEC-2026-0368, and RUSTSEC-2026-0369.
-`legacy-office` (3 findings): `zip` 8.6.0 with the same three.
+`office` (2 findings): `citationberg` 0.7.0 pulls `quick-xml` 0.38.4, which
+carries RUSTSEC-2026-0194 and RUSTSEC-2026-0195.
+`legacy-office` (4 findings): `anydoc` 0.2.4 pulls `zip` 8.6.0, which carries
+RUSTSEC-2026-0367, RUSTSEC-2026-0368, RUSTSEC-2026-0369, and
+RUSTSEC-2026-0429.
 
 Reachability, audited against the resolved sources:
 
-- The nine `zip` findings all concern `ZipArchive::extract` and
-  `ZipStreamReader::extract`. None of the six Office dependencies calls either
-  API, and this crate extracts archives with `zip` 9.0.5 through its own bounded
-  reader. Those findings are not reachable through this crate.
-- The four `quick-xml` findings are parsing denial of service: quadratic
+- The four `zip` findings all concern `ZipArchive::extract`,
+  `ZipStreamReader::extract`, and symlink-target allocation inside `extract`.
+  None of the Office dependencies calls those APIs, and this crate extracts
+  archives with `zip` 9.7.0 through its own bounded reader. Those findings are
+  not reachable through this crate.
+- The two `quick-xml` findings are parsing denial of service: quadratic
   duplicate-attribute checking and unbounded namespace-declaration allocation.
-  They are reachable through `office2pdf`, which parses untrusted OOXML. Office
-  conversion runs in a separate helper process bounded by input, output,
-  wall-clock, CPU, and address-space limits, which caps the impact but does not
-  remove the advisory.
+  They enter the `office` feature through `typst` -> `hayagriva` ->
+  `citationberg`, which parses CSL styles. Office conversion runs in a separate
+  helper process bounded by input, output, wall-clock, CPU, and address-space
+  limits, which caps the impact but does not remove the advisory.
 
-Upstream is unresolved on both paths. `citationberg` merged a `quick-xml` 0.41
-bump in July 2026 but has not released it, and it reaches this crate through
-`typst` -> `hayagriva`. `anydoc` has an unmerged `zip` 9 pull request and still
-declares `zip` 8.6.0. Both must land before this section can be removed.
+Upstream is unresolved on both paths. `citationberg` released 0.7.0 but still
+declares `quick-xml` 0.38.1, and it reaches this crate through `typst` ->
+`hayagriva`. `anydoc` 0.2.4 still declares `zip` 8.6.0. Both need a released
+dependency bump before this section can be removed.
 
 ## Rust API container image
 
@@ -233,7 +235,7 @@ network or an authenticated reverse proxy because the API has no built-in
 authentication or task ownership isolation.
 
 The release workflow builds binaries with `office,legacy-office`, but the stock image
-contains Rust binaries only: no Python, `mineru==4.0.12`, or model assets.
+contains Rust binaries only: no Python, `mineru==4.2.3`, or model assets.
 Direct official Hybrid therefore needs a separately prepared environment
 explicitly supplied to the image, and API Hybrid remains fail-closed. This
 container boundary adds no compatibility claim beyond the protocol scope above.
@@ -252,7 +254,7 @@ complex-layout, low-confidence, empty, and low-quality inputs rather than
 fabricating official output. Accepted output is only
 `{stem}/native/{stem}.md`; it contains no `document.json`, `middle.json`,
 `content-list`, preview, or assets. Native local PDF page selection is not
-supported. This lane is not the official MinerU `hybrid-engine` or the 4.0.12
+supported. This lane is not the official MinerU `hybrid-engine` or the 4.2.3
 local-model worker.
 
 ## Legacy office formats (`.doc`/`.ppt`/`.xls`/`.odt`/`.rtf`/`.epub`/`.ods`/`.odp`/`.csv`)

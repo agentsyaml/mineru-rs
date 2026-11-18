@@ -84,6 +84,11 @@ impl OfficialParser {
         })
     }
 
+    /// Runtime handle used to render task artifacts through the same worker.
+    pub(crate) fn runtime(&self) -> &OfficialRuntime {
+        &self.runtime
+    }
+
     pub async fn parse_rich(
         &self,
         input: OfficialInput,

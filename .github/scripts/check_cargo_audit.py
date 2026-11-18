@@ -17,8 +17,12 @@ WARNINGS = {
     ("RUSTSEC-2024-0320", "yaml-rust", "0.4.5"),
 }
 QUICK_XML_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
-QUICK_XML_VERSION = "0.41.0"
-QUICK_XML_CHECKSUM = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+# Two minor versions coexist: office2pdf's chain requires ^0.41 while plist
+# requires ^0.42. Both are at or above the 0.41.0 fix for RUSTSEC-2026-0194/0195.
+QUICK_XML_VERSIONS = {
+    "0.41.0": "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1",
+    "0.42.0": "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b",
+}
 
 
 def fail(message: str) -> NoReturn:
@@ -52,16 +56,17 @@ def check_lock(lock):
     if not isinstance(packages, list) or not all(isinstance(item, dict) for item in packages):
         fail("Cargo.lock lacks a valid package list")
     xml_packages = [item for item in packages if item.get("name") == "quick-xml"]
-    if len(xml_packages) != 1:
-        fail(f"Cargo.lock must contain exactly one quick-xml package, found {len(xml_packages)}")
-    package = xml_packages[0]
-    if package.get("version") != QUICK_XML_VERSION:
-        fail(f"Cargo.lock quick-xml must be {QUICK_XML_VERSION}")
-    if package.get("source") != QUICK_XML_SOURCE:
-        fail("Cargo.lock quick-xml is not from the crates.io registry")
-    checksum = package.get("checksum")
-    if checksum != QUICK_XML_CHECKSUM:
-        fail("Cargo.lock quick-xml checksum is not the genuine crates.io 0.41.0 digest")
+    if len(xml_packages) != len(QUICK_XML_VERSIONS):
+        fail(f"Cargo.lock must contain exactly {len(QUICK_XML_VERSIONS)} quick-xml packages, found {len(xml_packages)}")
+    for package in xml_packages:
+        version = package.get("version")
+        if version not in QUICK_XML_VERSIONS:
+            fail(f"Cargo.lock quick-xml must be one of {sorted(QUICK_XML_VERSIONS)}")
+        if package.get("source") != QUICK_XML_SOURCE:
+            fail("Cargo.lock quick-xml is not from the crates.io registry")
+        checksum = package.get("checksum")
+        if checksum != QUICK_XML_VERSIONS[version]:
+            fail(f"Cargo.lock quick-xml {version} checksum is not the genuine crates.io digest")
 
 
 def check(report, lock, audit_status):
@@ -79,16 +84,9 @@ def check(report, lock, audit_status):
 # consumer sees, and they are documented in docs/compatibility.md. Any addition
 # or removal must update that section in the same change.
 PUBLISHED_VULNERABILITIES = {
-    ("RUSTSEC-2026-0194", "quick-xml", "0.37.5"),
-    ("RUSTSEC-2026-0195", "quick-xml", "0.37.5"),
     ("RUSTSEC-2026-0194", "quick-xml", "0.38.4"),
     ("RUSTSEC-2026-0195", "quick-xml", "0.38.4"),
-    ("RUSTSEC-2026-0367", "zip", "0.6.6"),
-    ("RUSTSEC-2026-0368", "zip", "0.6.6"),
-    ("RUSTSEC-2026-0369", "zip", "0.6.6"),
-    ("RUSTSEC-2026-0367", "zip", "2.6.1"),
-    ("RUSTSEC-2026-0368", "zip", "2.6.1"),
-    ("RUSTSEC-2026-0369", "zip", "2.6.1"),
+    ("RUSTSEC-2026-0429", "zip", "8.6.0"),
     ("RUSTSEC-2026-0367", "zip", "8.6.0"),
     ("RUSTSEC-2026-0368", "zip", "8.6.0"),
     ("RUSTSEC-2026-0369", "zip", "8.6.0"),
@@ -160,10 +158,11 @@ def fixture():
         {"kind": "unmaintained", "advisory": {"id": advisory}, "package": {"name": name, "version": version}}
         for advisory, name, version in sorted(WARNINGS)
     ]
-    lock = {"version": 4, "package": [{
-        "name": "quick-xml", "version": QUICK_XML_VERSION,
-        "source": QUICK_XML_SOURCE, "checksum": QUICK_XML_CHECKSUM,
-    }]}
+    lock = {"version": 4, "package": [
+        {"name": "quick-xml", "version": version,
+         "source": QUICK_XML_SOURCE, "checksum": checksum}
+        for version, checksum in sorted(QUICK_XML_VERSIONS.items())
+    ]}
     return report, lock
 
 
@@ -173,11 +172,16 @@ def self_test():
         root = Path(directory)
         report_path, lock_path = root / "report.json", root / "Cargo.lock"
         report_path.write_text(json.dumps(report))
-        xml = lock["package"][0]
+        xml = lock["package"]
         lock_path.write_text(
             'version = 4\n\n'
-            f'[[package]]\nname = "quick-xml"\nversion = "{xml["version"]}"\n'
-            f'source = "{xml["source"]}"\nchecksum = "{xml["checksum"]}"\n'
+            + "".join(
+                '[[package]]\nname = "quick-xml"\nversion = "{}"\n'
+                'source = "{}"\nchecksum = "{}"\n\n'.format(
+                    package["version"], package["source"], package["checksum"]
+                )
+                for package in xml
+            )
         )
         report = json.loads(report_path.read_text())
         lock = tomllib.loads(lock_path.read_text())
@@ -260,7 +264,7 @@ def main():
         return
     if args.command == "published":
         check_published(load_report(args.report), args.audit_status)
-        print("published crate carries exactly the documented 13 advisories")
+        print("published crate carries exactly the documented 6 advisories")
         return
     try:
         report = load_report(args.report)
@@ -268,7 +272,7 @@ def main():
     except (OSError, tomllib.TOMLDecodeError) as error:
         fail(f"cannot parse audit inputs: {error}")
     check(report, lock, args.audit_status)
-    print("cargo-audit report is clean; quick-xml lock entry is registry version 0.41.0")
+    print("cargo-audit report is clean; quick-xml lock entries are the registry 0.41.0 and 0.42.0 digests")
 
 
 if __name__ == "__main__":

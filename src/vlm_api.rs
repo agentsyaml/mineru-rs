@@ -706,7 +706,7 @@ async fn serve_inner(
         tick.tick().await;
         loop {
             tokio::select! {
-                _ = tick.tick() => { cleanup_records(&cleanup_app.records, cleanup_app.retention); reap_workers(&cleanup_app.workers, &cleanup_app.records, &cleanup_app.events).await; if let Some(service) = &cleanup_official { service.cleanup_expired(); } }
+                _ = tick.tick() => { cleanup_records(&cleanup_app.records, cleanup_app.retention); reap_workers(&cleanup_app.workers, &cleanup_app.records, &cleanup_app.events).await; if let Some(service) = &cleanup_official { service.cleanup_expired().await; } }
                 _ = &mut cleanup_stopped => break,
             }
         }
@@ -790,10 +790,10 @@ async fn official_v1_health() -> Json<crate::official_api::Health> {
         status: "ok",
         version: crate::official_worker::PACKAGE_VERSION,
         features: crate::official_api::HealthFeatures {
-            webhook: false,
-            output_formats: Vec::new(),
+            task_output_formats: Vec::new(),
             sources: Vec::new(),
         },
+        runtime: None,
     })
 }
 fn error(code: StatusCode, message: &'static str) -> Response {
@@ -806,21 +806,17 @@ fn public_http_client_allowed(app: &App) -> bool {
 }
 
 fn official_submission_route(method: &axum::http::Method, path: &str) -> bool {
-    if method == axum::http::Method::POST
-        && matches!(
-            path,
-            "/v1/uploads" | "/v1/parse/jobs" | "/v1/tasks" | "/v1/file_parse"
-        )
-    {
+    if method == axum::http::Method::POST && path == "/v1/tasks" {
         return true;
     }
     let parts: Vec<_> = path.split('/').collect();
-    parts.len() == 5
-        && parts[1] == "v1"
-        && parts[2] == "uploads"
-        && !parts[3].is_empty()
-        && ((method == axum::http::Method::PUT && parts[4] == "content")
-            || (method == axum::http::Method::POST && parts[4] == "complete"))
+    if parts.len() < 2 || parts[1] != "v1" || parts[2] != "tasks" || parts[3].is_empty() {
+        return false;
+    }
+    method == axum::http::Method::PUT
+        && parts.len() == 6
+        && parts[4] == "uploads"
+        && !parts[5].is_empty()
 }
 
 async fn official_submission_policy(
@@ -834,8 +830,13 @@ async fn official_submission_policy(
         return next.run(request).await;
     }
     rejected(&app.events, PUBLIC_CLIENT_DISABLED);
-    crate::official_api::wire::WireError::bad("public_policy", PUBLIC_CLIENT_DISABLED)
-        .into_response()
+    crate::official_api::wire::WireError::new(
+        StatusCode::BAD_REQUEST,
+        "public_policy",
+        PUBLIC_CLIENT_DISABLED,
+        None,
+    )
+    .into_response()
 }
 
 struct PublicPostPolicy;
@@ -2745,9 +2746,10 @@ mod tests {
     async fn disabled_official_health_advertises_no_capabilities() {
         let Json(health) = official_v1_health().await;
         assert_eq!(health.status, "ok");
-        assert_eq!(health.version, "4.0.12");
-        assert!(health.features.output_formats.is_empty());
+        assert_eq!(health.version, "4.2.3");
+        assert!(health.features.task_output_formats.is_empty());
         assert!(health.features.sources.is_empty());
+        assert!(health.runtime.is_none());
     }
 
     fn nested_fixture() -> Vec<u8> {

@@ -14,14 +14,14 @@ Registry and release availability is covered by the [release guide](releasing.md
 
 ## Runtime and compatibility
 
-The checked-in worker compatibility contract is `mineru==4.0.12` and
-`docvortex==0.5.16` with upstream dependencies. The latest upstream reference
-is DocVortex 0.6.0 with `mineru-vl-utils` 2.0.7; it has only been checked by a
-model-free smoke test on macOS ARM64 / CPython 3.14. See the
+The checked-in worker compatibility contract is `mineru==4.2.3` and
+`docvortex==0.6.24` with upstream dependencies. The worker refuses to run when
+the installed `mineru` distribution reports a different version. Exact commits
+and wheel hashes are recorded in
+[`upstream-baseline.json`](upstream-baseline.json). See the
 [compatibility record](compatibility.md#latest-upstream-reference-and-rich-sdk--official-http-api)
-for versions, wheel availability, and the untested scope. DocVortex 0.6.0
-requires Python 3.11–3.14, while the checked-in worker contract uses Python
-3.10–3.14. The Python facade itself supports Python 3.9+. Python and model
+for versions, wheel availability, and the untested scope. DocVortex 0.6.24
+requires Python 3.11–3.14. The Python facade itself supports Python 3.9+. Python and model
 assets are not bundled. Supply trusted absolute Python,
 config, and model-directory paths through `OfficialRuntime` (Rust),
 `OfficialRuntime` (Python), or `OfficialRuntimeOptions` (Node). These paths are
@@ -30,7 +30,7 @@ them. Rust/Python representations redact VLM credentials. Node options are
 ordinary caller-owned JavaScript objects, so avoid logging them. Parsed VLM
 credentials are not retained in rich result data.
 
-The rich SDK's 4.0.12 worker is separate from the legacy 3.4.5 `run`/`parse`
+The rich SDK's 4.2.3 worker is separate from the legacy 3.4.5 `run`/`parse`
 path.
 
 ## Parse inputs and options

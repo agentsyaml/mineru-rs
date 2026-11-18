@@ -7,8 +7,7 @@ and HTTP API server. PDF rendering is implemented in Rust. The legacy CLI/API
 and Python/Node `run`/`parse` paths use a remote MinerU-compatible VLM
 (MinerU 3.4.5 protocol baseline); rich parsing also includes Rust-native CSV/TSV,
 while other formats use a separate Python worker. The checked-in worker contract
-is MinerU 4.0.12 / DocVortex 0.5.16; the latest DocVortex 0.6.0 reference has
-model-free smoke coverage only. See [compatibility](docs/compatibility.md).
+is MinerU 4.2.3 / DocVortex 0.6.24. See [compatibility](docs/compatibility.md).
 
 Choose a route:
 
@@ -25,7 +24,7 @@ Choose a route:
   selected legacy formats through the bundled Rust helper. It produces
   Markdown only, without layout JSON or a VLM call.
 
-This checkout targets 0.4.1. Check the [release guide](docs/releasing.md#current-release-boundary)
+This checkout targets 0.5.0. Check the [release guide](docs/releasing.md#current-release-boundary)
 for current package and release availability before installing a specific version.
 
 See [usage](docs/usage.md), [compatibility](docs/compatibility.md),
@@ -135,7 +134,7 @@ the task API has no built-in authentication or task ownership. See the
 
 ## Build from source
 
-Requires Rust 1.89+ and Python 3.9+. Prepare dependencies before any Cargo
+Requires Rust 1.92+ and Python 3.9+. Prepare dependencies before any Cargo
 command in this checkout:
 
 ```sh

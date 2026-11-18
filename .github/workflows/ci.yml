@@ -46,7 +46,7 @@ jobs:
           python3 .github/scripts/test_source_snapshot.py
 
   rust-msrv:
-    name: Rust 1.89.0
+    name: Rust 1.92.0
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -63,10 +63,8 @@ jobs:
           python tools/deps/prepare_office.py prepare
           python tools/deps/prepare_office.py verify
           python -m unittest discover -s tools/deps -p 'test_*.py'
-      - name: Install Rust 1.89.0
-        run: rustup toolchain install 1.89.0 --profile minimal --component rustfmt
-      - name: Check Office XML compatibility
-        run: python tools/deps/office_xml_parity.py
+      - name: Install Rust 1.92.0
+        run: rustup toolchain install 1.92.0 --profile minimal --component rustfmt
       - name: Cache Cargo registry and git dependencies
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
@@ -74,7 +72,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/cargo-audit
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-cargo-audit-0.22.2-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-cargo-audit-0.22.2-${{ hashFiles('.gitignore', 'Cargo.toml', 'Cargo.lock', 'tools/deps/**') }}
       - name: Install cargo-audit 0.22.2
         run: |
           if [ "$("$HOME/.cargo/bin/cargo-audit" --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]; then
@@ -87,9 +85,9 @@ jobs:
           "$HOME/.cargo/bin/cargo-audit" audit --json > "$RUNNER_TEMP/cargo-audit.json"
           python3 .github/scripts/check_cargo_audit.py check \
             --report "$RUNNER_TEMP/cargo-audit.json" --lockfile Cargo.lock --audit-status 0
-          echo "cargo-audit: zero vulnerabilities; Cargo.lock contains registry quick-xml 0.41.0" >> "$GITHUB_STEP_SUMMARY"
+          echo "cargo-audit: zero vulnerabilities; Cargo.lock contains registry quick-xml 0.41.0 and 0.42.0" >> "$GITHUB_STEP_SUMMARY"
       - name: Check formatting
-        run: cargo +1.89.0 fmt --all -- --check
+        run: cargo +1.92.0 fmt --all -- --check
       - name: Test official worker Python shim
         # The shell fakes in tests/mineru_cli.rs keep Rust<->shim frames honest;
         # this suite covers the shim's own validators and env handling.
@@ -98,7 +96,7 @@ jobs:
         # Explicit feature set, not --all-features: the union of every optional
         # backend is not a single supported runtime configuration, so CI pins the
         # exact feature combo this runner is responsible for.
-        run: cargo +1.89.0 test --locked -p mineru --all-targets --features office,legacy-office -- --test-threads=4
+        run: cargo +1.92.0 test --locked -p mineru --all-targets --features office,legacy-office -- --test-threads=4
       - name: Run hermetic API process end-to-end tests
         run: |
           for test_name in \
@@ -108,23 +106,23 @@ jobs:
             sigint_exits_while_stdin_watcher_is_blocked \
             active_worker_drains_before_exit
           do
-            cargo +1.89.0 test --locked -p mineru --test mineru_api_server -- --exact "$test_name" --ignored --test-threads=1
+            cargo +1.92.0 test --locked -p mineru --test mineru_api_server -- --exact "$test_name" --ignored --test-threads=1
           done
-          cargo +1.89.0 test --locked -p mineru --features office --test mineru_api_server -- --exact canonical_client_consumes_real_api_server_zip_and_publishes_layout --ignored --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --features office --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+          cargo +1.92.0 test --locked -p mineru --features office --test mineru_api_server -- --exact canonical_client_consumes_real_api_server_zip_and_publishes_layout --ignored --test-threads=1
+          cargo +1.92.0 test --locked -p mineru --features office --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
       - name: Check root package without default features
-        run: cargo +1.89.0 check --locked -p mineru --all-targets --no-default-features
+        run: cargo +1.92.0 check --locked -p mineru --all-targets --no-default-features
       - name: Check local inference feature without runtime assets
         run: |
-          cargo +1.89.0 check --locked -p mineru --tests --features local-inference
-          cargo +1.89.0 test --locked -p mineru --lib --features local-inference inference::
+          cargo +1.92.0 check --locked -p mineru --tests --features local-inference
+          cargo +1.92.0 test --locked -p mineru --lib --features local-inference inference::
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo +1.89.0 doc --locked -p mineru --no-deps
+        run: cargo +1.92.0 doc --locked -p mineru --no-deps
       - name: Verify workspace metadata
         run: |
-          cargo +1.89.0 metadata --locked --format-version 1 --no-deps > "$RUNNER_TEMP/metadata.json"
+          cargo +1.92.0 metadata --locked --format-version 1 --no-deps > "$RUNNER_TEMP/metadata.json"
           python3 - <<'PY'
           import json
           import os
@@ -154,7 +152,7 @@ jobs:
           }
           PY
   windows-path-safety-msrv:
-    name: Windows path safety, Rust 1.89.0
+    name: Windows path safety, Rust 1.92.0
     runs-on: windows-2025
     timeout-minutes: 120
     steps:
@@ -162,8 +160,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust 1.89.0
-        run: rustup toolchain install 1.89.0 --profile minimal && rustup target add --toolchain 1.89.0 aarch64-pc-windows-msvc
+      - name: Install Rust 1.92.0
+        run: rustup toolchain install 1.92.0 --profile minimal && rustup target add --toolchain 1.92.0 aarch64-pc-windows-msvc
       - name: Set up Python for official worker lifecycle tests
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -173,27 +171,25 @@ jobs:
           python tools/deps/prepare_office.py prepare
           python tools/deps/prepare_office.py verify
           python -m unittest discover -s tools/deps -p 'test_*.py'
-      - name: Check Office XML compatibility
-        run: python tools/deps/office_xml_parity.py
       - name: Test Windows path safety
         run: |
-          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc command::direct::tests -- --test-threads=4
-          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_output::tests -- --test-threads=4
-          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=4
-          cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official:: -- --test-threads=4
-          cargo +1.89.0 test --locked -p mineru --lib --features local-inference --target x86_64-pc-windows-msvc inference::
+          cargo +1.92.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc command::direct::tests -- --test-threads=4
+          cargo +1.92.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_output::tests -- --test-threads=4
+          cargo +1.92.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc mineru_api::archive::tests -- --test-threads=4
+          cargo +1.92.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official:: -- --test-threads=4
+          cargo +1.92.0 test --locked -p mineru --lib --features local-inference --target x86_64-pc-windows-msvc inference::
       - name: Test Windows official worker Job Object lifecycle
-        run: cargo +1.89.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_worker::process::windows_tests -- --test-threads=1
+        run: cargo +1.92.0 test --locked -p mineru --lib --target x86_64-pc-windows-msvc official_worker::process::windows_tests -- --test-threads=1
       - name: Test Windows Office helper containment and conversion
         run: |
-          cargo +1.89.0 test --locked -p mineru --features office,legacy-office --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --features office,legacy-office --target x86_64-pc-windows-msvc --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
-          cargo +1.89.0 test --locked -p mineru --features legacy-office --target x86_64-pc-windows-msvc --test legacy_office_convert_helper -- --test-threads=1
+          cargo +1.92.0 test --locked -p mineru --features office,legacy-office --target x86_64-pc-windows-msvc --test office_convert_helper -- --test-threads=1
+          cargo +1.92.0 test --locked -p mineru --features office,legacy-office --target x86_64-pc-windows-msvc --test office_convert_helper -- --exact helper_converts_self_authored_docx_pptx_and_xlsx --ignored --test-threads=1
+          cargo +1.92.0 test --locked -p mineru --features legacy-office --target x86_64-pc-windows-msvc --test legacy_office_convert_helper -- --test-threads=1
       - name: Check ARM64 Windows tests
         run: |
-          cargo +1.89.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
-          cargo +1.89.0 check --locked -p mineru --tests --features local-inference --target aarch64-pc-windows-msvc
-          cargo +1.89.0 check --locked -p mineru --features office,legacy-office --bin mineru-office-convert --target aarch64-pc-windows-msvc
+          cargo +1.92.0 check --locked -p mineru --tests --target aarch64-pc-windows-msvc
+          cargo +1.92.0 check --locked -p mineru --tests --features local-inference --target aarch64-pc-windows-msvc
+          cargo +1.92.0 check --locked -p mineru --features office,legacy-office --bin mineru-office-convert --target aarch64-pc-windows-msvc
 
   python-binding:
     name: Python 3.9 binding
@@ -217,21 +213,19 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.9"
-      - name: Install Rust 1.89.0 target
-        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add x86_64-unknown-linux-gnu
-      - name: Check Office XML compatibility
-        run: python tools/deps/office_xml_parity.py
+      - name: Install Rust 1.92.0 target
+        run: rustup toolchain install 1.92.0 --profile minimal && rustup default 1.92.0 && rustup target add x86_64-unknown-linux-gnu
       - name: Build locked manylinux wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: build
           target: x86_64-unknown-linux-gnu
           manylinux: "2014"
-          rust-toolchain: 1.89.0
+          rust-toolchain: 1.92.0
           args: --release --locked --manifest-path bindings/python/Cargo.toml --out dist/python
       - name: Verify wheel
         run: |
-          cargo +1.89.0 metadata --locked --format-version 1 --no-deps > "$RUNNER_TEMP/wheel-metadata.json"
+          cargo +1.92.0 metadata --locked --format-version 1 --no-deps > "$RUNNER_TEMP/wheel-metadata.json"
           MINERU_VERSION="$(python - <<'PY'
           import json
           import os
@@ -288,10 +282,8 @@ jobs:
         run: npm install --global npm@12.0.2
       - name: Install Node dependencies
         run: npm ci
-      - name: Install Rust 1.89.0 target
-        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0 && rustup target add x86_64-unknown-linux-gnu
-      - name: Check Office XML compatibility
-        run: python ../../tools/deps/office_xml_parity.py
+      - name: Install Rust 1.92.0 target
+        run: rustup toolchain install 1.92.0 --profile minimal && rustup default 1.92.0 && rustup target add x86_64-unknown-linux-gnu
       - name: Build Linux x64 binding
         run: |
           npx --no-install napi build --release --platform --target x86_64-unknown-linux-gnu -- --locked

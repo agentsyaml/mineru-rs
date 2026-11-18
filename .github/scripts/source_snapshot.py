@@ -24,8 +24,8 @@ ROOT_NAME = "source"
 SCHEMA = "mineru-source-snapshot-v1"
 EVIDENCE_SCHEMA = "mineru-source-build-evidence-v1"
 EXCLUDED = {".deps", ".git", ".slim", "node_modules", "target"}
-TEST_COMMAND = "cargo +1.89.0 test --locked -p mineru --all-targets --features office,legacy-office -- --test-threads=4"
-BUILD_COMMAND = "cargo +1.89.0 build --locked --release -p mineru --features office,legacy-office --bins"
+TEST_COMMAND = "cargo +1.92.0 test --locked -p mineru --all-targets --features office,legacy-office -- --test-threads=4"
+BUILD_COMMAND = "cargo +1.92.0 build --locked --release -p mineru --features office,legacy-office --bins"
 
 
 def fail(message: str) -> NoReturn:

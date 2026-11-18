@@ -1,98 +1,77 @@
+//! Strict wire DTOs for the official MinerU 4.2.3 task API.
+//!
+//! The upstream contract is published as Pydantic models in
+//! `mineru/tasks/contracts.py`, `mineru/task_types.py`, and
+//! `mineru/parser/api_server.py`. Every payload here mirrors one of them and is
+//! emitted with the same `exclude_none` semantics: absent optionals are omitted,
+//! zero values and empty containers are kept.
+
 use axum::{
     Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt};
+use std::fmt;
 
-pub const INLINE_MAX_BYTES: usize = 1_048_576;
-pub const UPLOAD_MAX_BYTES: u64 = 16_777_216;
-pub const OUTPUT_FORMATS: [&str; 4] = ["markdown", "middle_json", "structured_content", "zip"];
-pub const SOURCES: [&str; 2] = ["file_id", "inline"];
+/// `MAX_TASK_FILES` in `mineru/tasks/contracts.py`.
+pub const MAX_TASK_FILES: usize = 100;
+/// `TASK_UPLOAD_TTL` in `mineru/tasks/service.py`.
+pub const TASK_UPLOAD_TTL_SECS: u64 = 3600;
+/// Upper bound for the `x-mineru-task-lease-seconds` request header.
+pub const MAX_LEASE_SECS: u64 = 3600;
+/// `TaskFileInput.file_name` maximum length.
+pub const MAX_FILE_NAME: usize = 1024;
+/// `TASK_OUTPUT_FORMATS` in `mineru/task_types.py`.
+pub const TASK_OUTPUT_FORMATS: [&str; 4] = ["default", "docx", "html", "latex"];
+/// `HealthFeatures.sources`.
+pub const SOURCES: [&str; 2] = ["upload", "url"];
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UploadCreate {
-    pub filename: String,
-    pub bytes: u64,
-    pub mime_type: String,
-    #[serde(default = "parse_purpose")]
-    pub purpose: String,
-    #[serde(default)]
-    pub sha256sum: Option<String>,
-    #[serde(default)]
-    pub expires_after: Option<ExpiresAfter>,
-}
-fn parse_purpose() -> String {
-    "parse".into()
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskStatus {
+    WaitingFile,
+    Pending,
+    Running,
+    Completed,
+    Partial,
+    Failed,
+    Canceled,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExpiresAfter {
-    pub anchor: Anchor,
-    #[serde(default = "default_expiry")]
-    pub seconds: u32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskFileState {
+    WaitingFile,
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
 }
-fn default_expiry() -> u32 {
-    3600
+
+impl TaskFileState {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Canceled)
+    }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskOutputFormat {
+    Default,
+    Docx,
+    Html,
+    Latex,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Anchor {
-    CreatedAt,
+pub enum FilePurpose {
+    Parse,
+    ParseOutput,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Completion {
-    #[serde(default)]
-    pub sha256sum: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct UploadResponse {
-    pub id: String,
-    pub object: &'static str,
-    pub bytes: u64,
-    pub created_at: i64,
-    pub expires_at: i64,
-    pub filename: String,
-    pub purpose: String,
-    pub mime_type: String,
-    pub sha256sum: Option<String>,
-    pub status: String,
-    pub upload_url: Option<String>,
-    pub upload_method: Option<&'static str>,
-    pub upload_headers: BTreeMap<String, String>,
-    pub file: Option<FileObject>,
-}
-pub type UploadCreated = UploadResponse;
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JobCreate {
-    pub files: Vec<JobFile>,
-    #[serde(default)]
-    pub tier: Option<Tier>,
-    #[serde(default)]
-    pub ocr_mode: OcrMode,
-    #[serde(default = "default_outputs")]
-    pub output_formats: Vec<OutputFormat>,
-}
-fn default_outputs() -> Vec<OutputFormat> {
-    vec![OutputFormat::Markdown]
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutputFormat {
-    Markdown,
-    MiddleJson,
-    StructuredContent,
-    Zip,
-}
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
@@ -101,6 +80,7 @@ pub enum Tier {
     Standard,
     Advanced,
 }
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OcrMode {
@@ -109,305 +89,190 @@ pub enum OcrMode {
     Txt,
     Ocr,
 }
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum JobSource {
-    #[serde(rename = "file_id")]
-    FileId { file_id: String },
-    #[serde(rename = "inline")]
-    Inline { name: String, data: String },
-}
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JobFile {
-    pub source: JobSource,
-    #[serde(default)]
-    pub page_range: Option<String>,
-}
 
 #[derive(Clone, Debug, Serialize)]
-pub struct FileObject {
-    pub id: String,
-    pub object: &'static str,
-    pub bytes: u64,
-    pub created_at: i64,
-    pub expires_at: Option<i64>,
-    pub filename: String,
-    pub purpose: String,
-    pub sha256sum: Option<String>,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct FileDeletion {
-    pub id: String,
-    pub object: &'static str,
-    pub deleted: bool,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct ListResponse<T> {
-    pub object: &'static str,
-    pub data: Vec<T>,
-    pub first_id: Option<String>,
-    pub last_id: Option<String>,
-    pub has_more: bool,
-}
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Pagination {
-    #[serde(default)]
-    pub after: Option<String>,
-    #[serde(default)]
-    pub limit: Option<u16>,
-    #[serde(default)]
-    pub order: Option<ListOrder>,
-}
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ListOrder {
-    Asc,
-    Desc,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct OutputReference {
-    pub file_id: String,
-    pub bytes: u64,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct JobFileResponse {
-    pub file_id: Option<String>,
-    pub name: String,
-    pub page_range: String,
-    pub status: String,
-    pub parse: Option<serde_json::Value>,
-    pub output_files: Option<BTreeMap<String, OutputReference>>,
-    pub error: Option<ApiErrorBody>,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct JobProgress {
-    pub total: u32,
-    pub completed: u32,
-    pub failed: u32,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct JobLinks {
-    #[serde(rename = "self")]
-    pub self_url: String,
-    pub cancel: String,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct JobResponse {
-    pub job_id: String,
-    pub status: String,
-    pub created_at: String,
-    pub started_at: Option<String>,
-    pub finished_at: Option<String>,
-    pub tier: Tier,
-    pub output_formats: Vec<OutputFormat>,
-    pub access_level: String,
-    pub progress: JobProgress,
-    pub files: Vec<JobFileResponse>,
-    pub links: JobLinks,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct JobListEntry {
-    pub job_id: String,
-    pub status: String,
-    pub created_at: String,
-    pub file_count: u32,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct CancelResponse {
-    pub job_id: String,
-    pub status: String,
-    pub canceled_at: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct Health {
-    pub status: &'static str,
-    pub version: &'static str,
-    pub features: HealthFeatures,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct HealthFeatures {
-    pub webhook: bool,
-    pub output_formats: Vec<&'static str>,
-    pub sources: Vec<&'static str>,
-}
-impl Default for Health {
-    fn default() -> Self {
-        Self {
-            status: "ok",
-            version: crate::official_worker::PACKAGE_VERSION,
-            features: HealthFeatures {
-                webhook: false,
-                output_formats: OUTPUT_FORMATS.to_vec(),
-                sources: SOURCES.to_vec(),
-            },
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ApiErrorBody {
-    #[serde(rename = "type")]
-    pub error_type: String,
+pub struct ErrorDetail {
     pub code: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
 }
+
 #[derive(Clone, Debug, Serialize)]
-pub struct ApiError {
-    pub error: ApiErrorBody,
+pub struct ErrorResponse {
+    pub error: ErrorDetail,
 }
+
 #[derive(Clone, Debug)]
 pub struct WireError {
     pub status: StatusCode,
     pub code: &'static str,
-    pub message: &'static str,
-    pub param: Option<&'static str>,
+    pub message: String,
+    pub param: Option<String>,
 }
+
+pub mod code {
+    pub const INVALID_REQUEST: &str = "invalid_request";
+    pub const INTERNAL_ERROR: &str = "internal_error";
+    pub const API_ERROR: &str = "api_error";
+    pub const MODEL_NOT_FOUND: &str = "model_not_found";
+    pub const UPLOAD_SIZE_MISMATCH: &str = "upload_size_mismatch";
+    pub const FILE_HASH_MISMATCH: &str = "file_hash_mismatch";
+    pub const TASK_ALREADY_TERMINAL: &str = "task_already_terminal";
+    pub const UPLOAD_INTERRUPTED: &str = "upload_interrupted";
+    pub const REQUEST_INTERRUPTED: &str = "request_interrupted";
+    pub const QUALITY_TIER_UNAVAILABLE: &str = "quality_tier_unavailable";
+    pub const TASK_NOT_FOUND: &str = "task_not_found";
+    pub const UPLOAD_NOT_FOUND: &str = "upload_not_found";
+    pub const PAGE_RANGE_INVALID: &str = "page_range_invalid";
+}
+
 impl WireError {
-    pub fn bad(param: &'static str, message: &'static str) -> Self {
+    pub fn new(
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<String>,
+        param: Option<String>,
+    ) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_request_error",
-            message,
-            param: Some(param),
+            status,
+            code,
+            message: message.into(),
+            param,
         }
     }
+
+    /// The standard `invalid_task_request` constructor: 400 `invalid_request`.
+    pub fn invalid(message: impl Into<String>, param: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            code::INVALID_REQUEST,
+            message,
+            Some(param.into()),
+        )
+    }
+
+    pub fn invalid_unattributed(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            code::INVALID_REQUEST,
+            message,
+            None,
+        )
+    }
+
+    /// Unknown or foreign task id: upstream answers 404 `task_not_found`.
+    pub fn task_not_found(task_id: &str) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            code::TASK_NOT_FOUND,
+            format!("Task {task_id} not found"),
+            None,
+        )
+    }
+
+    /// Unknown `file_id` in a task upload: upstream answers 404 `upload_not_found`.
+    pub fn upload_not_found() -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            code::UPLOAD_NOT_FOUND,
+            "Unknown file_id",
+            None,
+        )
+    }
+
+    pub fn internal() -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            code::INTERNAL_ERROR,
+            "Internal server error",
+            None,
+        )
+    }
+
     pub fn too_large() -> Self {
-        Self {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            code: "file_too_large",
-            message: "The request exceeds the allowed size.",
-            param: None,
-        }
+        Self::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            code::INVALID_REQUEST,
+            "The request exceeds the allowed size.",
+            None,
+        )
     }
 }
+
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.message)
+        f.write_str(&self.message)
     }
 }
+
 impl std::error::Error for WireError {}
+
 impl IntoResponse for WireError {
     fn into_response(self) -> Response {
-        let body = ApiError {
-            error: ApiErrorBody {
-                error_type: "invalid_request_error".into(),
+        let body = ErrorResponse {
+            error: ErrorDetail {
                 code: self.code.into(),
-                message: self.message.into(),
-                param: self.param.map(str::to_owned),
+                message: self.message,
+                param: self.param,
             },
         };
         (self.status, Json(body)).into_response()
     }
 }
 
-impl UploadCreate {
-    pub fn validate(&self) -> Result<(), WireError> {
-        if self.filename.trim().is_empty() || self.filename.len() > 255 {
-            return Err(WireError::bad("filename", "A valid filename is required."));
-        }
-        if self.mime_type.trim().is_empty() || self.mime_type.len() > 255 {
-            return Err(WireError::bad(
-                "mime_type",
-                "A valid MIME type is required.",
-            ));
-        }
-        if self.bytes == 0 {
-            return Err(WireError::bad("bytes", "Bytes must be positive."));
-        }
-        if self.bytes > UPLOAD_MAX_BYTES {
-            return Err(WireError::too_large());
-        }
-        if !matches!(self.purpose.as_str(), "parse" | "input_image") {
-            return Err(WireError::bad("purpose", "Unsupported upload purpose."));
-        }
-        if let Some(hash) = &self.sha256sum {
-            validate_hash(hash)?;
-        }
-        if let Some(expiry) = &self.expires_after {
-            if expiry.anchor != Anchor::CreatedAt || !(3600..=2592000).contains(&expiry.seconds) {
-                return Err(WireError::bad(
-                    "expires_after",
-                    "Unsupported upload expiry.",
-                ));
-            }
-        }
-        Ok(())
+/// Mirrors `validate_parse_filename`: a logical basename, never a path.
+pub fn validate_file_name(name: &str) -> Result<(), WireError> {
+    let fail = || WireError::invalid("Invalid file_name.", "file_name");
+    if name.is_empty() || name.len() > MAX_FILE_NAME {
+        return Err(fail());
     }
+    if name == "." || name == ".." {
+        return Err(fail());
+    }
+    if name
+        .chars()
+        .any(|c| matches!(c, '/' | '\\' | ':') || (c.is_control() && c != '\t'))
+    {
+        return Err(fail());
+    }
+    Ok(())
 }
-fn validate_hash(hash: &str) -> Result<(), WireError> {
+
+pub fn validate_hash(hash: &str) -> Result<(), WireError> {
     if hash.len() != 64
         || !hash
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
-        return Err(WireError::bad(
-            "sha256sum",
+        return Err(WireError::invalid(
             "Expected a lowercase SHA-256 hex digest.",
+            "sha256sum",
         ));
     }
     Ok(())
 }
 
-impl JobCreate {
-    pub fn validate(&self) -> Result<(), WireError> {
-        if self.files.is_empty() || self.files.len() > 100 {
-            return Err(WireError::bad("files", "Expected between 1 and 100 files."));
-        }
-        if self.output_formats.is_empty() {
-            return Err(WireError::bad(
-                "output_formats",
-                "At least one output format is required.",
-            ));
-        }
-        let mut formats = std::collections::BTreeSet::new();
-        if self
-            .output_formats
-            .iter()
-            .any(|format| !formats.insert(*format as u8))
-        {
-            return Err(WireError::bad(
-                "output_formats",
-                "Output formats must be unique.",
-            ));
-        }
-        for file in &self.files {
-            if let Some(range) = &file.page_range {
-                validate_page_range(range)?;
-            }
-            match &file.source {
-                JobSource::FileId { file_id } if file_id.trim().is_empty() => {
-                    return Err(WireError::bad("file_id", "A file identifier is required."));
-                }
-                JobSource::Inline { name, data } => {
-                    if name.trim().is_empty() || name.len() > 255 {
-                        return Err(WireError::bad("name", "A valid filename is required."));
-                    }
-                    validate_inline_base64(data)?;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-}
 pub(crate) fn validate_page_range(value: &str) -> Result<(), WireError> {
+    let raw = value;
     let value = value.trim();
+    // Upstream's default is the empty string, meaning every page.
     if value.is_empty() || value == "all" {
         return Ok(());
     }
     for part in value.split(',') {
         let endpoints: Vec<_> = part.split('-').map(str::trim).collect();
         if endpoints.is_empty() || endpoints.len() > 2 {
-            return Err(WireError::bad("page_range", "Invalid page range."));
+            return Err(range_error(
+                raw,
+                "expected a page, an inclusive range, or 'all'",
+            ));
         }
-        let first = page_endpoint(endpoints[0])?;
-        let last = endpoints.get(1).map(|v| page_endpoint(v)).transpose()?;
+        let first = page_endpoint(endpoints[0], raw)?;
+        let last = endpoints
+            .get(1)
+            .map(|v| page_endpoint(v, raw))
+            .transpose()?;
         if let Some((relative, end)) = last {
             let (start_relative, start) = first;
             let invalid_order = match (start_relative, relative) {
@@ -416,56 +281,144 @@ pub(crate) fn validate_page_range(value: &str) -> Result<(), WireError> {
                 _ => false,
             };
             if invalid_order {
-                return Err(WireError::bad("page_range", "Invalid page range."));
+                return Err(range_error(raw, "reversed ranges are not supported"));
             }
         }
     }
     Ok(())
 }
-fn page_endpoint(value: &str) -> Result<(bool, u32), WireError> {
+
+/// Upstream `InvalidRequestError('page_range_invalid', ...)`.
+fn range_error(raw: &str, reason: &str) -> WireError {
+    WireError::new(
+        StatusCode::BAD_REQUEST,
+        code::PAGE_RANGE_INVALID,
+        format!("Invalid page range '{raw}': {reason}"),
+        Some("page_range".to_string()),
+    )
+}
+
+fn page_endpoint(value: &str, raw: &str) -> Result<(bool, u32), WireError> {
     let (relative, digits) = value
         .strip_prefix('r')
         .map_or((false, value), |v| (true, v));
     if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(WireError::bad("page_range", "Invalid page range."));
+        return Err(range_error(
+            raw,
+            "expected a page, an inclusive range, or 'all'",
+        ));
     }
     Ok((
         relative,
         digits
             .parse()
-            .map_err(|_| WireError::bad("page_range", "Invalid page range."))?,
+            .map_err(|_| range_error(raw, "expected a page, an inclusive range, or 'all'"))?,
     ))
 }
-pub(crate) fn validate_inline_base64(data: &str) -> Result<(), WireError> {
-    if data.len() > INLINE_MAX_BYTES.div_ceil(3) * 4 {
-        return Err(WireError::too_large());
-    }
-    let bytes = data.as_bytes();
-    let padding = bytes.iter().rev().take_while(|b| **b == b'=').count();
-    if bytes.len() % 4 != 0
-        || padding > 2
-        || bytes[..bytes.len().saturating_sub(padding)]
-            .iter()
-            .any(|b| !b.is_ascii_alphanumeric() && !matches!(*b, b'+' | b'/'))
-        || bytes[bytes.len().saturating_sub(padding)..]
-            .iter()
-            .any(|b| *b != b'=')
-        || bytes.len() / 4 * 3 - padding > INLINE_MAX_BYTES
-    {
-        return Err(WireError::bad(
-            "data",
-            "Expected valid bounded base64 data.",
-        ));
-    }
-    Ok(())
+mod task;
+
+pub use task::*;
+
+// ---------------------------------------------------------------------------
+// Discovery and file objects
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HealthFeatures {
+    pub task_output_formats: Vec<&'static str>,
+    pub sources: Vec<&'static str>,
 }
-impl Pagination {
-    pub fn validate(&self, default: u16, max: u16) -> Result<u16, WireError> {
-        let limit = self.limit.unwrap_or(default);
-        if limit == 0 || limit > max {
-            return Err(WireError::bad("limit", "Pagination limit is out of range."));
+
+impl Default for HealthFeatures {
+    fn default() -> Self {
+        Self {
+            task_output_formats: TASK_OUTPUT_FORMATS.to_vec(),
+            sources: SOURCES.to_vec(),
         }
-        Ok(limit)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HealthRuntime {
+    pub device: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Health {
+    pub status: &'static str,
+    pub version: &'static str,
+    pub features: HealthFeatures,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<HealthRuntime>,
+}
+
+impl Default for Health {
+    fn default() -> Self {
+        Self {
+            status: "ok",
+            version: crate::official_worker::PACKAGE_VERSION,
+            features: HealthFeatures::default(),
+            runtime: Some(HealthRuntime { device: "cpu" }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub object: &'static str,
+    pub created: i64,
+    pub owned_by: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelListResponse {
+    pub object: &'static str,
+    pub data: Vec<ModelInfo>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TierInfo {
+    pub id: Tier,
+    pub description: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_model: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TierListResponse {
+    pub object: &'static str,
+    pub data: Vec<TierInfo>,
+}
+
+/// `FileObjectModel`.
+#[derive(Clone, Debug, Serialize)]
+pub struct FileObjectModel {
+    pub id: String,
+    pub object: &'static str,
+    pub bytes: u64,
+    pub created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    pub file_name: String,
+    pub purpose: FilePurpose,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256sum: Option<String>,
+}
+
+impl FileObjectModel {
+    pub const OBJECT: &'static str = "file";
+}
+
+/// The tier descriptions upstream publishes verbatim.
+pub fn tier_description(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Flash => "Fast local text extraction.",
+        Tier::Basic => "Basic parsing with local lightweight models.",
+        Tier::Standard => "Standard parsing for most documents.",
+        Tier::Advanced => "Advanced parsing for difficult documents.",
     }
 }
 

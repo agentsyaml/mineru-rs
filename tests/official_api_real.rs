@@ -4,7 +4,7 @@ use mineru::{
 };
 use serde_json::{Value, json};
 use std::{
-    io::Cursor,
+    io::{Cursor, Read},
     path::PathBuf,
     sync::{Arc, atomic::AtomicU64},
     time::Duration,
@@ -12,7 +12,7 @@ use std::{
 use tokio::sync::Semaphore;
 
 #[tokio::test]
-async fn official_v1_upload_job_outputs_and_leases_with_real_worker() {
+async fn official_v1_task_upload_results_and_leases_with_real_worker() {
     let Some(python) = std::env::var_os("MINERU_OFFICIAL_PYTHON").map(PathBuf::from) else {
         eprintln!("skipping official-v1 real-worker proof: MINERU_OFFICIAL_PYTHON is unset");
         return;
@@ -50,28 +50,15 @@ async fn official_v1_upload_job_outputs_and_leases_with_real_worker() {
         .json()
         .await
         .unwrap();
-    assert_eq!(health["version"], "4.0.12");
-    reject_unsafe_job(&client, &base).await;
+    assert_eq!(health["version"], "4.2.3");
+    reject_unsafe_task(&client, &base).await;
     let csv = b"name,score\nAda,99\n";
-    let upload: Value = client.post(format!("{base}/v1/uploads"))
-        .json(&json!({"filename":"scores.csv","bytes":csv.len(),"mime_type":"text/csv","purpose":"parse"}))
-        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
-    let upload_id = upload["id"].as_str().unwrap();
-    assert_eq!(upload["upload_method"], "PUT");
-    let put_url = format!("{base}{}", upload["upload_url"].as_str().unwrap());
-    assert_eq!(
-        client
-            .put(put_url)
-            .body(csv.to_vec())
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        reqwest::StatusCode::OK
-    );
-    let completed: Value = client
-        .post(format!("{base}/v1/uploads/{upload_id}/complete"))
-        .json(&json!({}))
+    let created: Value = client
+        .post(format!("{base}/v1/tasks"))
+        .json(
+            &json!({"files":[{"file_name":"scores.csv","bytes":csv.len(),"sha256sum":sha256(csv)}],
+            "tier":"flash"}),
+        )
         .send()
         .await
         .unwrap()
@@ -80,25 +67,30 @@ async fn official_v1_upload_job_outputs_and_leases_with_real_worker() {
         .json()
         .await
         .unwrap();
-    let file_id = completed["file"]["id"].as_str().unwrap().to_owned();
-    assert_eq!(
-        client
-            .get(format!("{base}/v1/files/{file_id}/content"))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        reqwest::StatusCode::FORBIDDEN
+    let task_id = created["task_id"].as_str().unwrap().to_owned();
+    let file_id = created["files"][0]["file_id"].as_str().unwrap().to_owned();
+    let upload_url = link(
+        &base,
+        created["files"][0]["upload"]["url"].as_str().unwrap(),
     );
+    assert_eq!(created["files"][0]["status"], "waiting-file");
+    let uploaded: Value = client
+        .put(upload_url)
+        .header("content-type", "application/octet-stream")
+        .body(csv.to_vec())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(uploaded["status"], "pending");
 
-    let job: Value = client.post(format!("{base}/v1/parse/jobs"))
-        .json(&json!({"files":[{"source":{"type":"file_id","file_id":file_id}}],"tier":"flash","ocr_mode":"auto",
-            "output_formats":["markdown","middle_json","structured_content","zip"]}))
-        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
-    let job_id = job["job_id"].as_str().unwrap().to_owned();
     let queued: Value = client
-        .post(format!("{base}/v1/parse/jobs"))
-        .json(&json!({"files":[{"source":{"type":"inline","name":"queued.pdf","data":"YQ=="}}]}))
+        .post(format!("{base}/v1/tasks"))
+        .json(&json!({"files":[{"file_name":"queued.pdf","bytes":1}]}))
         .send()
         .await
         .unwrap()
@@ -107,11 +99,9 @@ async fn official_v1_upload_job_outputs_and_leases_with_real_worker() {
         .json()
         .await
         .unwrap();
+    let queued_id = queued["task_id"].as_str().unwrap().to_owned();
     let canceled: Value = client
-        .delete(format!(
-            "{base}/v1/parse/jobs/{}",
-            queued["job_id"].as_str().unwrap()
-        ))
+        .post(format!("{base}/v1/tasks/{queued_id}/cancel"))
         .send()
         .await
         .unwrap()
@@ -123,27 +113,19 @@ async fn official_v1_upload_job_outputs_and_leases_with_real_worker() {
     assert_eq!(canceled["status"], "canceled");
     assert_eq!(
         client
-            .delete(format!("{base}/v1/files/{file_id}"))
+            .post(format!("{base}/v1/tasks/{queued_id}/cancel"))
             .send()
             .await
             .unwrap()
             .status(),
-        reqwest::StatusCode::OK
+        reqwest::StatusCode::CONFLICT
     );
-    assert_eq!(
-        client
-            .get(format!("{base}/v1/files/{file_id}"))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        reqwest::StatusCode::NOT_FOUND
-    );
+
     gate.add_permits(1);
     let end = tokio::time::Instant::now() + Duration::from_secs(120);
-    let result = loop {
+    let state = loop {
         let response = client
-            .get(format!("{base}/v1/parse/jobs/{job_id}"))
+            .get(format!("{base}/v1/tasks/{task_id}"))
             .send()
             .await
             .unwrap();
@@ -153,73 +135,123 @@ async fn official_v1_upload_job_outputs_and_leases_with_real_worker() {
             _ if tokio::time::Instant::now() < end => {
                 tokio::time::sleep(Duration::from_millis(200)).await
             }
-            _ => panic!("official job did not finish before deadline"),
+            _ => panic!("official task did not finish before deadline"),
         }
     };
-    assert_eq!(result["status"], "completed", "{result}");
-    let outputs = result.pointer("/files/0/output_files").unwrap();
-    for format in ["markdown", "middle_json", "structured_content", "zip"] {
-        let id = outputs[format]["file_id"].as_str().unwrap();
-        let response = client
-            .get(format!("{base}/v1/files/{id}/content"))
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap();
-        assert_eq!(
-            response.headers()[reqwest::header::CONTENT_TYPE]
-                .to_str()
-                .unwrap(),
-            "application/octet-stream"
-        );
-        assert_eq!(
-            response.headers()["x-content-type-options"]
-                .to_str()
-                .unwrap(),
-            "nosniff"
-        );
-        let bytes = response.bytes().await.unwrap();
-        assert!(!bytes.is_empty(), "empty {format} output");
-        if format == "markdown" {
-            assert!(std::str::from_utf8(&bytes).unwrap().contains("Ada"));
-        }
-        if format == "middle_json" || format == "structured_content" {
-            serde_json::from_slice::<Value>(&bytes).unwrap();
-        }
-        if format == "zip" {
-            check_zip(&bytes);
-        }
-    }
+    assert_eq!(state["status"], "completed", "{state}");
+    let file = &state["files"][0];
+    assert_eq!(file["status"], "completed");
+    assert_eq!(file["parse"]["tier"], "flash");
+    assert_eq!(file["parse"]["parser_version"], "4.2.3");
+    let result_url = file["result_url"].as_str().unwrap();
+    let response = client
+        .get(link(&base, result_url))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_TYPE]
+            .to_str()
+            .unwrap(),
+        "application/zip"
+    );
+    assert_eq!(
+        response.headers()["x-content-type-options"]
+            .to_str()
+            .unwrap(),
+        "nosniff"
+    );
+    let bytes = response.bytes().await.unwrap();
+    check_zip(&bytes);
+    let object: Value = client
+        .get(format!("{base}/v1/files/{file_id}"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(object["purpose"], "parse_output");
+    assert_eq!(object["file_name"], "scores.zip");
     let _ = stop_tx.send(());
     server.await.unwrap();
     service.shutdown().await.unwrap();
 }
 
-async fn reject_unsafe_job(client: &reqwest::Client, base: &str) {
+async fn reject_unsafe_task(client: &reqwest::Client, base: &str) {
     for body in [
-        json!({"files":[{"source":{"type":"url","url":"https://example.invalid/a.pdf"}}]}),
-        json!({"files":[{"source":{"type":"local","path":"/etc/passwd"}}]}),
-        json!({"files":[{"source":{"type":"inline","name":"a.pdf","data":"YQ=="}}],"runtime":{"python":"/tmp/python"}}),
+        json!({"files":[{"file_name":"a.pdf","url":"https://example.invalid/a.pdf","bytes":1}]}),
+        json!({"files":[{"file_name":"a.pdf","bytes":1,"local_path":"/etc/passwd"}]}),
+        json!({"files":[{"file_name":"a.pdf","bytes":1}],"runtime":{"python":"/tmp/python"}}),
+        json!({"files":[]}),
+        json!({"files":[{"file_name":"../a.pdf","bytes":1}]}),
     ] {
         let response = client
-            .post(format!("{base}/v1/parse/jobs"))
+            .post(format!("{base}/v1/tasks"))
             .json(&body)
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "{body}"
+        );
         let error: Value = response.json().await.unwrap();
-        assert!(error.get("error").is_some());
+        assert_eq!(error["error"]["code"], "invalid_request");
+        assert!(error["error"].get("type").is_none());
     }
+    let response = client
+        .post(format!("{base}/v1/tasks?tier=flash"))
+        .json(&json!({"files":[{"file_name":"a.pdf","bytes":1}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let response = client
+        .post(format!("{base}/v1/tasks"))
+        .header("content-type", "multipart/form-data")
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
 }
 
 fn check_zip(bytes: &[u8]) {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
     for name in ["markdown.md", "middle_json.json", "structured_content.json"] {
-        assert!(
-            archive.by_name(name).is_ok(),
-            "missing self-contained ZIP member {name}"
-        );
+        let mut entry = archive
+            .by_name(name)
+            .unwrap_or_else(|_| panic!("missing self-contained ZIP member {name}"));
+        let mut text = String::new();
+        entry.read_to_string(&mut text).unwrap();
+        if name == "markdown.md" {
+            assert!(text.contains("Ada"));
+        } else {
+            let _: Value = serde_json::from_str(&text).unwrap();
+        }
+    }
+}
+
+fn sha256(data: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(data)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+fn link(base: &str, raw: &str) -> String {
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw.to_owned()
+    } else {
+        format!("{base}{raw}")
     }
 }

@@ -121,7 +121,7 @@ request=$(cat)
 printf '%s' "$request" | python3 -c 'import json,os,sys; r=json.load(sys.stdin); assert os.path.isdir(r["operation_assets"])'
 request_id=$(printf '%s' "$request" | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_id"])')
 python3 -c 'import sys; sys.stderr.buffer.write(b"x" * 65537 + bytes([255]))'
-printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.0.12","schema_version":"2.0","bundle_name":"hybrid-v4","error":null}\n' "$request_id"
+printf '{"protocol":"mineru-rs-official-worker/1","request_id":"%s","status":"ok","package_version":"4.2.3","schema_version":"2.0","bundle_name":"hybrid-v4","error":null}\n' "$request_id"
 "#,
     );
     let worker = OfficialWorker::new(Some(script)).unwrap();

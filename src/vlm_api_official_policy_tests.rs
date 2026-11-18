@@ -62,14 +62,29 @@ impl PolicyTestServer {
 }
 
 async fn complete_upload(client: &reqwest::Client, base: &str) {
+    use sha2::Digest;
     let bytes = b"name,value\nalpha,1\n";
-    let upload: serde_json::Value = client.post(format!("{base}/v1/uploads"))
-        .json(&serde_json::json!({"filename":"a.csv","bytes":bytes.len(),"mime_type":"text/csv","purpose":"parse"}))
-        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
-    let id = upload["id"].as_str().unwrap();
+    let sha: String = sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let created: serde_json::Value = client
+        .post(format!("{base}/v1/tasks"))
+        .json(&serde_json::json!({"files":[{"file_name":"a.csv","bytes":bytes.len(),"sha256sum":sha}]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["task_id"].as_str().unwrap().to_owned();
+    let url = link(base, created["files"][0]["upload"]["url"].as_str().unwrap());
     assert_eq!(
         client
-            .put(format!("{base}{}", upload["upload_url"].as_str().unwrap()))
+            .put(url)
+            .header("content-type", "application/octet-stream")
             .body(bytes.to_vec())
             .send()
             .await
@@ -77,16 +92,27 @@ async fn complete_upload(client: &reqwest::Client, base: &str) {
             .status(),
         StatusCode::OK
     );
-    assert_eq!(
-        client
-            .post(format!("{base}/v1/uploads/{id}/complete"))
-            .json(&serde_json::json!({}))
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let state: serde_json::Value = client
+            .get(format!("{base}/v1/tasks/{task_id}"))
             .send()
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
-    );
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        match state["status"].as_str() {
+            Some("completed") => break,
+            Some("failed" | "partial" | "canceled") => panic!("task did not complete: {state}"),
+            _ if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await
+            }
+            _ => panic!("task timed out"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -95,12 +121,8 @@ async fn official_ingress_uses_bound_listener_public_client_policy() {
     let base = format!("http://127.0.0.1:{}", public.address.port());
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     for (method, path) in [
-        ("POST", "/v1/uploads"),
-        ("PUT", "/v1/uploads/pending/content"),
-        ("POST", "/v1/uploads/pending/complete"),
-        ("POST", "/v1/parse/jobs"),
         ("POST", "/v1/tasks"),
-        ("POST", "/v1/file_parse"),
+        ("PUT", "/v1/tasks/job_pending/uploads/file_pending"),
     ] {
         let response = raw_partial(public.address, method, path, 1_048_576).await;
         assert!(
@@ -113,13 +135,7 @@ async fn official_ingress_uses_bound_listener_public_client_policy() {
         );
         assert!(response.contains("public HTTP-client requests are disabled"));
     }
-    for path in [
-        "/v1/health",
-        "/v1/tiers",
-        "/v1/files",
-        "/v1/parse/jobs",
-        "/v1/usage",
-    ] {
+    for path in ["/v1/health", "/v1/tiers", "/v1/models", "/v1/usage"] {
         assert_eq!(
             client
                 .get(format!("{base}{path}"))
@@ -130,12 +146,9 @@ async fn official_ingress_uses_bound_listener_public_client_policy() {
             StatusCode::OK
         );
     }
-    let cancel = raw_partial(public.address, "POST", "/v1/uploads/unknown/cancel", 0).await;
-    assert!(cancel.starts_with("HTTP/1.1 404"));
+    let cancel = raw_partial(public.address, "POST", "/v1/tasks/job_unknown/cancel", 0).await;
+    assert!(cancel.starts_with("HTTP/1.1 404"), "{cancel}");
     assert!(!cancel.contains("public HTTP-client requests are disabled"));
-    let cancel_job = raw_partial(public.address, "DELETE", "/v1/parse/jobs/unknown", 0).await;
-    assert!(cancel_job.starts_with("HTTP/1.1 404"));
-    assert!(!cancel_job.contains("public HTTP-client requests are disabled"));
     for path in ["/tasks", "/file_parse"] {
         let response = raw_partial(public.address, "POST", path, 1_048_576).await;
         assert!(response.starts_with("HTTP/1.1 400"));
@@ -167,4 +180,12 @@ async fn official_ingress_uses_bound_listener_public_client_policy() {
     let loopback = start("127.0.0.1:0", false, false).await;
     complete_upload(&client, &format!("http://{}", loopback.address)).await;
     loopback.stop().await;
+}
+
+fn link(base: &str, raw: &str) -> String {
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw.to_owned()
+    } else {
+        format!("{base}{raw}")
+    }
 }

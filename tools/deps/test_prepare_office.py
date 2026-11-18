@@ -99,12 +99,8 @@ class Fixture:
         shutil.copy2(DEPS / "archive_safe.py", self.deps / "archive_safe.py")
         shutil.copy2(DEPS / "prepare_office.py", self.deps / "prepare_office.py")
         self.packages = {
-            "office2pdf": ('name = "office2pdf"\nversion = "0.6.5"\nlicense = "Apache-2.0"\nversion = "0.38"\n', "0.6.5", "Apache-2.0"),
-            "citationberg": ('name = "citationberg"\nversion = "0.6.1"\nlicense = "MIT OR Apache-2.0"\nversion = "0.38.1"\nfeatures = ["serialize", "overlapped-lists"]\n', "0.6.1", "MIT OR Apache-2.0"),
-            "umya-spreadsheet": ('name = "umya-spreadsheet"\nversion = "2.3.3"\nlicense = "MIT"\nquick-xml = { version = "0.41", features = ["serialize"] }\n', "2.3.3", "MIT"),
-            "anydoc": ('name = "anydoc"\nversion = "0.1.9"\nlicense = "MIT"\nzip = { version = "8.6.0" }\n', "0.1.9", "MIT"),
-            "calamine": ('name = "calamine"\nversion = "0.36.1"\nlicense = "MIT"\nzip = { version = "8.6" }\n', "0.36.1", "MIT"),
-            "docx-rs": ('name = "docx-rs"\nversion = "0.4.22"\nlicense = "MIT"\nzip = { version = "8.6.0" }\n', "0.4.22", "MIT"),
+            "citationberg": ('name = "citationberg"\nversion = "0.7.0"\nlicense = "MIT OR Apache-2.0"\nversion = "0.38.1"\nfeatures = ["serialize", "overlapped-lists"]\n', "0.7.0", "MIT OR Apache-2.0"),
+            "anydoc": ('name = "anydoc"\nversion = "0.2.4"\nlicense = "MIT"\nzip = { version = "8.6.0" }\n', "0.2.4", "MIT"),
         }
         self.archives = {}
         self.sources = []
@@ -124,10 +120,8 @@ class Fixture:
                 "patched_fragments": ["name = \"{}\"".format(name), 'version = "{}"'.format(version), 'license = "{}"'.format(license)],
                 "license_files": [],
             })
-        self.sources[0]["patched_fragments"].append('version = "0.41"')
-        self.sources[1]["patched_fragments"].extend(['version = "0.41.0"', '"serialize"', '"overlapped-lists"'])
-        for source in self.sources[3:]:
-            source["patched_fragments"].append('version = "9.0.5"')
+        self.sources[0]["patched_fragments"].extend(['version = "0.41.0"', '"serialize"', '"overlapped-lists"'])
+        self.sources[1]["patched_fragments"].append('version = "9.7.0"')
         self._write_metadata()
 
     def _write_metadata(self):
@@ -135,14 +129,11 @@ class Fixture:
         updated = b'pub const VALUE: &str = "after";\n'
         replacements = [["VALUE: &str = \"before\"", "VALUE: &str = \"after\"", 1]]
         files = {
-            "office2pdf/Cargo.toml": [digest(self.packages["office2pdf"][0].encode()), digest(self.packages["office2pdf"][0].replace('version = "0.38"', 'version = "0.41"').encode()), [["version = \"0.38\"", "version = \"0.41\"", 1]]],
             "citationberg/Cargo.toml": [digest(self.packages["citationberg"][0].encode()), digest(self.packages["citationberg"][0].replace('version = "0.38.1"', 'version = "0.41.0"').encode()), [["version = \"0.38.1\"", "version = \"0.41.0\"", 1]]],
-            "office2pdf/src/lib.rs": [digest(original), digest(updated), replacements],
+            "citationberg/src/lib.rs": [digest(original), digest(updated), replacements],
         }
-        for name in ("anydoc", "calamine", "docx-rs"):
-            manifest = self.packages[name][0]
-            changed = manifest.replace('version = "8.6.0"', 'version = "9.0.5"').replace('version = "8.6"', 'version = "9.0.5"')
-            files[name + "/Cargo.toml"] = [digest(manifest.encode()), digest(changed.encode()), [[manifest[manifest.index('version = "8.6'):manifest.index('version = "8.6') + len('version = "8.6.0"' if '8.6.0' in manifest else 'version = "8.6"')], 'version = "9.0.5"', 1]]]
+        manifest = self.packages["anydoc"][0]
+        files["anydoc/Cargo.toml"] = [digest(manifest.encode()), digest(manifest.replace('version = "8.6.0"', 'version = "9.7.0"').encode()), [["version = \"8.6.0\"", "version = \"9.7.0\"", 1]]]
         recipe = {"schema_version": 1, "files": files}
         recipe_bytes = (json.dumps(recipe, sort_keys=True, indent=2) + "\n").encode()
         (self.bundle / "edit_recipes.json").write_bytes(recipe_bytes)
@@ -150,17 +141,15 @@ class Fixture:
         for package, (manifest, version, license) in self.packages.items():
             path = expected / package
             (path / "src").mkdir(parents=True)
-            if package == "office2pdf":
-                manifest = manifest.replace('version = "0.38"', 'version = "0.41"')
-            elif package == "citationberg":
+            if package == "citationberg":
                 manifest = manifest.replace('version = "0.38.1"', 'version = "0.41.0"')
-            elif package in ("anydoc", "calamine", "docx-rs"):
-                manifest = manifest.replace('version = "8.6.0"', 'version = "9.0.5"').replace('version = "8.6"', 'version = "9.0.5"')
+            elif package == "anydoc":
+                manifest = manifest.replace('version = "8.6.0"', 'version = "9.7.0"')
             # Byte-exact: text-mode writes would translate \n to \r\n on Windows
             # and diverge from the LF archives and recipe hashes.
             assert "\r" not in manifest
             (path / "Cargo.toml").write_bytes(manifest.encode("utf-8"))
-            (path / "src/lib.rs").write_bytes(updated if package == "office2pdf" else original)
+            (path / "src/lib.rs").write_bytes(updated if package == "citationberg" else original)
         (expected / ".source-executable-files.json").write_bytes(b"[]\n")
         sys.path.insert(0, str(self.deps))
         try:
@@ -216,7 +205,7 @@ class PrepareOfficeTests(unittest.TestCase):
             self.module["prepare"]()
             self.module["prepare"]()
             self.module["verify"]()
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(calls), 2)
         self.assertTrue(self.module["OUTPUT"].is_dir())
         self.assertFalse(self.module["LOCK"].exists())
         self.assertFalse(any(self.module["OUTPUT"].parent.glob(".office-xml041-stage-*")))
@@ -231,7 +220,7 @@ class PrepareOfficeTests(unittest.TestCase):
         self.fixture.archives[url] = original
         recipes_path = self.fixture.bundle / "edit_recipes.json"
         recipes = json.loads(recipes_path.read_text(encoding="utf-8"))
-        recipes["files"]["office2pdf/src/lib.rs"][2][0][2] = 9
+        recipes["files"]["citationberg/src/lib.rs"][2][0][2] = 9
         recipes_path.write_text(json.dumps(recipes), encoding="utf-8")
         with self.patch_network(), self.assertRaises(self.module["PreparationError"]):
             self.module["prepare"]()
@@ -241,7 +230,7 @@ class PrepareOfficeTests(unittest.TestCase):
     def test_tree_tampering_fails_without_replacing_it(self):
         with self.patch_network():
             self.module["prepare"]()
-        victim = self.module["OUTPUT"] / "office2pdf" / "src" / "lib.rs"
+        victim = self.module["OUTPUT"] / "anydoc" / "src" / "lib.rs"
         victim.write_bytes(b"tampered\n")
         with self.assertRaises(self.module["PreparationError"]):
             self.module["verify"]()

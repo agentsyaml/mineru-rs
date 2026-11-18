@@ -5,9 +5,8 @@
 将 PDF、图像和 Office 文档解析为 Markdown。本项目提供 Rust 库、CLI 和 HTTP API
 服务，PDF 渲染由 Rust 实现。旧版 CLI/API 与 Python/Node `run`/`parse` 使用远程
 MinerU 兼容 VLM（MinerU 3.4.5 协议基线）；rich SDK 还包括 Rust 原生 CSV/TSV
-解析，其他格式使用另行准备的 Python worker。当前 worker 契约为 MinerU 4.0.12 /
-DocVortex 0.5.16；最新 DocVortex 0.6.0 仅有不加载模型的 smoke 检查。详见
-[兼容性说明](docs/compatibility.md)。
+解析，其他格式使用另行准备的 Python worker。当前 worker 契约为 MinerU 4.2.3 /
+DocVortex 0.6.24。详见[兼容性说明](docs/compatibility.md)。
 
 选择使用方式：
 
@@ -16,7 +15,7 @@ DocVortex 0.5.16；最新 DocVortex 0.6.0 仅有不加载模型的 smoke 检查�
 - **Rust CLI / API 服务**：可从 crates.io 安装；需要精确钉住的源码时也可从准备好的源码检出构建。已发布的 crate 在可选特性下带有依赖告警，见[兼容性](docs/compatibility.md#published-crate-dependency-advisories)。
 - **本地转换**：CLI `--backend local` 通过内置 Rust helper 支持干净文本 PDF 和部分旧格式；只输出 Markdown，不生成版面 JSON，也不调用 VLM。
 
-当前源码检出目标版本为 0.4.1。安装指定版本前，请查看
+当前源码检出目标版本为 0.5.0。安装指定版本前，请查看
 [发布指南](docs/releasing.md#current-release-boundary)确认软件包和发布可用性。
 
 详细说明：[使用指南](docs/usage.md)、[兼容性](docs/compatibility.md)、
@@ -75,7 +74,7 @@ npx --yes --package="@alexsun-top/mineru@$version" -- mineru-rs -p input.pdf -o 
 
 ## CLI 和 API 服务端
 
-Rust 1.89+ CLI 可从 crates.io 安装：
+Rust 1.92+ CLI 可从 crates.io 安装：
 
 ```sh
 cargo install mineru --locked --features office,legacy-office
@@ -109,7 +108,7 @@ API 没有内置认证或任务所有权。请仅绑定 loopback，或置于带�
 
 ## 从源码构建
 
-需要 Rust 1.89+ 和 Python 3.9+。在工作区运行任何 Cargo 命令前，先准备依赖：
+需要 Rust 1.92+ 和 Python 3.9+。在工作区运行任何 Cargo 命令前，先准备依赖：
 
 ```sh
 git clone https://github.com/agentsyaml/mineru-rs

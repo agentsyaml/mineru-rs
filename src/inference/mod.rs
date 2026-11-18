@@ -214,7 +214,7 @@ fn preprocess(image: &DynamicImage) -> Result<(Vec<f32>, (f32, f32)), InferenceE
     let (w, h) = image.dimensions();
     validate_image_dimensions(w, h)?;
     let rgb = image.to_rgb8();
-    // Fixed 800x800 with keep_ratio=false, matching MinerU 4.0.12 upstream.
+    // Fixed 800x800 with keep_ratio=false, matching MinerU 4.2.3 upstream.
     let resized = resize::resize_bicubic(rgb.as_raw(), w as usize, h as usize, 800, 800, 3);
     let mut chw = vec![0f32; (3 * SIDE * SIDE) as usize];
     // Quantization uses the same float32 reciprocal as upstream (`* 1/255`).

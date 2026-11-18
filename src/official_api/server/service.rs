@@ -1,23 +1,17 @@
 use super::{jobs, store::OfficialFileStore};
-use crate::official::{
-    OfficialError, OfficialOcrMode, OfficialParser, OfficialRuntime, OfficialTier,
-};
+use crate::official::{OfficialError, OfficialParser, OfficialRuntime};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
-use tokio::{
-    sync::{Mutex as AsyncMutex, Notify},
-    task::JoinHandle,
-};
+use tokio::{sync::Notify, task::JoinHandle};
 
 pub(super) struct ServiceInner {
     pub parser: OfficialParser,
     pub store: OfficialFileStore,
-    pub jobs: Mutex<HashMap<String, Arc<AsyncMutex<JobRecord>>>>,
     pub queue: Mutex<VecDeque<String>>,
     pub notify: Notify,
     pub cancel_notify: Notify,
@@ -37,32 +31,7 @@ pub(super) struct ServiceInner {
         )>,
     >,
     #[cfg(test)]
-    pub publication_pause: Mutex<
-        Option<(
-            tokio::sync::oneshot::Sender<()>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>,
-    >,
-    #[cfg(test)]
     pub stop_waiting: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-}
-pub(super) struct JobRecord {
-    pub response: crate::official_api::wire::JobResponse,
-    pub files: Vec<PreparedFile>,
-    pub cancel: Arc<AtomicBool>,
-    pub _slot: tokio::sync::OwnedSemaphorePermit,
-    pub _metadata: Arc<super::store::MetadataReservation>,
-    pub _artifact_budget: Arc<super::store::Reservation>,
-    pub expiry: Option<i64>,
-    pub ocr_mode: OfficialOcrMode,
-}
-#[derive(Clone)]
-pub(super) struct PreparedFile {
-    pub file_id: Option<String>,
-    pub name: String,
-    pub data: bytes::Bytes,
-    pub page_range: Option<String>,
-    pub tier: OfficialTier,
 }
 struct Lifecycle {
     runner: Option<JoinHandle<()>>,
@@ -80,7 +49,6 @@ impl OfficialService {
                 parser,
                 ingest_slots: Arc::new(tokio::sync::Semaphore::new(store.ingest_concurrency())),
                 store,
-                jobs: Mutex::new(HashMap::new()),
                 queue: Mutex::new(VecDeque::new()),
                 notify: Notify::new(),
                 cancel_notify: Notify::new(),
@@ -94,35 +62,21 @@ impl OfficialService {
                 #[cfg(test)]
                 runner_empty_pause: Mutex::new(None),
                 #[cfg(test)]
-                publication_pause: Mutex::new(None),
-                #[cfg(test)]
                 stop_waiting: Mutex::new(None),
             }),
             lifecycle: Arc::new(Mutex::new(Lifecycle { runner: None })),
         })
     }
     pub fn router(&self) -> axum::Router {
-        let body_cap = self.inner.store.body_cap();
-        let ingest_cap = self.inner.store.ingest_body_cap();
-        let job_routes = axum::Router::new()
-            .route(
-                "/v1/parse/jobs",
-                axum::routing::post(super::ingestion::create_job).get(jobs::list),
-            )
-            .route(
-                "/v1/parse/jobs/{id}",
-                axum::routing::get(jobs::get).delete(jobs::cancel),
-            )
-            .with_state(self.inner.clone())
-            .layer(axum::extract::DefaultBodyLimit::max(ingest_cap));
         axum::Router::new()
             .merge(super::super::official_files_router(
                 self.inner.store.clone(),
             ))
-            .merge(job_routes)
             .merge(super::tasks::router(self.inner.clone()))
             .merge(super::discovery::router(self.inner.clone()))
-            .layer(axum::extract::DefaultBodyLimit::max(body_cap))
+            .layer(axum::extract::DefaultBodyLimit::max(
+                self.inner.store.body_cap(),
+            ))
     }
     pub fn start(&self) -> Result<(), OfficialError> {
         if self.inner.started.swap(true, Ordering::AcqRel) {
@@ -135,20 +89,19 @@ impl OfficialService {
         self.lifecycle.lock().map_err(|_| internal())?.runner = Some(task);
         Ok(())
     }
-    pub fn cleanup_expired(&self) {
+    pub async fn cleanup_expired(&self) {
         self.inner.store.cleanup_expired();
-        if let Ok(mut jobs) = self.inner.jobs.lock() {
-            let now = super::store::OfficialFileStore::now();
-            jobs.retain(|_, job| {
-                Arc::strong_count(job) > 1
-                    || job
-                        .try_lock()
-                        .map(|j| {
-                            matches!(j.response.status.as_str(), "queued" | "running")
-                                || j.expiry.is_none_or(|expiry| expiry > now)
-                        })
-                        .unwrap_or(true)
-            });
+        let tasks: Vec<_> = self
+            .inner
+            .store
+            .inner
+            .tasks
+            .lock()
+            .map(|tasks| tasks.values().cloned().collect())
+            .unwrap_or_default();
+        for task in tasks {
+            let mut task = task.lock().await;
+            self.inner.store.expire_uploads(&mut task);
         }
     }
     pub fn stop_admissions(&self) {
@@ -177,28 +130,30 @@ impl OfficialService {
                 .accepting
                 .store(false, Ordering::Release);
         }
-        if let Ok(jobs) = self.inner.jobs.lock() {
-            for job in jobs.values() {
-                if let Ok(record) = job.try_lock()
-                    && matches!(record.response.status.as_str(), "queued" | "running")
-                {
-                    record.cancel.store(true, Ordering::Release);
-                }
-            }
-        }
         self.inner.notify.notify_waiters();
         self.inner.cancel_notify.notify_waiters();
     }
     pub async fn shutdown(&self) -> Result<(), OfficialError> {
         self.stop_admissions();
+        let tasks: Vec<_> = self
+            .inner
+            .store
+            .inner
+            .tasks
+            .lock()
+            .map_err(|_| internal())?
+            .values()
+            .cloned()
+            .collect();
+        for task in tasks {
+            let mut task = task.lock().await;
+            jobs::cancel_task(&self.inner, &mut task);
+        }
         let runner = self.lifecycle.lock().map_err(|_| internal())?.runner.take();
         if let Some(runner) = runner {
             runner.await.map_err(|_| internal())?;
         }
         self.inner.parser.shutdown().await?;
-        if let Ok(mut jobs) = self.inner.jobs.lock() {
-            jobs.clear();
-        }
         self.inner.store.clear_retained();
         Ok(())
     }
@@ -215,7 +170,7 @@ async fn runner(inner: Arc<ServiceInner>) {
         let notified = inner.notify.notified();
         let id = inner.queue.lock().ok().and_then(|mut q| q.pop_front());
         if let Some(id) = id {
-            jobs::run_job(inner.clone(), id).await;
+            jobs::run_task(inner.clone(), id).await;
             continue;
         }
         #[cfg(test)]

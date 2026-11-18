@@ -1,134 +1,29 @@
-use super::store::{Entry, OfficialFileStore};
-use crate::official_api::wire::{FileDeletion, FileObject, ListOrder, ListResponse, WireError};
+use super::store::OfficialFileStore;
+use crate::official_api::wire::{FileObjectModel, WireError};
 use axum::{
     Json,
     body::Body,
-    extract::{Path, Query, State, rejection::QueryRejection},
+    extract::{Path, State},
     http::{HeaderValue, StatusCode, header},
     response::Response,
 };
-use serde::Deserialize;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct FileQuery {
-    #[serde(default)]
-    after: Option<String>,
-    #[serde(default)]
-    limit: Option<u16>,
-    #[serde(default)]
-    order: Option<ListOrder>,
-    #[serde(default)]
-    purpose: Option<String>,
-}
-
-pub(super) async fn list(
-    State(store): State<OfficialFileStore>,
-    query: Result<Query<FileQuery>, QueryRejection>,
-) -> Result<Json<ListResponse<FileObject>>, WireError> {
-    store.cleanup_expired();
-    let Query(query) = query.map_err(|_| WireError::bad("query", "Invalid file list query."))?;
-    if query
-        .purpose
-        .as_ref()
-        .is_some_and(|p| !matches!(p.as_str(), "parse" | "input_image"))
-    {
-        return Err(WireError::bad("purpose", "Unsupported file purpose."));
-    }
-    let page = crate::official_api::wire::Pagination {
-        after: query.after,
-        limit: query.limit,
-        order: query.order,
-    };
-    let limit = page.validate(100, 1000)? as usize;
-    let map = store.inner.entries.lock().map_err(|_| internal())?;
-    let mut data: Vec<_> = map
-        .values()
-        .filter_map(|v| match v {
-            Entry::File(f)
-                if query
-                    .purpose
-                    .as_ref()
-                    .is_none_or(|p| p == &f.object.purpose) =>
-            {
-                Some(f.object.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    data.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
-    if matches!(page.order, Some(ListOrder::Desc)) {
-        data.reverse();
-    }
-    if let Some(after) = &page.after
-        && let Some(i) = data.iter().position(|f| &f.id == after)
-    {
-        data.drain(..=i);
-    }
-    let has_more = data.len() > limit;
-    data.truncate(limit);
-    let first_id = data.first().map(|f| f.id.clone());
-    let last_id = data.last().map(|f| f.id.clone());
-    Ok(Json(ListResponse {
-        object: "list",
-        data,
-        first_id,
-        last_id,
-        has_more,
-    }))
-}
 pub(super) async fn get(
     State(store): State<OfficialFileStore>,
     Path(id): Path<String>,
-) -> Result<Json<FileObject>, WireError> {
+) -> Result<Json<FileObjectModel>, WireError> {
     store.cleanup_expired();
     store.file(&id).map(Json).ok_or_else(not_found)
 }
-pub(super) async fn delete(
-    State(store): State<OfficialFileStore>,
-    Path(id): Path<String>,
-) -> Result<Json<FileDeletion>, WireError> {
-    store.cleanup_expired();
-    let entry = {
-        let mut entries = store.inner.entries.lock().map_err(|_| internal())?;
-        if !matches!(entries.get(&id), Some(Entry::File(_))) {
-            return Err(not_found());
-        }
-        entries.remove(&id).ok_or_else(not_found)?
-    };
-    match entry {
-        Entry::File(file) => {
-            drop(file);
-            Ok(Json(FileDeletion {
-                id,
-                object: "file",
-                deleted: true,
-            }))
-        }
-        Entry::Upload(_) => unreachable!("entry type checked while holding the lock"),
-    }
-}
+
 pub(super) async fn content(
     State(store): State<OfficialFileStore>,
     Path(id): Path<String>,
 ) -> Result<Response, WireError> {
     store.cleanup_expired();
-    let (bytes, name, source) = {
-        let map = store.inner.entries.lock().map_err(|_| internal())?;
-        match map.get(&id) {
-            Some(Entry::File(f)) => (f.bytes.clone(), f.object.filename.clone(), f.source),
-            _ => return Err(not_found()),
-        }
-    };
-    if source {
-        return Err(WireError {
-            status: StatusCode::FORBIDDEN,
-            code: "file_not_downloadable",
-            message: "Source file content is not available for download.",
-            param: None,
-        });
-    }
-    let safe: String = name
+    let (object, bytes) = store.content(&id).ok_or_else(not_found)?;
+    let safe: String = object
+        .file_name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
         .take(128)
@@ -137,11 +32,11 @@ pub(super) async fn content(
         "attachment; filename=\"{}\"",
         if safe.is_empty() { "artifact" } else { &safe }
     ))
-    .map_err(|_| internal())?;
+    .map_err(|_| WireError::internal())?;
     let mut response = Response::new(Body::from(bytes));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
+        HeaderValue::from_static(media_type(&object.file_name)),
     );
     response
         .headers_mut()
@@ -152,23 +47,29 @@ pub(super) async fn content(
     );
     Ok(response)
 }
-fn not_found() -> WireError {
-    WireError {
-        status: StatusCode::NOT_FOUND,
-        code: "not_found",
-        message: "The requested resource was not found.",
-        param: None,
-    }
-}
-fn internal() -> WireError {
-    WireError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "server_error",
-        message: "The request could not be processed.",
-        param: None,
+
+fn media_type(name: &str) -> &'static str {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "zip" => "application/zip",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "html" => "text/html",
+        "tex" => "text/plain; charset=utf-8",
+        "md" | "json" => "application/octet-stream",
+        _ => "application/octet-stream",
     }
 }
 
-#[cfg(test)]
-#[path = "files/tests.rs"]
-mod tests;
+fn not_found() -> WireError {
+    WireError::new(
+        StatusCode::NOT_FOUND,
+        "file_not_found",
+        "The requested file was not found.",
+        None,
+    )
+}
