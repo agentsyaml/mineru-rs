@@ -199,17 +199,22 @@ with open advisories. Default features and `local-inference` are clean.
 
 `office` (2 findings): `citationberg` 0.7.0 pulls `quick-xml` 0.38.4, which
 carries RUSTSEC-2026-0194 and RUSTSEC-2026-0195.
-`legacy-office` (4 findings): `anydoc` 0.2.4 pulls `zip` 8.6.0, which carries
-RUSTSEC-2026-0367, RUSTSEC-2026-0368, RUSTSEC-2026-0369, and
-RUSTSEC-2026-0429.
+`legacy-office` (8 findings): `anydoc` 0.2.4 pulls `zip` 8.6.0, which carries
+RUSTSEC-2026-0367, RUSTSEC-2026-0368, RUSTSEC-2026-0369, RUSTSEC-2026-0429,
+RUSTSEC-2026-0545, RUSTSEC-2026-0546, RUSTSEC-2026-0547, and
+RUSTSEC-2026-0548. Every `zip` advisory is fixed in 9.0.0 except
+RUSTSEC-2026-0548, fixed in 9.0.5.
 
 Reachability, audited against the resolved sources:
 
-- The four `zip` findings all concern `ZipArchive::extract`,
-  `ZipStreamReader::extract`, and symlink-target allocation inside `extract`.
-  None of the Office dependencies calls those APIs, and this crate extracts
-  archives with `zip` 9.7.0 through its own bounded reader. Those findings are
-  not reachable through this crate.
+- The eight `zip` findings concern `ZipArchive::extract` and
+  `ZipStreamReader::extract` (path traversal, symlink-target allocation, and
+  local-header name mismatch), an unchecked AES HMAC in `by_name_decrypt` under
+  the `aes-crypto` feature, and `legacy-zip` decoders preallocating a declared
+  uncompressed size. None of the Office dependencies enables `aes-crypto` or
+  `legacy-zip` and none calls `extract`, `by_name_decrypt`, or
+  `ZipStreamReader`; this crate extracts archives with `zip` 9.7.0 through its
+  own bounded reader. Those findings are not reachable through this crate.
 - The two `quick-xml` findings are parsing denial of service: quadratic
   duplicate-attribute checking and unbounded namespace-declaration allocation.
   They enter the `office` feature through `typst` -> `hayagriva` ->

@@ -8,8 +8,12 @@ import tomllib
 from pathlib import Path
 from typing import NoReturn
 
+# Informational-only "unmaintained" notices that no dependency bump can clear.
+# chrono arrives through lopdf (pdf-inspector) and office2pdf-umya-spreadsheet;
+# every version is affected and upstream names no patched release.
 WARNINGS = {
     ("RUSTSEC-2025-0141", "bincode", "1.3.3"),
+    ("RUSTSEC-2026-0543", "chrono", "0.4.45"),
     ("RUSTSEC-2024-0436", "paste", "1.0.15"),
     ("RUSTSEC-2026-0206", "rustybuzz", "0.20.1"),
     ("RUSTSEC-2026-0192", "ttf-parser", "0.25.1"),
@@ -90,6 +94,10 @@ PUBLISHED_VULNERABILITIES = {
     ("RUSTSEC-2026-0367", "zip", "8.6.0"),
     ("RUSTSEC-2026-0368", "zip", "8.6.0"),
     ("RUSTSEC-2026-0369", "zip", "8.6.0"),
+    ("RUSTSEC-2026-0545", "zip", "8.6.0"),
+    ("RUSTSEC-2026-0546", "zip", "8.6.0"),
+    ("RUSTSEC-2026-0547", "zip", "8.6.0"),
+    ("RUSTSEC-2026-0548", "zip", "8.6.0"),
 }
 
 
@@ -264,7 +272,7 @@ def main():
         return
     if args.command == "published":
         check_published(load_report(args.report), args.audit_status)
-        print("published crate carries exactly the documented 6 advisories")
+        print(f"published crate carries exactly the documented {len(PUBLISHED_VULNERABILITIES)} advisories")
         return
     try:
         report = load_report(args.report)

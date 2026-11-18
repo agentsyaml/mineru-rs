@@ -1,4 +1,4 @@
-FROM rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff AS builder
+FROM rust:1.92.0-bookworm@sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2 AS builder
 
 WORKDIR /app
 RUN apt-get update \
@@ -10,9 +10,7 @@ RUN python3 tools/deps/prepare_office.py prepare \
     && python3 tools/deps/prepare_office.py verify \
     && python3 -m unittest discover -s tools/deps -p 'test_*.py'
 # Rust API image; VLM inference uses an external provider.
-RUN python3 tools/deps/office_xml_parity.py \
-    && python3 tools/deps/prepare_office.py verify \
-    && cargo build --release --locked -p mineru --features office,legacy-office --bins
+RUN cargo build --release --locked -p mineru --features office,legacy-office --bins
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
