@@ -243,6 +243,10 @@ jobs:
       - name: Install and smoke-test wheel
         run: |
           python -m pip install --force-reinstall dist/python/*.whl
+          # The console script runs the Rust CLI inside the extension module; an
+          # exit-time crash only surfaces as a non-zero status here.
+          python -c "import mineru_rs"
+          PYTHONFAULTHANDLER=1 mineru --help > /dev/null
           python - <<'PY'
           import mineru_rs
 
