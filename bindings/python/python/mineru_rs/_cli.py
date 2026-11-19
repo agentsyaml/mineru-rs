@@ -26,12 +26,25 @@ async def _invoke() -> int:
     return await _native._run_cli(_argv(), _helper_path())
 
 
+def _exit(code: int) -> int:
+    # Interpreter teardown has segfaulted after a complete run on some manylinux
+    # runners, turning a successful command into status 139. The CLI owns the
+    # process, so flush what is buffered and leave without running teardown.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, ValueError):
+            pass
+    os._exit(code)
+
+
 def main() -> int:
     try:
-        return asyncio.run(_invoke())
+        code = asyncio.run(_invoke())
     except (KeyboardInterrupt, asyncio.CancelledError):
         _restore_terminal()
-        return 130 if os.name != "nt" else 1
+        code = 130 if os.name != "nt" else 1
     except RuntimeError as error:
         print(f"mineru: {error}", file=sys.stderr)
-        return 1
+        code = 1
+    return _exit(code)
